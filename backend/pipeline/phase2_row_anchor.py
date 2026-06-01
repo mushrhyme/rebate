@@ -31,6 +31,8 @@ _RE_TOTAL_CELL     = re.compile(r'計[：:]')
 _HEADER_KEYWORDS = (
     '計上場所', '入出荷支店', '入出荷センター',
     '得意先', '管理No', '得意先又は商品', '整数部', '小数部',
+    # 各ページ冒頭の文書ヘッダ行（請求書No./作成日/支払予定日 等）
+    '請求書', '作成日', 'ご請求期', 'お支払予定', '未収取扱', '発行元', '販売促進', '項目',
 )
 
 
@@ -95,6 +97,11 @@ def build_row_anchors_form04(output_dir: Path) -> list[dict]:
             role = hint_m.group(1).lower()
             if role in ('cover', 'summary', 'payment_form'):
                 continue
+
+        # 페이지 경계에서 current_kanri 리셋 — 이전 페이지에서 이어진 kanri 상태가
+        # 다음 페이지 상단의 문서 헤더 행을 product anchor로 잘못 등록하는 것을 방지
+        current_kanri = None
+        row_idx = 0
 
         for line in content.splitlines():
             if '|' not in line:

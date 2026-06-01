@@ -592,6 +592,7 @@ def _dedup_after_recovery(items: list[dict]) -> list[dict]:
         else:
             key = hashlib.md5(
                 json.dumps({
+                    'kanri_no': item.get('kanri_no', ''),
                     'customer': item.get('customer', ''),
                     'product':  item.get('product', ''),
                     'columns':  item.get('columns', {}),
@@ -627,6 +628,34 @@ async def run_phase2_verify(
     # ── 1차: row anchor 커버리지 검증 (form_04) ──────────────────────
     anchors = load_row_anchors(output_dir)
     if anchors:
+        # ── 1-0: anchor에 없는 row_id를 가진 phantom item 제거 ──────
+        # anchor는 Python이 MD에서 확정한 실제 제품 행 목록.
+        # LLM이 row_id를 임의로 붙인 phantom item(존재하지 않는 행)을
+        # 코드 레벨에서 확실히 제거한다.
+        valid_row_ids = {a['row_id'] for a in anchors}
+        phantom_removed = 0
+        cleaned: list[dict] = []
+        for item in items:
+            rid = item.get('row_id')
+            if rid and rid not in valid_row_ids:
+                logger.warning(
+                    "[%s] phantom item 제거 — row_id=%s kanri_no=%s product=%s 金額=%s",
+                    doc_id, rid, item.get('kanri_no'), item.get('product'),
+                    item.get('columns', {}).get('金額'),
+                )
+                phantom_removed += 1
+            else:
+                cleaned.append(item)
+        if phantom_removed:
+            logger.warning("[%s] phantom items %d개 제거", doc_id, phantom_removed)
+            items = cleaned
+            phase2_result['items'] = items
+            # 파일을 즉시 기록 — 이후 anchor 복구가 없어도 phantom 제거가 반영되도록
+            out_path = output_dir / "phase2_output.json"
+            out_path.write_text(
+                json.dumps(phase2_result, ensure_ascii=False, indent=2), encoding='utf-8'
+            )
+
         # not_item 더미 행 제외한 실제 item만으로 kanri 집계
         real_items = [it for it in items if not it.get('not_item')]
         items_by_kanri_for_anchor: dict[str, list[dict]] = {}
