@@ -5,6 +5,7 @@ service_account*.json
 *.env
 .env
 .env.*
+!*.env.example
 .envrc
 
 # Python

@@ -1,0 +1,46 @@
+[project]
+name = "rebate"
+version = "0.1.0"
+description = "PDF 청구서 분석 파이프라인 — Azure OCR + Claude AI + FastAPI"
+requires-python = "==3.11.*"
+
+dependencies = [
+    # Web framework
+    "fastapi==0.128.0",
+    "uvicorn[standard]==0.40.0",
+    "python-multipart==0.0.21",
+    "sse-starlette==3.4.4",
+
+    # Database
+    "asyncpg==0.31.0",
+    "psycopg2-binary==2.9.11",
+
+    # Auth
+    "bcrypt==5.0.0",
+    "passlib==1.7.4",
+
+    # Config / util
+    "python-dotenv==1.2.1",
+    "pydantic==2.12.5",
+    "pydantic-settings==2.12.0",
+    "aiofiles==25.1.0",
+    "httpx==0.28.1",
+
+    # AI / OCR
+    "anthropic==0.77.0",
+    "azure-ai-formrecognizer==3.3.3",
+    "pymupdf==1.26.7",
+
+    # Google Drive
+    "google-api-python-client==2.188.0",
+    "google-auth-oauthlib==1.3.1",
+    "google-auth-httplib2==0.3.0",
+
+    # Data
+    "pandas==2.3.3",
+    "openpyxl==3.1.5",
+]
+
+[tool.uv]
+# uv sync 로 가상환경 생성 및 패키지 설치
+# uv run uvicorn backend.main:app --reload  로 서버 실행

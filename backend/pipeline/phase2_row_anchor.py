@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 _RE_KANRI_HEADER   = re.compile(r'管理No\s*[：:]\s*(\d{5,8})')
 _RE_CONDITION_TYPE = re.compile(r'(定番条件|原価引き条件|導入条件)')
-_RE_JISHO          = re.compile(r'入出荷支店\s*[：:]\s*([^|]+)')
+_RE_JISHO          = re.compile(r'入出荷支店\s*[：:]\s*(\S+)')
 _RE_TOTAL_CELL     = re.compile(r'計[：:]')
 
 _HEADER_KEYWORDS = (
