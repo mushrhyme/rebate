@@ -64,7 +64,28 @@ psql -U postgres -c "CREATE DATABASE rebate_db_v2;"
 psql -U postgres -d rebate_db_v2 -f backend/db/schema.sql
 ```
 
-### 5. 프론트엔드
+### 5. 사용자 데이터 마이그레이션
+
+```bash
+# mappings/users_import.csv 의 사용자 목록을 DB에 일괄 등록
+# 초기 비밀번호 = 사번(username), 첫 로그인 시 변경 강제
+uv run python -m scripts.import_users
+```
+
+`mappings/users_import.csv` 형식:
+
+| 열 | 설명 |
+|----|------|
+| ID | username (사번 또는 `admin`) |
+| 이름(한글) | display_name |
+| 名前(日本語) | display_name_ja |
+| 부서명(한글) / 部署(日本語) | department |
+| 권한 | `관리자` → is_admin=TRUE, 나머지 → FALSE |
+| 분류 | `관리` / `영업` / `영업관리` 등 |
+
+신규 사용자 추가 시에도 CSV에 행을 추가한 뒤 같은 스크립트를 재실행하면 됩니다 (기존 사용자는 skip).
+
+### 6. 프론트엔드
 
 ```bash
 cd frontend
