@@ -1,0 +1,117 @@
+{
+  "form_01": {
+    "label": "FINET 買掛金特別値引請求明細書",
+    "bara_source": "by_unit",
+    "preprocess": [],
+    "net": {
+      "formula": "subtract_conditions",
+      "c1": "条件",
+      "c2": null,
+      "cs_divide_by_case_qty": true,
+      "no_net_kubun": ["円"]
+    },
+    "condition_display": {
+      "mode": "by_kubun",
+      "kubun_field": "条件区分",
+      "pack_kubun": "個",
+      "keesu_kubun": "CS",
+      "c1": "条件",
+      "c2": null
+    },
+    "cover_totals": {},
+    "cross_validation": [
+      {
+        "type": "cover_taxex_vs_detail",
+        "label": "Cover(税抜合計) vs Detail(税抜)",
+        "cover_key_8": "販促金請求 8%対象 税抜",
+        "cover_key_10": "販促金請求 10%対象 税抜"
+      },
+      {
+        "type": "cover_total_vs_summary",
+        "label": "Cover(税込合計) vs Summary合計",
+        "cover_key": "販促金請求 今回請求金額合計"
+      },
+      {
+        "type": "per_customer_vs_summary",
+        "label": "得意先 {key}"
+      }
+    ],
+    "show_sections": ["rate_summary", "xv"],
+    "aggregate_label": "소매처별 집계",
+    "summary": "rate_then_customer",
+    "summary_cover_keys": {
+      "hasso":    "販促金請求 今回請求金額合計",
+      "yakumu":   "役務提供 今回請求金額合計",
+      "tax_8":    "販促金請求 8%対象 消費税",
+      "tax_10":   "販促金請求 10%対象 消費税",
+      "taxex_8":  "販促金請求 8%対象 税抜",
+      "taxex_10": "販促金請求 10%対象 税抜"
+    }
+  },
+  "form_02": {
+    "label": "야마에구미",
+    "bara_source": "column:契約No対象の取引数量合計（総数：内数）",
+    "preprocess": [],
+    "net": {
+      "formula": "subtract_conditions",
+      "c1": "リベート条件",
+      "c2": null,
+      "cs_divide_by_case_qty": false
+    },
+    "condition_display": {
+      "mode": "keesu",
+      "c1": "リベート条件",
+      "c2": null
+    },
+    "cover_totals": {},
+    "cross_validation": [
+      {
+        "type": "cover_honbai_vs_detail",
+        "label": "Cover(税抜金額) vs Detail",
+        "cover_key": "税抜金額"
+      }
+    ],
+    "show_sections": ["xv", "retailer"],
+    "aggregate_label": "소매처별 집계",
+    "summary": "standard"
+  },
+  "form_04": {
+    "label": "日本アクセス 販売促進金請求書 (CVS)",
+    "bara_source": "column:数量",
+    "preprocess": [],
+    "net": {
+      "formula": "subtract_teiban_and_self",
+      "self_field": "未収条件",
+      "teiban_type": "定番条件"
+    },
+    "condition_display": {
+      "mode": "keesu",
+      "c1": "未収条件",
+      "c2": null
+    },
+    "cover_totals": {
+      "breakdown_key": "入出荷支店別"
+    },
+    "cross_validation": [
+      {
+        "type": "cover_honbai_vs_detail",
+        "label": "Cover(全請求書 本体合計) vs Detail",
+        "cover_key": "本体合計金額"
+      },
+      {
+        "type": "cover_breakdown_vs_detail",
+        "label": "支店 {key}",
+        "cover_breakdown_key": "入出荷支店別",
+        "detail_group_field": "jisho"
+      }
+    ],
+    "show_sections": ["xv"],
+    "aggregate_label": "거래처별 집계",
+    "summary": "invoice_totals",
+    "summary_cover_keys": {
+      "honbai": "本体合計金額",
+      "tax":    "消費税金額",
+      "total":  "合計ご請求金額"
+    }
+  }
+}

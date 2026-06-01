@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+:root {
+  --primary: #0a6e6e;
+  --primary-dark: #085858;
+  --primary-light: #e8f4f4;
+  --bg: #f5f0e8;
+  --card: #faf8f4;
+  --sidebar: #1a1a1a;
+  --text-1: #1a1512;
+  --text-2: #68635e;
+  --text-3: #a8a49f;
+  --border: #ddd8d0;
+  --success: #2d7d4a;
+  --warning: #c4622c;
+  --error: #b03030;
+  --shadow-sm: 0 1px 3px rgba(26,21,18,0.06), 0 1px 2px rgba(26,21,18,0.04);
+  --shadow-md: 0 4px 16px rgba(26,21,18,0.08);
+  --mono: 'JetBrains Mono', 'Courier New', monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Pretendard Variable', Pretendard, -apple-system, BlinkMacSystemFont,
+    'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif;
+  background: var(--bg);
+  color: var(--text-1);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root { height: 100vh; }
+
+/* Markdown renderer */
+.md-content { font-size: 13px; line-height: 1.75; color: var(--text-1); }
+.md-content h1 { font-size: 17px; font-weight: 700; margin: 0 0 16px; color: var(--text-1); }
+.md-content h2 { font-size: 14px; font-weight: 700; margin: 28px 0 10px; color: var(--text-1); padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.md-content h3 { font-size: 13px; font-weight: 600; margin: 20px 0 8px; color: var(--text-2); }
+.md-content p { margin: 0 0 10px; }
+.md-content ul, .md-content ol { margin: 0 0 10px; padding-left: 20px; }
+.md-content li { margin-bottom: 4px; }
+.md-content hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+.md-content strong { font-weight: 600; color: var(--text-1); }
+.md-content code { font-family: var(--mono); font-size: 11.5px; background: #ede9e1; color: var(--primary); padding: 1px 5px; border-radius: 4px; }
+.md-content pre { background: #1a1a1a; border-radius: 9px; padding: 16px 18px; margin: 10px 0 16px; overflow-x: auto; }
+.md-content pre code { background: none; color: #d4cfca; font-size: 11.5px; padding: 0; }
+.md-content table { width: 100%; border-collapse: collapse; margin: 10px 0 16px; font-size: 12px; }
+.md-content th { background: #ede9e1; color: var(--text-2); font-weight: 600; padding: 7px 12px; text-align: left; border: 1px solid var(--border); font-size: 11px; }
+.md-content td { padding: 7px 12px; border: 1px solid var(--border); color: var(--text-1); vertical-align: top; }
+.md-content td:has(> span) { }
+.md-content tr:nth-child(even) td { background: #faf8f4; }
