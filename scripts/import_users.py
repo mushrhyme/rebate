@@ -2,8 +2,8 @@
 users_import.csv → DB 최초 INSERT 스크립트.
 
 실행:
-    cd /Users/nongshim/Desktop/Python/lesson/Lecture
-    python -m scripts.import_users
+    cd <프로젝트 루트>
+    uv run python -m scripts.import_users
 
 권한 열 매핑:
     관리자 → is_admin = TRUE
@@ -25,7 +25,7 @@ ENV_PATH = ROOT / "backend" / ".env"
 def _load_db_url() -> str:
     env = {}
     if ENV_PATH.exists():
-        for line in ENV_PATH.read_text().splitlines():
+        for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
             if "=" in line and not line.startswith("#"):
                 k, _, v = line.partition("=")
                 env[k.strip()] = v.strip()
