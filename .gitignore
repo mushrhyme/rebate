@@ -5,6 +5,7 @@ service_account*.json
 *.env
 .env
 .env.*
+.envrc
 
 # Python
 __pycache__/
@@ -17,6 +18,29 @@ build/
 .venv/
 venv/
 env/
+ENV/
+*.egg
+MANIFEST
+*.so
+.Python
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+sdist/
+wheels/
+.installed.cfg
+
+# Test / coverage
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.hypothesis/
 
 # Node / React
 node_modules/
@@ -33,6 +57,10 @@ samples/*_pages/
 *.swp
 *.swo
 .DS_Store
+.ruff_cache/
+.mypy_cache/
+.pytype/
+.pyre/
 
 # 로그
 *.log
