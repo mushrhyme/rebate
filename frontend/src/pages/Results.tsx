@@ -1282,11 +1282,21 @@ export function Results() {
                       const retailer    = row.スーパー ?? '—'
                       const distCode    = row.受注先コード ?? ''
                       const dist        = row.受注先 ?? '—'
+                      const highlightKey = row.jisho || row.product_ocr || row.customer_ocr || null
+                      const warnBg = (row.unconfirmed || row.net_lt_honbu)
                       return (
-                        <tr key={i} style={{
-                          borderBottom: '1px solid #f1f3f5',
-                          background: (row.unconfirmed || row.net_lt_honbu) ? '#fff8e1' : 'transparent',
-                        }}>
+                        <tr key={i}
+                          onClick={() => {
+                            if (row.page_number != null) setPage(row.page_number)
+                            setSelectedCustomer(prev => prev === highlightKey ? null : highlightKey)
+                          }}
+                          onMouseEnter={e => (e.currentTarget.style.background = warnBg ? '#fff0c2' : '#f5ede0')}
+                          onMouseLeave={e => (e.currentTarget.style.background = warnBg ? '#fff8e1' : 'transparent')}
+                          style={{
+                            borderBottom: '1px solid #f1f3f5',
+                            background: warnBg ? '#fff8e1' : 'transparent',
+                            cursor: 'pointer',
+                          }}>
                           {/* 경고 */}
                           <td style={{ padding: '8px 4px 8px 0', width: 20, verticalAlign: 'top' }}>
                             {row.unconfirmed && (
