@@ -1,7 +1,7 @@
 import { useEffect, useState, useMemo } from 'react'
 import { FileText, ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react'
 
-const BASE = import.meta.env.VITE_API_URL ?? `http://${window.location.hostname}:8001`
+const BASE = import.meta.env.VITE_API_URL ?? ''
 
 interface PdfViewerProps {
   docId?: string

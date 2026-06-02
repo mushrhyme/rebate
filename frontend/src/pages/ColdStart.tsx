@@ -8,7 +8,7 @@ import pdfjsWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 type Step = 1 | 2 | 3
 const STEPS = ['기본 정보', '페이지 선택', '확인 및 저장']
 
-const BASE = import.meta.env.VITE_API_URL ?? `http://${window.location.hostname}:8001`
+const BASE = import.meta.env.VITE_API_URL ?? ''
 function sessionHeaders(): Record<string, string> {
   const sid = localStorage.getItem('session_id')
   return sid ? { 'X-Session-ID': sid } : {}

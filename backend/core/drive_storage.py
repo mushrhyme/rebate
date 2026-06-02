@@ -16,7 +16,9 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
 
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+# drive.file은 "이 자격증명이 직접 만든 파일"만 접근 가능 → 다른 주체(예: 과거 OAuth)가
+# 올린 파일은 못 읽음. 서비스 계정으로 공유 폴더의 기존 파일을 읽고 쓰려면 전체 drive 스코프 필요.
+SCOPES = ["https://www.googleapis.com/auth/drive"]
 _FOLDER_MIME = "application/vnd.google-apps.folder"
 
 

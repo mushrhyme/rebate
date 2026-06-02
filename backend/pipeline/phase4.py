@@ -6,6 +6,8 @@ NET 계산: scripts/phase4_calc.py (subprocess, LLM 없음)
 import asyncio
 import json
 import logging
+import os
+import sys
 from pathlib import Path
 
 import anthropic
@@ -27,11 +29,15 @@ async def run_phase4(doc_id: str, run_id: str = "", skip_xv: bool = False) -> di
     script = settings.workspace_root / "scripts" / "phase4_calc.py"
 
     # ── NET 계산 (Python subprocess) ─────────────────────────────────────────
+    # Windows 기본 콘솔 인코딩(cp932 등)으로는 스크립트의 em-dash 등 비ASCII 출력이
+    # UnicodeEncodeError를 일으키므로, 자식 프로세스를 UTF-8 모드로 강제한다.
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
     proc = await asyncio.create_subprocess_exec(
-        "python3", str(script), "--doc", doc_id, "--save",
+        sys.executable, str(script), "--doc", doc_id, "--save",
         cwd=str(settings.workspace_root),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300.0)

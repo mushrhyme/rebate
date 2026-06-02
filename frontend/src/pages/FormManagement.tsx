@@ -5,7 +5,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useForms } from '../context/FormsContext'
 
-const BASE = (import.meta as any).env?.VITE_API_URL ?? `http://${window.location.hostname}:8001`
+const BASE = (import.meta as any).env?.VITE_API_URL ?? ''
 
 function sessionHeaders(): Record<string, string> {
   const sid = localStorage.getItem('session_id')
