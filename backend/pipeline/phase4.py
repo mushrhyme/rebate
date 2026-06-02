@@ -107,12 +107,25 @@ async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id
 
     cover_totals: dict = {}
     summary_totals: dict = {}
+    customer_summaries: dict = {}
     for page in p2_data.get("pages", []):
         role = page.get("role", "")
         if role == "cover" and not cover_totals:
             cover_totals = page.get("totals") or {}
         elif role == "summary":
             summary_totals.update(page.get("totals") or {})
+            customer_summaries.update(page.get("customer_summaries") or {})
+
+    # Phase 3 items에서 得意先별 金額 합산 (税抜)
+    p3_path = settings.extracted_dir / doc_id / "phase3_output.json"
+    by_customer_detail: dict[str, int] = {}
+    if p3_path.exists():
+        p3_data = json.loads(p3_path.read_text(encoding="utf-8"))
+        for item in p3_data.get("items", []):
+            cust = item.get("customer", "")
+            kin_gaku = int(item.get("columns", {}).get("金額", 0) or 0)
+            if cust and kin_gaku:
+                by_customer_detail[cust] = by_customer_detail.get(cust, 0) + kin_gaku
 
     # Phase 4 rows에서 집계 값 계산
     rows = phase4_data.get("rows", [])
@@ -143,6 +156,7 @@ async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id
         "total_kin_gaku_ex_tax": summary.get("total_ex", 0),
         "by_tax_rate": summary.get("by_rate", {}),
         "by_jisho": by_jisho,
+        "by_customer_detail": by_customer_detail,
     }
 
     # Claude 호출
@@ -153,11 +167,13 @@ async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id
         "위 양식 정의의 '[Phase 4] NET 계산식 > 교차검증' 섹션에 정의된 규칙에 따라 "
         "사용자 메시지의 숫자 데이터를 검증하세요.\n\n"
         "사용자 메시지 구조:\n"
-        "- computed.total_kin_gaku_ex_tax: Phase 4에서 집계한 전체 金額 합계 (消費税 行 제외)\n"
-        "- computed.by_tax_rate: 세율별 金額 합계\n"
+        "- computed.total_kin_gaku_ex_tax: Phase 4에서 집계한 전체 金額 합계 (消費税 行 제외, 税抜)\n"
+        "- computed.by_tax_rate: 세율별 金額 합계 (税抜)\n"
         "- computed.by_jisho: 지소(事業所)별 金額 합계\n"
+        "- computed.by_customer_detail: 得意先名별 detail 金額 합산 (税抜)\n"
         "- cover_totals: 청구서 표지 합계 (일본어 키 그대로)\n"
-        "- summary_totals: 得意先 소계 페이지 합계 (일본어 키 그대로)\n\n"
+        "- summary_totals: summary 페이지 집계 합계 (일본어 키 그대로)\n"
+        "- customer_summaries: summary 페이지 得意先別 소계 dict (得意先名 → 金額, 税抜)\n\n"
         "JSON만 출력합니다. 다른 설명은 불필요합니다.\n\n"
         "출력 형식:\n"
         '{"cross_validation": [\n'
@@ -175,7 +191,12 @@ async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id
     )
 
     user_content = json.dumps(
-        {"computed": computed, "cover_totals": cover_totals, "summary_totals": summary_totals},
+        {
+            "computed": computed,
+            "cover_totals": cover_totals,
+            "summary_totals": summary_totals,
+            "customer_summaries": customer_summaries,
+        },
         ensure_ascii=False,
         indent=2,
     )
