@@ -37,7 +37,7 @@ cd rebate
 uv sync
 
 # 이후 백엔드 실행
-uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+uv run uvicorn backend.main:app --host 0.0.0.0 --port 8800 --reload
 ```
 
 > uv가 없으면: `curl -LsSf https://astral.sh/uv/install.sh | sh`
@@ -104,7 +104,7 @@ npm run dev            # 개발 서버 (localhost:5173)
 
 ```bash
 # 백엔드
-uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+uv run uvicorn backend.main:app --host 0.0.0.0 --port 8800 --reload
 
 # 프론트엔드
 cd frontend && npm run dev
