@@ -1,145 +1,213 @@
 # Phase 2 추출 신뢰성 개선 결정 기록
 
-**일시**: 2026-06-01  
+**최종 갱신**: 2026-06-01  
 **대상**: Phase 2 page MD → items JSON 추출  
-**주요 샘플**: `extracted/2월日本アクセスＣＶＳ①`
-
-이 문서는 기존 `phase2-chunk-debug.md`의 청크 디버깅 기록과, 이후 논의한 Phase 2 추출 신뢰성 개선 결정을 통합한 단일 기록이다.
+**확인 샘플**: `extracted/2월日本アクセスＣＶＳ①`, `extracted/4월日本アクセスCVS①`
 
 ---
 
-## 1. 결론
+## 1. 현재 구조 개요
 
-현재 고질 문제는 완전히 사라진다고 단정할 수 없다. 다만 문제의 성격을 나누면, 어떤 문제는 구조적으로 줄일 수 있고 어떤 문제는 별도 검증으로 남겨야 한다.
+Phase 2는 LLM 추출 + Python 감사 2단계로 구성된다.
 
-| 문제 유형 | 현재 방식 | 개선 후 기대 |
-|-----------|-----------|--------------|
-| 긴 반복 표에서 LLM이 상품 행을 누락 | 자주 발생 가능 | row anchor로 크게 감소 |
-| 管理No 헤더 직후 첫 상품행 누락 | 발생 확인됨 | row anchor가 잡으면 구조적으로 탐지 가능 |
-| 소액·소량 행 누락 | 발생 확인됨 | row anchor가 잡으면 구조적으로 탐지 가능 |
-| 같은 제품명 반복 시 생략 | 발생 가능 | row_id 기준으로 중복/누락 탐지 가능 |
-| OCR/Phase 1 숫자 오독 | 여전히 가능 | row anchor만으로 해결 불가. 별도 숫자 검증 필요 |
-| MD 자체가 심하게 깨짐 | 여전히 가능 | OCR JSON/table 좌표 fallback 필요 |
+```
+page_*.md
+  ↓
+[form_04 전용] row anchor 생성 (phase2_row_anchor.py)
+  - row_id, page, kanri_no_hint, jisho_hint, raw_row, amount_hint
+  ↓
+Phase 2 LLM (Sonnet)
+  - row_id별 item 해석
+  - item이 아니면 not_item으로 표시
+  - item에는 반드시 row_id 포함
+  ↓
+Phase 2 Verify (phase2_verify.py)
+  1차: row anchor 커버리지 — 누락 row_id를 Python으로 복구
+  2차: 管理No計 역산 검증 — 결정적 복구 → Haiku 재요청
+  → phase2_verify_report.json 저장
+```
 
-따라서 최종 방향은 다음이다.
-
-> Phase 2는 LLM 추출을 유지하되, form_04에 한해 MD 기반 row anchor를 먼저 만들고, LLM 출력에 row_id를 강제한다. 기존 管理No 합계 검증은 보조 감사 레이어로 유지한다.
-
-이건 "후처리 보강"만이 아니라 Phase 2의 추출 계약을 바꾸는 것이다. LLM에게 "문서에서 item을 찾아라"라고 맡기는 대신, Python이 "문서에 이런 후보 row가 있다"는 앵커를 제공하고 LLM은 각 row를 해석한다.
-
----
-
-## 2. 확인된 현상
-
-Phase 1은 OCR 결과를 page MD로 비교적 잘 변환한다. 그러나 Phase 2에서 page MD를 읽어 `items[]` JSON을 생성할 때, MD에 존재하는 특정 상품 행이 누락되는 현상이 발생했다.
-
-확인된 예:
-
-| 管理No | MD 원문 상태 | Phase 2 JSON 상태 | 차이 |
-|--------|--------------|-------------------|------|
-| `1565567` | `農心 辛ラーメン 120g×3`, 金額 `7398` 존재 | 누락 | 管理No 합계 `12392`, 추출 합계 `4994` |
-| `1565570` | `農心 辛ラーメンカップ 68g`, 金額 `230` 존재 | 누락 | 管理No 합계 `10750`, 추출 합계 `10520` |
-
-이 두 사례는 MD에는 행이 있으나 JSON에는 없으므로, Phase 2 LLM 추출 단계의 누락으로 판단한다.
-
-별도 원인도 확인되었다:
-
-| 管理No | 현상 | 판단 |
-|--------|------|------|
-| `1565505` | `農心 辛ラーメンカップ 68g` 金額이 `31209`로 MD에 기록됨 | OCR 또는 Phase 1 MD 변환 단계의 숫자 오독 가능성. 산술상 `3209`가 자연스럽고, 管理No 합계도 `3209` 기준으로 맞음 |
-
-따라서 문제는 하나가 아니라 두 계층에 걸쳐 있다.
-
-1. Phase 2 LLM이 반복 표에서 행을 누락한다.
-2. Phase 1 이전 또는 Phase 1에서 숫자 자체가 잘못 구조화될 수 있다.
+설계 원칙:
+> LLM은 행의 의미를 읽고, Python은 행의 존재와 누락을 감사한다.
 
 ---
 
-## 3. 이전 청크 디버깅 기록
+## 2. 확인된 문제 유형
 
-### 3.1 최초 가설
+| 문제 유형 | 현재 방어선 | 비고 |
+|-----------|------------|------|
+| LLM이 반복 표에서 상품 행 누락 | row anchor 1차 복구 | 구조적으로 탐지 가능 |
+| 管理No 헤더 직후 첫 상품행 누락 | row anchor 1차 복구 | |
+| 소액·소량 행 누락 | row anchor 1차 복구 | |
+| 동일 제품명 cross-kanri dedup 오류 | dedup hash에 kanri_no 포함 | §3.2 참조 |
+| phantom item (문서 헤더 행 오인식) | anchor 키워드 필터 + 페이지 리셋 | §3.1 참조 |
+| OCR/Phase 1 숫자 오독 | 管理No計 역산 + OCR 오독 탐지 | upstream 문제. row anchor로 해결 불가 |
+| MD 자체가 심하게 깨짐 | 미대응 | OCR JSON fallback 필요 시 별도 검토 |
 
-처음에는 다음을 의심했다.
+---
 
-> overlap 페이지 중복 추출 → dedup 실패 → 金額 이중 집계(overcounting)
+## 3. 버그 기록 (4월日本アクセスCVS①, 2026-06-01)
 
-overlap 메커니즘 때문에 같은 페이지가 인접 청크에 두 번 들어가고, content hash dedup이 미세한 추출 차이를 잡지 못해 duplicate item이 살아남는다는 이론이었다.
+`4월日本アクセスCVS①.pdf` 분석 과정에서 발견·수정된 버그 3건.
 
-하지만 실제로 보고된 문제는 overcounting이 아니라 undercounting이었다. 예를 들어 `管理No:1565543`의 `農心 辛ラーメン ミニカップ 4 9 g` 금액 `900` 항목이 Phase 2 출력에 없었다. overlap으로 page 5가 두 청크에 들어가 있었음에도 둘 다 이 항목을 놓쳤다.
+---
 
-### 3.2 청크당 管理No 블록 수
+### 3.1 Bug: 文書ヘッダ행 phantom item → CVS営業部 합계 오버카운팅
 
-`2월日本アクセスＣＶＳ①` 기준 실측값:
+**현상**
 
-| 청크 | 포함 페이지 | 총 줄 수 | 管理No 블록 수 |
-|------|------------|---------|----------------|
-| 청크0 | p1,2,3,4,9 | 354 | 68개 |
-| 청크1 (p5 포함) | p1,3,4,5,6,9 | 436 | 81개 |
-| 청크2 | p1,5,6,7,8,9 | 420 | 60개 |
-| 청크3 | p1,7,8,9 | 257 | 26개 |
+- Phase 2 output에 `product: "請求書"` 또는 `product: "No."` 같은 문서 메타데이터가 item으로 등록됨.
+- CVS営業部 합계가 14,584,352 → 4,864,654 (정상)보다 약 2× 초과.
 
-3페이지 문서 단일 호출은 管理No 블록이 약 15~20개 수준이었다.
+**근본 원인 (3중 연쇄)**
 
-### 3.3 당시 수정
+1. `build_row_anchors_form04`에서 `current_kanri`가 페이지 경계를 넘어 유지됨.  
+   페이지 N이 管理No:XXXX로 끝나면, 페이지 N+1 최상단의 문서 헤더 표  
+   (`| 請求書No. | 004859849 |`, `| 作成日 | 2026年5月13日 |` 등)가  
+   이전 페이지의 kanri_no에 귀속된 row_id(`p003:k1710151:r01` 등)를 받음.
 
-당시 판단:
+2. Phase 2 LLM이 이 row_id를 정상 item으로 추출 → phantom item 생성.
 
-- Claude에게 60~80개 管理No 블록 합계를 동시에 자체 검증시키는 것은 불안정하다.
-- `산수는 절대 하지 않는다`와 `합계를 비교해 검증한다`는 프롬프트 지시가 충돌한다.
-- overlap은 오히려 청크 크기와 중복 위험을 키운다.
+3. phantom 제거 코드(`valid_row_ids` 체크)가 작동 못함 — phantom row_id가 anchor에 존재하기 때문.
 
-적용/결정된 방향:
+**수정 내용**
 
-1. `PHASE2_OVERLAP` 기본값을 `0`으로 둔다.
-2. Phase 2 프롬프트에서 대량 합계 자체 검증 부담을 줄인다.
-3. 역산 검증은 `phase2_verify.py`가 전담한다.
+| 파일 | 수정 |
+|------|------|
+| `backend/pipeline/phase2_row_anchor.py` | 페이지 루프 진입 시 `current_kanri = None; row_idx = 0` 리셋 |
+| `backend/pipeline/phase2_row_anchor.py` | `_HEADER_KEYWORDS`에 `'請求書', '作成日', 'ご請求期', 'お支払予定', '未収取扱', '発行元', '販売促進', '項目'` 추가 |
+| `docs/phase2-prompt.md` | Rule 10 추가: 文書ヘッダ行（請求書No./作成日等）はitemとして抽出しない |
 
-이 조치는 청크 크기를 줄이고 중복 위험을 낮추지만, LLM이 행 자체를 누락하는 문제를 구조적으로 없애지는 못한다.
+---
+
+### 3.2 Bug: 동일 제품명 cross-kanri dedup → 1710201 항목 소실
+
+**현상**
+
+- 管理No:1710201 (page 7)의 `農心 辛ラーメントゥーンバカップ 113g` (数量:204, 金額:2,550) 누락.
+- verify report: `expected: 2550, actual: 0`.
+
+**근본 원인**
+
+`_dedup_after_recovery`의 content hash에 `kanri_no`가 없었음.  
+管理No:1710186 (page 5)에 동일 제품명 + 동일 数量 + 동일 金額 항목이 존재.  
+두 항목이 같은 hash → dedup이 1710201을 1710186의 중복으로 제거.
+
+**수정 내용**
+
+`phase2_verify.py` — `_dedup_after_recovery` hash에 `kanri_no` 추가:
+
+```python
+# 수정 전
+key = hashlib.md5(json.dumps({
+    'customer': ..., 'product': ..., 'columns': ...,
+}, ...).encode()).hexdigest()
+
+# 수정 후
+key = hashlib.md5(json.dumps({
+    'kanri_no': item.get('kanri_no', ''),
+    'customer': ..., 'product': ..., 'columns': ...,
+}, ...).encode()).hexdigest()
+```
+
+---
+
+### 3.3 Bug: jisho_hint 형식 불일치 → Haiku 폴백 → 비표준 item 구조
+
+**현상**
+
+1차 anchor 복구를 통과한 뒤 2차 검증에서 Haiku가  
+`management_no`, `amount` 같은 비표준 필드로 item을 생성.  
+`columns.金額`이 null → 집계 누락.
+
+**근본 원인**
+
+`_RE_JISHO`가 `[^|]+`로 전체 셀 텍스트를 캡처해  
+`jisho_hint = "R営業中四国 入出荷センター:RC新居浜常温C 得意先:(株) ファミリーマート"` 로 저장됨.  
+`jisho_template` 키는 LLM이 저장한 짧은 `"R営業中四国"` 형식 → 키 불일치 → lookup 실패  
+→ `_check_anchor_coverage`에서 `continue` 스킵 → 1차 복구 미실행  
+→ 2차 Haiku 폴백 → 비표준 구조 item 생성.
+
+**수정 내용**
+
+`phase2_row_anchor.py` — `_RE_JISHO`를 지소명만 캡처하도록 변경:
+
+```python
+# 수정 전
+_RE_JISHO = re.compile(r'入出荷支店\s*[：:]\s*([^|]+)')
+
+# 수정 후
+_RE_JISHO = re.compile(r'入出荷支店\s*[：:]\s*(\S+)')
+```
+
+`jisho_hint`가 `"R営業中四国"`으로 저장되어 `jisho_template` lookup이 성공.  
+1차 anchor 복구가 정상 실행 → Haiku 불필요.
+
+---
+
+### 3.4 Bug: phantom 제거 후 파일 미기록
+
+**현상**
+
+phantom item이 메모리에서 제거됐으나, 이후 anchor 복구가 없으면 파일에 반영되지 않음.
+
+**근본 원인**
+
+phantom 제거 블록이 파일 write를 `if anchor_recovered:` 분기 안에서만 수행.  
+phantom만 있고 복구할 anchor가 없으면 수정 사항이 파일에 쓰이지 않음.
+
+**수정 내용**
+
+`phase2_verify.py` — phantom 제거 직후 즉시 파일 write:
+
+```python
+if phantom_removed:
+    items = cleaned
+    phase2_result['items'] = items
+    out_path.write_text(...)   # anchor 복구 여부와 무관하게 즉시 기록
+```
+
+---
+
+### 3.5 form_04.md 규칙 보강
+
+위 디버깅 과정에서 함께 보강된 규칙:
+
+- **Rule 1 (집계행 제외)**: 반각 `*`도 전각 `＊`와 동일하게 집계행으로 처리함을 명시.
+- **Rule 9 (동명 제품 반복)**: cross-page 케이스 명시. 예: 1710186 (page 5)와 1710201 (page 7)이 동일 제품명·数量·金額이어도 각각 독립 item으로 추출.
 
 ---
 
 ## 4. 왜 기존 후처리만으로 부족한가
 
-이미 `backend/pipeline/phase2_verify.py`에는 재추출/복구 레이어가 있다.
+`phase2_verify.py`에는 이미 재추출/복구 레이어가 있다.
 
 - `_parse_kanri_totals`: MD에서 管理No 블록과 `管理No 計` 추출
 - `_try_deterministic_recovery`: MD 블록에서 누락 상품 행을 Python으로 복구 시도
 - `_retry_missing_items`: 결정적 복구 실패 시 Haiku에 해당 블록만 재요청
 - `_insert_after_kanri`: 복구 항목을 원래 管理No 위치에 삽입
 
-하지만 이 방식은 기본적으로 후처리다.
-
-현재 구조:
-
-```
-MD 전체
-  ↓
-LLM이 items[] 생성
-  ↓
-Python이 管理No 합계로 사후 검증
-  ↓
-diff가 맞으면 누락 행 추정 복구
-```
-
-이 방식의 한계:
+하지만 합계 기반 후처리의 한계:
 
 1. LLM이 행을 빠뜨린 뒤에야 발견한다.
 2. 무엇이 빠졌는지 row 단위로 직접 알지 못하고, 금액 diff로 추정한다.
 3. diff와 누락 후보 합계가 정확히 맞지 않으면 결정적 복구가 어렵다.
 4. OCR/Phase 1 숫자 오독이 섞이면 누락과 숫자 오류를 구분하기 어렵다.
-5. 복구 실패가 로그 중심으로 남으면 추적성이 약하다.
+5. Haiku 폴백은 비표준 item 구조를 생성할 수 있다 (§3.3).
 
-따라서 단순히 후처리만 더 세게 하는 것은 충분하지 않다.
+row anchor 방식은 직접적이다:
+
+```
+管理No 합계가 안 맞는다 → 어떤 행이 빠진 것 같다 → diff와 맞는 행을 찾아본다
+                                ↓ (row anchor)
+MD에 후보 row_id가 3개 있다 → LLM 결과에 row_id가 2개만 있다 → p007:k1710201:r00이 빠졌다
+```
 
 ---
 
 ## 5. LLM 위임을 유지해야 하는 이유
 
-Phase 2 전체를 Python 파서로 대체하는 것도 맞지 않는다.
-
-MD 파일은 표 형태를 복원한 중간 표현일 뿐이다. 실제로 어떤 행이 의미 있는 item인지, 어떤 값이 상위 계층에서 상속되어야 하는지, 어떤 페이지가 cover/detail/payment_form인지 판단하는 일은 여전히 문맥적이다.
-
-LLM에게 맡기는 것이 적합한 일:
+Phase 2 전체를 Python 파서로 대체하는 것은 맞지 않다.
 
 | 영역 | 이유 |
 |------|------|
@@ -150,212 +218,44 @@ LLM에게 맡기는 것이 적합한 일:
 | 조응·문맥 해석 | 上記, 同条件, 前記, 페이지 넘김 등은 규칙만으로 취약 |
 | 양식별 유연성 | form_XX.md 가이드에 따라 추출 구조가 달라짐 |
 
-즉, LLM은 문서 의미 판단기로 계속 필요하다.
-
 ---
 
-## 6. 새 결정: row anchor 감사 레이어
+## 6. row anchor 감사 레이어 설계
 
-### 6.1 핵심 아이디어
-
-Phase 2의 책임을 두 개로 분리한다.
-
-| 책임 | 담당 |
-|------|------|
-| 문서에 어떤 후보 row가 존재하는지 앵커링 | Python |
-| 각 row가 어떤 item인지 의미 해석 | LLM |
-| 누락/중복/합계 오류 감사 | Python |
-
-새 구조:
-
-```
-page_*.md
-  ↓
-form_04 row anchor 생성
-  - row_id
-  - page
-  - kanri_no_hint
-  - raw_row
-  - amount_hint
-  ↓
-Phase 2 LLM
-  - row_id별 item 해석
-  - item이 아니면 not_item으로 표시
-  - item에는 반드시 row_id 포함
-  ↓
-Phase 2 Verify
-  - row_id 누락/중복 검사
-  - 管理No 합계 검사
-  - 복구/경고 리포트 저장
-```
-
-예시:
-
-```json
-{
-  "row_id": "p008:k1565570:r02",
-  "page": 8,
-  "kanri_no_hint": "1565570",
-  "raw_row": "| 農心 辛ラーメンカップ 68g | 24 | 12個 | | 1910 | | 230 | |",
-  "amount_hint": 230
-}
-```
-
-LLM에게 주는 계약은 다음처럼 바뀐다.
-
-기존:
-
-> 이 문서에서 item을 찾아 JSON으로 만들어라.
-
-개선:
-
-> 아래 row_id 목록을 빠짐없이 처리하라. item이면 item JSON으로 변환하고, item이 아니면 not_item으로 표시하라. 모든 출력에는 row_id를 포함하라.
-
-### 6.2 왜 이것이 더 낫나
-
-기존 합계 검증은 간접적이다.
-
-```
-管理No 합계가 안 맞는다
-→ 어떤 행이 빠진 것 같다
-→ diff와 맞는 행을 찾아본다
-```
-
-row anchor 방식은 직접적이다.
-
-```
-MD에 후보 row_id가 3개 있다
-→ LLM 결과에 row_id가 2개만 있다
-→ p008:k1565570:r02가 빠졌다
-```
-
-따라서 현재 고질적인 "LLM이 반복 표에서 행을 못 보고 지나가는 문제"는 크게 줄어들 가능성이 높다.
-
----
-
-## 7. 논리적 구멍과 방어선
-
-row anchor도 완전한 정답 생성기가 아니다. 이 아이디어의 가장 큰 위험은 Python이 "어떤 줄이 item 후보인가"를 어느 정도 판단해야 한다는 점이다.
-
-### 7.1 위험
-
-| 위험 | 설명 | 대응 |
-|------|------|------|
-| false negative | Python이 상품행을 후보로 못 잡으면 row_id가 생기지 않는다 | form_04에만 먼저 적용하고, OCR JSON/table fallback 검토 |
-| false positive | 소계행, 헤더행, 깨진 줄을 후보로 넣을 수 있다 | LLM이 `not_item`으로 표시할 수 있게 계약 설계 |
-| form-specific code 증가 | 양식마다 row parser가 늘 수 있다 | 전면 일반화 금지. 반복 표 양식에만 선택 적용 |
-| MD 품질 의존 | Phase 1이 숫자를 잘못 만들면 anchor도 잘못된다 | 管理No 합계·산술 검증으로 별도 플래그 |
-| 프롬프트 복잡도 증가 | MD + row anchor + form 정의를 함께 줘야 한다 | form_04에서만 실험 후 효과 검증 |
-
-### 7.2 중요한 제한
-
-row anchor를 "Python이 상품행을 확정한다"로 설계하면 틀린다.
-
-올바른 설계:
+### 핵심 원칙
 
 > Python은 감사 가능한 후보 row anchor를 넓게 만들고, LLM이 item/not_item 및 의미를 판단한다.
 
-잘못된 설계:
+row anchor를 "Python이 상품행을 확정한다"로 설계하면 틀린다. LLM이 not_item으로 분류할 여지를 반드시 남긴다.
 
-> Python이 상품행을 확정하고 LLM은 보조 정규화만 한다.
+### anchor 필드
 
----
+| 필드 | 설명 |
+|------|------|
+| `row_id` | `"p{page:03d}:k{kanri_no}:r{idx:02d}"` — 문서 내 유일 |
+| `page` | 페이지 번호 |
+| `kanri_no_hint` | 현재 管理No |
+| `condition_type_hint` | 定番条件 / 原価引き条件 / 導入条件 (없으면 None) |
+| `jisho_hint` | 지소명 (短形式, 예: `"R営業中四国"`) |
+| `raw_row` | 원본 MD 행 문자열 |
+| `amount_hint` | 마지막 양수 정수 셀 = 金額 추정값 |
+| `row_index_in_kanri` | 블록 내 0-기반 인덱스 |
 
-## 8. 구현 순서
+### 위험과 대응
 
-### Step 1. 현재 verify 리포트화
-
-우선 `phase2_verify.py`가 무엇을 잡고 무엇을 못 잡는지 파일로 남긴다.
-
-출력 예:
-
-`phase2_verify_report.json`
-
-포함할 내용:
-
-- `kanri_no`
-- `expected_total`
-- `actual_total`
-- `diff`
-- `block_text`
-- `existing_items`
-- `recovered_items`
-- `status`: `matched | recovered | unresolved | upstream_numeric_suspect`
-
-### Step 2. form_04 row anchor 생성
-
-form_04에 한해 MD에서 후보 row를 추출한다.
-
-최소 필드:
-
-- `row_id`
-- `page`
-- `kanri_no_hint`
-- `condition_type_hint`
-- `raw_row`
-- `amount_hint`
-- `row_index_in_kanri`
-
-### Step 3. Phase 2 출력 계약 변경
-
-form_04 Phase 2 item에는 `row_id`를 필수로 넣는다.
-
-LLM 출력은 다음 중 하나를 row별로 내야 한다.
-
-- `item`: 실제 청구 item
-- `not_item`: 헤더, 소계, 합계, 깨진 비상품 row
-- `uncertain`: 판단 불가. 사용자 검토 또는 블록 재요청 대상
-
-### Step 4. row_id 검증 추가
-
-검증 기준:
-
-- anchor row_id 중 LLM 결과에 없는 row_id
-- 하나의 row_id가 여러 item에 반복 사용된 경우
-- item인데 `row_id`가 없는 경우
-- `amount_hint`와 `columns["金額"]` 불일치
-- 管理No 합계 불일치
-
-### Step 5. 적용 범위 제한
-
-처음에는 form_04에만 적용한다. 다른 양식으로 일반화하지 않는다.
+| 위험 | 설명 | 대응 |
+|------|------|------|
+| false negative | Python이 상품행을 후보로 못 잡으면 row_id가 생기지 않는다 | form_04에만 적용. 管理No計 2차 감사로 보완 |
+| false positive | 소계행, 헤더행을 후보로 넣을 수 있다 | LLM이 `not_item`으로 표시. 키워드 필터로 사전 차단 |
+| jisho_hint 형식 불일치 | anchor와 item의 jisho 표현 불일치 → template lookup 실패 | `_RE_JISHO = re.compile(r'(\S+)')` 로 짧은 형식 저장 (§3.3) |
+| cross-page kanri 오염 | 페이지 경계에서 이전 kanri 상태가 다음 페이지 헤더 행에 귀속 | 페이지 루프 시작 시 `current_kanri = None` 리셋 (§3.1) |
+| MD 품질 의존 | Phase 1이 숫자를 잘못 만들면 anchor도 잘못된다 | 管理No 합계·산술 검증으로 별도 플래그 |
 
 ---
 
-## 9. 기대 효과와 남는 문제
-
-### 기대 효과
-
-- 반복 표에서 LLM이 행 자체를 놓치는 문제 감소
-- 누락 row를 diff가 아니라 row_id로 직접 식별
-- 복구 실패 원인 추적 쉬움
-- 기존 管理No 합계 검증보다 감사 가능성 향상
-
-### 남는 문제
+## 7. 남는 문제
 
 - OCR/Phase 1 숫자 오독은 row anchor만으로 해결되지 않는다.
 - MD가 심하게 깨지면 row anchor도 실패할 수 있다.
-- form_04 외 양식에는 바로 적용하지 않는다.
-- row anchor가 잡지 못한 행은 여전히 누락될 수 있다.
-
-따라서 이 설계는 "문제가 절대 발생하지 않게 하는 장치"가 아니다. 다만 지금 확인된 고질 문제, 즉 LLM이 반복 표에서 존재하는 행을 못 보고 지나가는 문제에 대해서는 후처리 보강보다 더 직접적인 개선이다.
-
----
-
-## 10. 최종 판단
-
-지금까지의 방향인 `LLM 추출 + phase2_verify 후처리`는 맞지만, 현재 문제에는 충분하지 않다.
-
-최종 판단:
-
-1. LLM을 제거하지 않는다.
-2. Phase 2 전체를 정규식 파서로 대체하지 않는다.
-3. 기존 `phase2_verify.py`는 유지한다.
-4. form_04에는 row anchor를 추가해 "행 존재성"을 LLM 이전에 앵커링한다.
-5. row_id 검증을 1차 감사로, 管理No 합계 검증을 2차 감사로 사용한다.
-6. OCR/Phase 1 숫자 오독은 별도 상류 문제로 플래그한다.
-
-한 줄 요약:
-
-> LLM은 행의 의미를 읽고, Python은 행의 존재와 누락을 감사한다.
-
+- form_04 외 양식에는 row anchor를 적용하지 않는다.
+- Haiku 폴백이 여전히 비표준 구조를 만들 가능성이 있다. 1차 anchor 복구가 최대한 먼저 처리해야 Haiku까지 내려가지 않는다.
