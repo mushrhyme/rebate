@@ -125,9 +125,11 @@ async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id
         form_config = json.loads(form_types_path.read_text(encoding="utf-8")).get(form_id, {})
 
     breakdown_field: str | None = None
+    breakdown_amount_field: str = "未収金額合計"
     for xv_cfg in form_config.get("cross_validation", []):
         if xv_cfg.get("type") == "cover_breakdown_vs_detail":
             breakdown_field = xv_cfg.get("detail_group_field")
+            breakdown_amount_field = xv_cfg.get("detail_amount_field", "未収金額合計")
             break
 
     by_jisho: dict[str, int] = {}
@@ -135,7 +137,7 @@ async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id
         for r in rows:
             j = r.get(breakdown_field, "")
             if j:
-                by_jisho[j] = by_jisho.get(j, 0) + int(r.get("未収金額合計") or 0)
+                by_jisho[j] = by_jisho.get(j, 0) + int(r.get(breakdown_amount_field) or 0)
 
     computed = {
         "total_kin_gaku_ex_tax": summary.get("total_ex", 0),

@@ -125,7 +125,7 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
 
             # ── Phase 2 (번들 감지 → 청크 분할 → 단일 호출 순 판단) ──────────
             await update_document_status(doc_id, "phase2")
-            bundles = await asyncio.to_thread(_detect_bundles, extracted_dir)
+            bundles = await asyncio.to_thread(_detect_bundles, extracted_dir, _form_cfg.get("bundle_detection"))
             if bundles:
                 log.warning("[%s] 다중 번들 감지 (%d건): %s", doc_id, len(bundles), bundles)
                 phase2_results = []
@@ -516,42 +516,44 @@ def _dedup_items(items: list[dict]) -> list[dict]:
     return result
 
 
-_RE_PAYMENT_FORM_MARKERS = re.compile(r'振込先銀行|決済方法|お支払明細書|口座種別')
+def _is_skip_page(content: str, cfg: dict) -> bool:
+    """bundle_detection.skip_markers 기준으로 번들 기점에서 제외할 페이지를 감지한다.
 
-
-def _is_payment_form_content(content: str) -> bool:
-    """Phase 1이 cover로 오분류한 支払明細書 페이지를 식별한다.
-
-    결제 키워드(振込先銀行 등)가 있고 本体合計金額이 없는 페이지를 payment_form으로 간주.
-    실제 cover 페이지는 本体合計金額을 포함하므로 False가 된다.
+    skip_markers 중 하나라도 있고, skip_excluded 중 어느 것도 없으면 제외 대상.
+    설정이 없으면 항상 False.
     """
-    has_payment = bool(_RE_PAYMENT_FORM_MARKERS.search(content))
-    has_honbai  = bool(re.search(r'本体\s*合計金額', content))
-    return has_payment and not has_honbai
+    skip_markers = cfg.get("skip_markers", [])
+    skip_excluded = cfg.get("skip_excluded", [])
+    if not skip_markers:
+        return False
+    has_skip = any(m in content for m in skip_markers)
+    has_excluded = any(m in content for m in skip_excluded)
+    return has_skip and not has_excluded
 
 
-def _is_cover_page_content(content: str) -> bool:
-    """Phase 1 type hint 외에 콘텐츠 패턴으로도 cover 페이지를 감지한다.
+def _is_extra_cover_page(content: str, cfg: dict) -> bool:
+    """bundle_detection.cover_required/cover_excluded 기준으로 Phase 1이 놓친 cover 페이지를 감지한다.
 
-    Phase 1이 cover를 detail/summary로 오분류하는 경우를 보완한다.
-    조건: 請求書No + 本体合計金額(스페이스 허용) 존재 & 管理No 없음.
-    管理No가 있으면 detail 페이지이므로 제외.
+    cover_required 전부 존재하고 cover_excluded 중 어느 것도 없으면 cover로 간주.
+    설정이 없으면 항상 False.
     """
-    has_invoice_no = bool(re.search(r'請求書No', content))
-    has_honbai = bool(re.search(r'本体\s*合計金額', content))
-    has_kanri_no = bool(re.search(r'管理No', content))
-    return has_invoice_no and has_honbai and not has_kanri_no
+    required = cfg.get("cover_required", [])
+    excluded = cfg.get("cover_excluded", [])
+    if not required:
+        return False
+    has_required = all(m in content for m in required)
+    has_excluded = any(m in content for m in excluded)
+    return has_required and not has_excluded
 
 
-def _detect_bundles(extracted_dir: Path) -> list[tuple[int, int]]:
+def _detect_bundles(extracted_dir: Path, bundle_cfg: dict | None = None) -> list[tuple[int, int]]:
     """page MD의 page_type_hint: cover 를 감지해 번들 경계를 반환.
 
-    Phase 1 오분류 보완: type hint가 cover가 아니더라도 請求書No + 本体合計金額
-    조합이 있고 管理No가 없는 페이지는 cover로 간주한다.
-    payment_form 오감지 보완: 振込先銀行 / 決済方法 등 결제 키워드가 있으면
-    Phase 1이 cover로 분류해도 payment_form으로 취급해 번들 기점에서 제외한다.
+    bundle_cfg: form_types.json의 bundle_detection 설정. None이면 Phase 1 hint만 사용.
+    Phase 1 오분류 보완 및 skip 페이지 제외는 bundle_cfg가 있을 때만 동작한다.
     Returns: [(start_page, end_page), ...] 1-indexed. 단일 번들이면 빈 리스트.
     """
+    cfg = bundle_cfg or {}
     md_files = sorted(extracted_dir.glob("page_*.md"))
     if not md_files:
         return []
@@ -563,11 +565,10 @@ def _detect_bundles(extracted_dir: Path) -> list[tuple[int, int]]:
             continue
         page_num = int(m.group(1))
         content = f.read_text(encoding="utf-8")
-        # payment_form 마커가 있으면 Phase 1 hint와 무관하게 제외
-        if _is_payment_form_content(content):
+        if _is_skip_page(content, cfg):
             continue
         is_hint_cover = bool(re.search(r"^page_type_hint:\s*cover", content, re.MULTILINE | re.IGNORECASE))
-        if is_hint_cover or _is_cover_page_content(content):
+        if is_hint_cover or _is_extra_cover_page(content, cfg):
             cover_pages.append(page_num)
 
     if len(cover_pages) <= 1:

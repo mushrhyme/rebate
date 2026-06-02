@@ -102,7 +102,8 @@
         "type": "cover_breakdown_vs_detail",
         "label": "支店 {key}",
         "cover_breakdown_key": "入出荷支店別",
-        "detail_group_field": "jisho"
+        "detail_group_field": "jisho",
+        "detail_amount_field": "未収金額合計"
       }
     ],
     "show_sections": ["xv"],
@@ -123,6 +124,12 @@
         "得意先", "管理No", "得意先又は商品", "整数部", "小数部",
         "請求書", "作成日", "ご請求期", "お支払予定", "未収取扱", "発行元", "販売促進", "項目"
       ]
+    },
+    "bundle_detection": {
+      "cover_required": ["請求書No", "本体合計金額"],
+      "cover_excluded": ["管理No"],
+      "skip_markers": ["振込先銀行", "決済方法", "お支払明細書", "口座種別"],
+      "skip_excluded": ["本体合計金額"]
     }
   }
 }
