@@ -562,7 +562,25 @@ async def _retry_missing_items(
     try:
         recovered = json.loads(raw)
         if isinstance(recovered, list):
-            return recovered
+            valid: list[dict] = []
+            for item in recovered:
+                cols = item.get('columns')
+                if not isinstance(cols, dict):
+                    logger.warning(
+                        "[%s] 管理No %s — Haiku item에 columns 없음 (폐기): %r",
+                        doc_id, kanri_no,
+                        {k: v for k, v in item.items() if k != 'columns'},
+                    )
+                    continue
+                kingaku = cols.get('金額')
+                if kingaku is None or not isinstance(kingaku, (int, float)) or kingaku <= 0:
+                    logger.warning(
+                        "[%s] 管理No %s — Haiku item의 columns.金額 무효 (폐기): %r",
+                        doc_id, kanri_no, cols,
+                    )
+                    continue
+                valid.append(item)
+            return valid
     except json.JSONDecodeError:
         logger.warning("[%s] 管理No %s 복구 JSON 파싱 실패: %r", doc_id, kanri_no, raw[:200])
     return []

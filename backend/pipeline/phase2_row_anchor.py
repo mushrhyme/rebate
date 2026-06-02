@@ -1,17 +1,23 @@
-"""form_04 row anchor 생성기 — Phase 2 LLM 호출 전 후보 상품 행 앵커링.
+"""Phase 2 row anchor 생성기 — form_types.json 설정 기반 범용 행 앵커링.
 
 왜 필요한가:
-  현재 Phase 2는 LLM에게 "문서에서 item을 찾아라"고 시킨다.
-  반복 표에서 LLM은 8줄 이상 연속 헤더·집계 행을 지난 뒤 첫 번째 상품 행을 놓친다.
+  LLM이 반복 표에서 블록 헤더 직후 첫 번째 상품 행을 놓치는 문제를 방지한다.
   row anchor는 "MD에 이 후보 행들이 있다"는 사실을 Python이 먼저 앵커링하고,
   LLM은 각 row_id에 대해 item / not_item 중 하나로 답하도록 계약을 바꾼다.
 
+설정 (form_types.json의 row_anchor 섹션):
+  block_pattern    — 블록 헤더를 감지하는 정규식. 그룹 1: 블록 ID
+  subgroup_pattern — 서브그룹 헤더를 감지하는 정규식. 그룹 1: 서브그룹명 (옵션)
+  condition_pattern — 条件タイプ 감지 정규식 (옵션)
+  total_pattern    — 합계 행을 감지하는 정규식
+  header_keywords  — 제품 행 판별 시 제외할 키워드 목록
+
 앵커 필드:
-  row_id              — "p{page:03d}:k{kanri_no}:r{idx:02d}" (문서 내 유일)
+  row_id              — "p{page:03d}:k{block_id}:r{idx:02d}" (문서 내 유일)
   page                — 페이지 번호
-  kanri_no_hint       — 현재 管理No
-  condition_type_hint — 定番条件 / 原価引き条件 / 導入条件 (없으면 None)
-  jisho_hint          — 현재 入出荷支店 (없으면 "")
+  kanri_no_hint       — 현재 블록 ID (管理No 등)
+  condition_type_hint — 条件タイプ (없으면 None)
+  jisho_hint          — 서브그룹명 (없으면 "")
   raw_row             — 원본 MD 행 문자열 (strip 후)
   amount_hint         — 마지막 양수 정수 셀 = 金額 추정값 (없으면 None)
   row_index_in_kanri  — 블록 내 0-기반 인덱스
@@ -23,29 +29,22 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_RE_KANRI_HEADER   = re.compile(r'管理No\s*[：:]\s*(\d{5,8})')
-_RE_CONDITION_TYPE = re.compile(r'(定番条件|原価引き条件|導入条件)')
-_RE_JISHO          = re.compile(r'入出荷支店\s*[：:]\s*(\S+)')
-_RE_TOTAL_CELL     = re.compile(r'計[：:]')
 
-_HEADER_KEYWORDS = (
-    '計上場所', '入出荷支店', '入出荷センター',
-    '得意先', '管理No', '得意先又は商品', '整数部', '小数部',
-    # 各ページ冒頭の文書ヘッダ行（請求書No./作成日/支払予定日 等）
-    '請求書', '作成日', 'ご請求期', 'お支払予定', '未収取扱', '発行元', '販売促進', '項目',
-)
-
-
-def _is_product_row(line: str, cells: list[str]) -> bool:
+def _is_product_row(
+    line: str,
+    cells: list[str],
+    header_keywords: tuple[str, ...],
+    re_total: re.Pattern,
+) -> bool:
     """상품 행 판정 — header/aggregate/separator 제외."""
     if len(cells) < 3:
         return False
     product = cells[1]
     if not product:
         return False
-    if _RE_TOTAL_CELL.search(line):
+    if re_total.search(line):
         return False
-    for kw in _HEADER_KEYWORDS:
+    for kw in header_keywords:
         if kw in product:
             return False
     if re.match(r'^[*＊]+$', product):
@@ -64,18 +63,22 @@ def _extract_amount_hint(cells: list[str]) -> int | None:
     return None
 
 
-def build_row_anchors_form04(output_dir: Path) -> list[dict]:
-    """form_04 detail page MD 전체를 스캔해 후보 상품 행 앵커 목록을 반환.
+def build_row_anchors(row_anchor_config: dict, output_dir: Path) -> list[dict]:
+    """form_types.json row_anchor 설정 기반 범용 행 앵커 생성.
 
-    cover / payment_form 페이지는 관리No가 없으므로 앵커가 생성되지 않는다.
-    detail 페이지에서만 실질적인 앵커가 생긴다.
+    신규 양식 추가 시 코드 수정 없이 form_types.json의 row_anchor 섹션만으로 동작한다.
     """
-    anchors: list[dict] = []
+    re_block      = re.compile(row_anchor_config["block_pattern"])
+    re_subgroup   = re.compile(row_anchor_config["subgroup_pattern"]) if row_anchor_config.get("subgroup_pattern") else None
+    re_condition  = re.compile(row_anchor_config["condition_pattern"]) if row_anchor_config.get("condition_pattern") else None
+    re_total      = re.compile(row_anchor_config.get("total_pattern", r'計[：:]'))
+    header_kws    = tuple(row_anchor_config.get("header_keywords", []))
 
-    current_jisho:     str       = ""
-    current_kanri:     str | None = None
+    anchors: list[dict] = []
+    current_subgroup:  str        = ""
+    current_block:     str | None = None
     current_condition: str | None = None
-    row_idx:           int        = 0
+    row_idx: int = 0
 
     md_files = sorted(
         output_dir.glob("page_*.md"),
@@ -91,16 +94,14 @@ def build_row_anchors_form04(output_dir: Path) -> list[dict]:
         content = md_file.read_text(encoding='utf-8')
 
         # detail 페이지만 앵커 대상 — cover/summary/payment_form 제외
-        # page_type_hint가 없거나 detail/unknown이면 통과
         hint_m = re.search(r'^page_type_hint:\s*(\w+)', content, re.MULTILINE | re.IGNORECASE)
         if hint_m:
             role = hint_m.group(1).lower()
             if role in ('cover', 'summary', 'payment_form'):
                 continue
 
-        # 페이지 경계에서 current_kanri 리셋 — 이전 페이지에서 이어진 kanri 상태가
-        # 다음 페이지 상단의 문서 헤더 행을 product anchor로 잘못 등록하는 것을 방지
-        current_kanri = None
+        # 페이지 경계에서 블록 리셋 — 이전 페이지 상태가 다음 페이지 헤더 행을 오염하는 것 방지
+        current_block = None
         row_idx = 0
 
         for line in content.splitlines():
@@ -108,39 +109,39 @@ def build_row_anchors_form04(output_dir: Path) -> list[dict]:
                 continue
             cells = [c.strip() for c in line.split('|')]
 
-            # ── 入出荷支店 헤더 감지 ──────────────────────────────
-            m_jisho = _RE_JISHO.search(line)
-            if m_jisho:
-                current_jisho = m_jisho.group(1).strip()
-                continue
+            # 서브그룹 헤더 감지 (예: 入出荷支店)
+            if re_subgroup:
+                m_sub = re_subgroup.search(line)
+                if m_sub:
+                    current_subgroup = m_sub.group(1).strip()
+                    continue
 
-            # ── 管理No 헤더 감지 ─────────────────────────────────
-            m_kanri = _RE_KANRI_HEADER.search(line)
-            if m_kanri and not _RE_TOTAL_CELL.search(line):
-                current_kanri = m_kanri.group(1)
-                m_cond = _RE_CONDITION_TYPE.search(line)
-                current_condition = m_cond.group(1) if m_cond else None
+            # 블록 헤더 감지 (예: 管理No:1710151)
+            m_block = re_block.search(line)
+            if m_block and not re_total.search(line):
+                current_block = m_block.group(1)
+                current_condition = (
+                    re_condition.search(line).group(1)
+                    if re_condition and re_condition.search(line) else None
+                )
                 row_idx = 0
                 continue
 
-            if current_kanri is None:
+            if current_block is None:
                 continue
 
-            # ── 상품 행 판정 ──────────────────────────────────────
-            if not _is_product_row(line, cells):
+            if not _is_product_row(line, cells, header_kws, re_total):
                 continue
 
-            amount_hint = _extract_amount_hint(cells)
-            row_id = f"p{page_num:03d}:k{current_kanri}:r{row_idx:02d}"
-
+            row_id = f"p{page_num:03d}:k{current_block}:r{row_idx:02d}"
             anchors.append({
                 'row_id':              row_id,
                 'page':                page_num,
-                'kanri_no_hint':       current_kanri,
+                'kanri_no_hint':       current_block,
                 'condition_type_hint': current_condition,
-                'jisho_hint':          current_jisho,
+                'jisho_hint':          current_subgroup,
                 'raw_row':             line.strip(),
-                'amount_hint':         amount_hint,
+                'amount_hint':         _extract_amount_hint(cells),
                 'row_index_in_kanri':  row_idx,
             })
             row_idx += 1

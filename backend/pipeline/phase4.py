@@ -66,9 +66,12 @@ async def run_phase4(doc_id: str, run_id: str = "", skip_xv: bool = False) -> di
         log.info("[%s] Python calc xv 사용 (%d개) — Claude 교차검증 건너뜀", doc_id, len(python_xv))
         return phase4_data
 
-    xv_results = await _run_cross_validation(doc_id, phase4_data, settings, run_id=run_id)
+    xv_flags: dict = {}
+    xv_results = await _run_cross_validation(doc_id, phase4_data, settings, run_id=run_id, error_flags=xv_flags)
     if xv_results is not None:
         phase4_data["xv"] = xv_results
+        if xv_flags.get("xv_error"):
+            phase4_data["xv_error"] = True
         out_path.write_text(
             json.dumps(phase4_data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -77,7 +80,7 @@ async def run_phase4(doc_id: str, run_id: str = "", skip_xv: bool = False) -> di
     return phase4_data
 
 
-async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id: str = "") -> list[dict] | None:
+async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id: str = "", error_flags: dict | None = None) -> list[dict] | None:
     """Claude が form_XX.md の교차검증 섹션을 읽고 검증 결과 반환.
 
     form_XX.md 없음 또는 교차검증 섹션 없음 → None (xv 유지).
@@ -215,4 +218,6 @@ async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id
         ]
     except (json.JSONDecodeError, AttributeError) as e:
         log.error("[%s] 교차검증 JSON 파싱 실패: %s — raw: %r", doc_id, e, raw[:200])
+        if error_flags is not None:
+            error_flags["xv_error"] = True
         return []

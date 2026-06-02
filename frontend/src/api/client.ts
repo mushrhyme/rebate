@@ -398,6 +398,7 @@ export interface Phase4Result {
   doc_id: string
   form_id: string
   xv: CrossValidation[]
+  xv_error?: boolean
   rows: Phase4Row[]
   summary?: RateSummary
   bundles?: BundleInfo[]

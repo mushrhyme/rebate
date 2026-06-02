@@ -110,18 +110,45 @@ def _parse_md_tables(md_text: str) -> list[dict]:
 
 
 def _validate_page_md(ocr_text: str, md_text: str, page_num: int) -> list[dict]:
-    """T1 구조 검증 — OCR 테이블 있는데 MD 테이블 없음.
+    """T1/T2/T4 구조 검증.
+    T1: OCR 테이블 있는데 MD 테이블 없음 (high)
+    T2: 테이블 컬럼 수 손실 2개 이상 (medium)
+    T4: 테이블 행 수 60% 이상 손실 (medium, OCR 3행 이상 테이블만)
     반환: 실패 항목 목록 [{page, check, severity, detail}, ...].
     """
     issues: list[dict] = []
     ocr_tables = _parse_ocr_tables(ocr_text)
     md_tables = _parse_md_tables(md_text)
 
+    # T1 — OCR에 테이블이 있는데 MD에 테이블이 전혀 없음
     if ocr_tables and not md_tables:
         issues.append({
             "page": page_num, "check": "T1", "severity": "high",
             "detail": f"OCR {len(ocr_tables)}개 테이블 있으나 MD 테이블 없음",
         })
+        return issues  # T2/T4는 MD 테이블이 있어야 비교 가능
+
+    # T2/T4 — 테이블 수가 일치할 때만 개별 테이블 비교
+    # Phase 1이 보조 행(헤더 반복·집계행)을 병합할 수 있으므로 T4는 40% 미만 임계값 적용
+    if ocr_tables and md_tables and len(ocr_tables) == len(md_tables):
+        for i, (ocr_t, md_t) in enumerate(zip(ocr_tables, md_tables)):
+            if ocr_t["cols"] > md_t["cols"] + 2:
+                issues.append({
+                    "page": page_num, "check": "T2", "severity": "medium",
+                    "detail": (
+                        f"테이블 {i+1}: OCR {ocr_t['cols']}컬럼 → MD {md_t['cols']}컬럼 "
+                        f"(손실 {ocr_t['cols'] - md_t['cols']}개)"
+                    ),
+                })
+            if ocr_t["rows"] >= 3 and md_t["rows"] < ocr_t["rows"] * 0.4:
+                pct = round(md_t["rows"] / ocr_t["rows"] * 100)
+                issues.append({
+                    "page": page_num, "check": "T4", "severity": "medium",
+                    "detail": (
+                        f"테이블 {i+1}: OCR {ocr_t['rows']}행 → MD {md_t['rows']}행 "
+                        f"({pct}% 보존, 60% 미만)"
+                    ),
+                })
 
     return issues
 

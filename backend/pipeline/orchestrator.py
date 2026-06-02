@@ -23,7 +23,7 @@ from ..db.queries import (
 from .ocr import run_ocr
 from .phase1 import run_phase1
 from .phase2 import run_phase2
-from .phase2_row_anchor import build_row_anchors_form04, save_row_anchors
+from .phase2_row_anchor import build_row_anchors, save_row_anchors
 from .phase2_verify import run_phase2_verify
 from .phase3 import run_phase3, _upsert_cache_row, _upsert_dist_cache_row, _build_issuer_fingerprint, _parse_fingerprint_fields
 from .phase4 import run_phase4
@@ -98,11 +98,17 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
             await run_phase1(doc_id, pages_dir, extracted_dir, run_id=run_id)
             log.info("[%s] Phase 1 완료", doc_id)
 
-            # ── Phase 2 준비: form_04 row anchor 생성 ──────────────────
+            # ── Phase 2 준비: row anchor 생성 (form_types.json row_anchor 설정 기반) ──
             row_anchors_all: list[dict] = []
-            if form_id == "form_04":
+            _form_types_path = settings.workspace_root / "config" / "form_types.json"
+            _form_cfg = (
+                json.loads(_form_types_path.read_text(encoding="utf-8")).get(form_id, {})
+                if _form_types_path.exists() else {}
+            )
+            _row_anchor_cfg = _form_cfg.get("row_anchor")
+            if _row_anchor_cfg:
                 row_anchors_all = await asyncio.to_thread(
-                    build_row_anchors_form04, extracted_dir
+                    build_row_anchors, _row_anchor_cfg, extracted_dir
                 )
                 await asyncio.to_thread(save_row_anchors, extracted_dir, row_anchors_all)
                 log.info("[%s] row anchor %d행 생성", doc_id, len(row_anchors_all))
@@ -125,11 +131,26 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
                 phase2_results = []
                 for start, end in bundles:
                     bundle_pages = list(range(start, end + 1))
-                    r = await run_phase2(
-                        doc_id, form_id, extracted_dir, page_range=(start, end),
-                        run_id=run_id, row_anchors=_filter_anchors(bundle_pages),
+                    detail_chunks = await asyncio.to_thread(
+                        _build_detail_chunks, extracted_dir, (start, end)
                     )
-                    phase2_results.append(r)
+                    if detail_chunks:
+                        log.info(
+                            "[%s] 번들 (%d-%d) 청크 분할 (%d청크)",
+                            doc_id, start, end, len(detail_chunks),
+                        )
+                        for chunk_pages in detail_chunks:
+                            r = await run_phase2(
+                                doc_id, form_id, extracted_dir, page_numbers=chunk_pages,
+                                run_id=run_id, row_anchors=_filter_anchors(chunk_pages),
+                            )
+                            phase2_results.append(r)
+                    else:
+                        r = await run_phase2(
+                            doc_id, form_id, extracted_dir, page_range=(start, end),
+                            run_id=run_id, row_anchors=_filter_anchors(bundle_pages),
+                        )
+                        phase2_results.append(r)
                 phase2_result = _merge_phase2_results(phase2_results)
                 phase2_result["bundles"] = [
                     {"bundle_idx": i, "page_range": [s, e], "cover_page": s}
@@ -418,14 +439,21 @@ def _get_page_roles(extracted_dir: Path) -> dict[int, str]:
     return roles
 
 
-def _build_detail_chunks(extracted_dir: Path) -> list[list[int]] | None:
+def _build_detail_chunks(
+    extracted_dir: Path,
+    page_range: tuple[int, int] | None = None,
+) -> list[list[int]] | None:
     """detail 페이지 수가 임계값 초과 시 청크 목록 반환. 불필요하면 None.
 
+    page_range: (start, end) 지정 시 해당 범위 내 페이지만 대상으로 삼는다 (번들 모드용).
     각 청크 = cover 전체 + 가장 가까운 summary 최대 N개 + detail 페이지 N개.
     PHASE2_OVERLAP=0(기본값): 각 페이지는 정확히 하나의 청크에만 속한다.
     교차 페이지 블록이 발생해도 phase2_verify가 역산 검증으로 복구한다.
     """
     roles = _get_page_roles(extracted_dir)
+    if page_range:
+        start_p, end_p = page_range
+        roles = {p: r for p, r in roles.items() if start_p <= p <= end_p}
     cover_pages   = sorted(p for p, r in roles.items() if r == "cover")
     summary_pages = sorted(p for p, r in roles.items() if r == "summary")
     detail_pages  = sorted(p for p, r in roles.items() if r not in ("cover", "summary"))
@@ -461,6 +489,7 @@ def _dedup_items(items: list[dict]) -> list[dict]:
     """invoice_no 또는 내용 해시 기준으로 중복 항목 제거.
 
     overlap 경계에서 같은 항목이 여러 청크에서 추출될 수 있어 필요.
+    kanri_no를 hash에 포함해 다른 管理No의 동일 제품·금액 항목을 별개로 유지한다.
     """
     seen: set[str] = set()
     result: list[dict] = []
@@ -472,6 +501,7 @@ def _dedup_items(items: list[dict]) -> list[dict]:
             key = hashlib.md5(
                 json.dumps(
                     {
+                        "kanri_no": item.get("kanri_no", ""),
                         "customer": item.get("customer", ""),
                         "product":  item.get("product", ""),
                         "columns":  item.get("columns", {}),
@@ -559,7 +589,8 @@ def _merge_phase2_results(results: list[dict]) -> dict:
 
     - pages[]: page 번호 기준 dedup (cover가 여러 청크에 반복 등장)
     - items[]: invoice_no 또는 내용 해시 기준 dedup (overlap 경계 중복 제거)
-    - cover_totals / hatsu_month: 첫 번째 결과에서만 가져옴
+    - cover_totals: 첫 번째 결과에서만 가져옴
+    - issuer: pages[]에 포함되므로 별도 반환 불필요 — phase3.py가 pages[]를 순회해 추출함
     """
     seen_pages: set[int] = set()
     pages: list[dict] = []

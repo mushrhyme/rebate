@@ -12,6 +12,7 @@
 import asyncio
 import csv
 import json
+import logging
 import re
 import unicodedata
 from pathlib import Path
@@ -19,6 +20,8 @@ from pathlib import Path
 import anthropic
 
 from ..core.config import get_settings
+
+log = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT_CACHE: str | None = None
 
@@ -552,7 +555,11 @@ async def run_phase3(
                 "candidates": _candidates,
             })
         else:
-            # 0건 → pending (NOT_FOUND)
+            # 0건 → retail_user.csv에 해당 소매처코드 행 없음 (판매처코드 정의 미비)
+            log.warning(
+                "[%s] dist NOT_FOUND — 소매처 '%s' (코드 %s)에 대한 판매처 후보가 retail_user.csv에 없음",
+                "phase3", _name, _rc,
+            )
             pending.append({
                 "mapping_type": "dist",
                 "ocrName": _name,
@@ -687,6 +694,11 @@ async def run_phase3(
             confirmed_retailers[_name]["dist_code"] = _dc
             _append_dist_cache(mappings_dir / "ocr_dist.csv", form_id, issuer_fingerprint, _rc, _dc, _dn)
         else:
+            if not _candidates:
+                log.warning(
+                    "[%s] dist NOT_FOUND (Claude 후처리) — 소매처 '%s' (코드 %s)에 대한 판매처 후보 없음",
+                    "phase3", _name, _rc,
+                )
             pending.append({
                 "mapping_type": "dist",
                 "ocrName":      _name,

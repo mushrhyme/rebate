@@ -882,14 +882,26 @@ export function Results() {
                 교차검증
               </p>
               {activeXv.length === 0 ? (
-                <div style={{
-                  display: 'flex', alignItems: 'center', gap: 6,
-                  background: '#eaf4ee', borderRadius: 8, padding: '7px 12px',
-                  fontSize: 11, fontWeight: 600, color: '#2d7d4a',
-                }}>
-                  <CheckCircle2 size={13} />
-                  <span>합계 {totalAmount.toLocaleString()}¥</span>
-                </div>
+                result.xv_error ? (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    background: '#fdf0e8', border: '1px solid #dbb590',
+                    borderRadius: 8, padding: '7px 12px',
+                    fontSize: 11, fontWeight: 600, color: '#c4622c',
+                  }}>
+                    <AlertTriangle size={13} />
+                    <span>교차검증 파싱 오류 — 수동 확인 필요</span>
+                  </div>
+                ) : (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    background: '#eaf4ee', borderRadius: 8, padding: '7px 12px',
+                    fontSize: 11, fontWeight: 600, color: '#2d7d4a',
+                  }}>
+                    <CheckCircle2 size={13} />
+                    <span>합계 {totalAmount.toLocaleString()}¥</span>
+                  </div>
+                )
               ) : (
                 <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
                   {activeXv.map((v, i) => (

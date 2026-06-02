@@ -699,6 +699,15 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
             "rows":    [_export(r) for r in rows_out],
             "summary": summary,
         }
+        if form_cfg.get("show_sections"):
+            payload["show_sections"] = form_cfg["show_sections"]
+        if form_cfg.get("aggregate_label"):
+            payload["aggregate_label"] = form_cfg["aggregate_label"]
+        if bundles_info:
+            payload["bundles"] = [
+                {"bundle_idx": b["bundle_idx"], "page_range": b["page_range"], "cover_page": b["cover_page"]}
+                for b in bundles_info
+            ]
         if bundle_xv_list:
             payload["bundle_xv"] = bundle_xv_list
         with open(out_path, "w", encoding="utf-8") as f:

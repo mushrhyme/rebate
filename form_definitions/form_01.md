@@ -237,3 +237,10 @@ Python 코드 전용. Phase 2·3에서는 이 섹션을 무시한다.
 | ① | detail 全 `金額` 합산 (税抜) | cover `販促金請求 8%対象 税抜` + `販促金請求 10%対象 税抜` 합산 | 消費税計上 行 처리는 현업 확인 필요 |
 | ② | summary 得意先小計 합계 | cover `販促金請求 今回請求金額合計`                                 |                                       |
 | ③ | 得意先별 `金額` 합산  | summary `得意先小計`                                                |                                       |
+
+---
+
+## [Phase 4] 출력 설정
+
+show_sections: rate_summary, xv
+aggregate_label: 소매처별 집계

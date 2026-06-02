@@ -19,7 +19,16 @@ def _get_system_prompt() -> str:
     global _SYSTEM_PROMPT_CACHE
     if _SYSTEM_PROMPT_CACHE is None:
         prompt_path = get_settings().workspace_root / "docs" / "phase2-prompt.md"
-        _SYSTEM_PROMPT_CACHE = prompt_path.read_text(encoding="utf-8")
+        raw = prompt_path.read_text(encoding="utf-8")
+        # ## 프롬프트 섹션의 코드 펜스 안 내용만 추출 (메타 설명·예시 섹션 제외)
+        m = re.search(r'## 프롬프트\s*\n+```[^\n]*\n', raw)
+        if m:
+            prompt_start = m.end()
+            close = raw.rfind('\n```')
+            content = raw[prompt_start:close] if close > prompt_start else raw[prompt_start:]
+        else:
+            content = raw
+        _SYSTEM_PROMPT_CACHE = content.strip()
     return _SYSTEM_PROMPT_CACHE
 
 
