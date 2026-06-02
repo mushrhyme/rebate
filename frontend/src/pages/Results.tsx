@@ -527,11 +527,11 @@ function groupByJishoThenCustomerThenProduct(rows: Phase4Row[]) {
   })
 }
 
-// 代表スーパー(소매처코드)가 있으면 그걸로 그룹핑 → OCR 표기 흔들림 방지
+// customer_ocr(OCR 소매처명) 기준 그룹핑 — 同一 得意先코드라도 OCR명 단위로 분리
 function groupRows(rows: Phase4Row[]): Map<string, Phase4Row[]> {
   const map = new Map<string, Phase4Row[]>()
   for (const r of rows) {
-    const key = r.代表スーパー || r.customer_ocr || r.スーパー || '—'
+    const key = r.customer_ocr || r.代表スーパー || r.スーパー || '—'
     if (!map.has(key)) map.set(key, [])
     map.get(key)!.push(r)
   }
@@ -730,8 +730,9 @@ export function Results() {
   // 소매처별 소계 (Stage 1 집계용)
   const retailerTotals = Array.from(grouped.entries()).map(([groupKey, rows]) => ({
     groupKey,
-    label:    rows[0]?.代表スーパー ? (rows[0]?.スーパー ?? groupKey) : groupKey,
+    label:    groupKey,
     code:     rows[0]?.代表スーパー ?? '',
+    chain:    rows[0]?.スーパー ?? '',
     subtotal: rows.reduce((s, r) => s + (r['未収金額合計'] ?? 0), 0),
     hasWarn:  rows.some(r => r.unconfirmed || r.net_lt_honbu),
   }))
@@ -952,7 +953,7 @@ export function Results() {
                 </span>
               </div>
               <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
-                {retailerTotals.map(({ groupKey, label, code, subtotal, hasWarn }, i) => (
+                {retailerTotals.map(({ groupKey, label, code, chain, subtotal, hasWarn }, i) => (
                   <div
                     key={groupKey}
                     style={{
@@ -967,8 +968,10 @@ export function Results() {
                       <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {label}
                       </div>
-                      {code && (
-                        <div style={{ fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>{code}</div>
+                      {(code || chain) && (
+                        <div style={{ fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>
+                          {[code, chain].filter(Boolean).join(' · ')}
+                        </div>
                       )}
                     </div>
                     <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--primary)', fontFamily: 'var(--mono)', flexShrink: 0 }}>
