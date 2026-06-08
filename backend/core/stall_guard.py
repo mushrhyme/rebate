@@ -9,55 +9,59 @@
 import asyncio
 import logging
 import os
-
-import asyncpg
+from datetime import datetime, timezone, timedelta
 
 log = logging.getLogger(__name__)
 
-_STALL_STATES = ("queued", "ocr", "analyzing", "phase1", "phase2", "phase3", "phase4")
+_STALL_STATES = {"queued", "ocr", "analyzing", "phase1", "phase2", "phase3", "phase4"}
 STALL_TIMEOUT_MINUTES = int(os.getenv("STALL_TIMEOUT_MINUTES", "30"))
 _WATCH_INTERVAL_SEC = 300  # 5분마다 체크
 
 
-async def reset_stalled_on_startup(pool: asyncpg.Pool) -> None:
+async def reset_stalled_on_startup() -> None:
     """서버 시작 시 호출. 이전 프로세스가 남긴 진행 중 문서를 error로 리셋."""
-    rows = await pool.fetch(
-        """
-        UPDATE v3_documents
-           SET status     = 'error',
-               error_type = 'pipeline_stalled',
-               updated_at = NOW()
-         WHERE status = ANY($1::text[])
-        RETURNING doc_id, status
-        """,
-        list(_STALL_STATES),
-    )
-    if rows:
-        ids = [r["doc_id"] for r in rows]
+    from ..db.queries import list_documents, update_document_error
+    docs = await list_documents()
+    stalled = [d for d in docs if d.get("status") in _STALL_STATES]
+    for doc in stalled:
+        await update_document_error(
+            doc["doc_id"], "pipeline_stalled", "", "서버 재시작으로 인한 상태 초기화"
+        )
+    if stalled:
+        ids = [d["doc_id"] for d in stalled]
         log.warning("startup: %d건의 중단 문서를 error로 리셋 — %s", len(ids), ids)
 
 
-async def stall_watcher(pool: asyncpg.Pool) -> None:
+async def stall_watcher() -> None:
     """백그라운드 태스크. 런타임 중 hang 문서를 주기적으로 감지."""
+    from ..db.queries import list_documents, update_document_error
     log.info("stall_watcher 시작 (타임아웃=%dm, 체크주기=%ds)", STALL_TIMEOUT_MINUTES, _WATCH_INTERVAL_SEC)
     while True:
         await asyncio.sleep(_WATCH_INTERVAL_SEC)
         try:
-            rows = await pool.fetch(
-                """
-                UPDATE v3_documents
-                   SET status     = 'error',
-                       error_type = 'pipeline_stalled',
-                       updated_at = NOW()
-                 WHERE status = ANY($1::text[])
-                   AND updated_at < NOW() - ($2 || ' minutes')::interval
-                RETURNING doc_id, status, updated_at
-                """,
-                list(_STALL_STATES),
-                str(STALL_TIMEOUT_MINUTES),
-            )
-            if rows:
-                ids = [r["doc_id"] for r in rows]
+            docs = await list_documents()
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALL_TIMEOUT_MINUTES)
+            stalled = []
+            for d in docs:
+                if d.get("status") not in _STALL_STATES:
+                    continue
+                updated = d.get("updated_at")
+                if not updated:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(updated)
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if ts < cutoff:
+                        stalled.append(d)
+                except ValueError:
+                    pass
+            for doc in stalled:
+                await update_document_error(
+                    doc["doc_id"], "pipeline_stalled", "", f"{STALL_TIMEOUT_MINUTES}분 이상 상태 변화 없음"
+                )
+            if stalled:
+                ids = [d["doc_id"] for d in stalled]
                 log.warning("stall_watcher: %d건 hang 감지 → error 처리 — %s", len(ids), ids)
         except Exception:
             log.exception("stall_watcher 체크 중 오류")

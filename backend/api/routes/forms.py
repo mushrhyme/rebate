@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from ...core.auth import get_current_user
 from ...core.config import get_settings
-from ...core.database import get_pool
+from ...core.s3_store import read_json, write_json
 
 router = APIRouter(prefix="/api/v3/forms", tags=["forms"])
 
@@ -49,26 +49,26 @@ def _list_forms(settings) -> list[dict]:
     return forms
 
 
+def _get_form_edit_log(form_id: str) -> list[dict]:
+    return read_json(f"config/form_edit_logs/{form_id}.json") or []
+
+
+def _append_form_edit_log(form_id: str, entry: dict) -> None:
+    log = _get_form_edit_log(form_id)
+    log.insert(0, entry)  # 최신 먼저
+    write_json(f"config/form_edit_logs/{form_id}.json", log[:50])  # 최대 50개 보존
+
+
 @router.get("")
 async def list_forms(user: dict = Depends(get_current_user)):
     settings = get_settings()
     forms = _list_forms(settings)
-    pool = get_pool()
-    form_ids = [f["form_id"] for f in forms]
-    if form_ids:
-        rows = await pool.fetch(
-            """SELECT DISTINCT ON (form_id) form_id, display_name, saved_at
-               FROM form_edit_logs
-               WHERE form_id = ANY($1::text[])
-               ORDER BY form_id, saved_at DESC""",
-            form_ids,
-        )
-        last_edits = {row["form_id"]: row for row in rows}
-        for form in forms:
-            edit = last_edits.get(form["form_id"])
-            if edit:
-                form["last_editor"] = edit["display_name"]
-                form["last_edited_at"] = edit["saved_at"].isoformat()
+    for form in forms:
+        log = _get_form_edit_log(form["form_id"])
+        if log:
+            latest = log[0]
+            form["last_editor"] = latest.get("display_name")
+            form["last_edited_at"] = latest.get("saved_at")
     return forms
 
 
@@ -76,32 +76,18 @@ async def list_forms(user: dict = Depends(get_current_user)):
 async def get_form_history(
     form_id: str, limit: int = 10, user: dict = Depends(get_current_user)
 ):
-    pool = get_pool()
-    rows = await pool.fetch(
-        """SELECT id, display_name, saved_at, content_hash, content_before, content_after
-           FROM form_edit_logs
-           WHERE form_id = $1
-           ORDER BY saved_at DESC
-           LIMIT $2""",
-        form_id,
-        limit,
-    )
+    log = _get_form_edit_log(form_id)[:limit]
     result = []
-    for row in rows:
-        diff_lines = list(
-            difflib.unified_diff(
-                row["content_before"].splitlines(),
-                row["content_after"].splitlines(),
-                lineterm="",
-                n=2,
-            )
-        )
+    for entry in log:
+        before = entry.get("content_before", "")
+        after = entry.get("content_after", "")
+        diff_lines = list(difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2))
         result.append({
-            "id": row["id"],
-            "display_name": row["display_name"],
-            "saved_at": row["saved_at"].isoformat(),
-            "content_hash": row["content_hash"],
-            "diff": "\n".join(diff_lines[2:]),  # --- +++ 헤더 제거
+            "id": entry.get("id", ""),
+            "display_name": entry.get("display_name"),
+            "saved_at": entry.get("saved_at"),
+            "content_hash": entry.get("content_hash"),
+            "diff": "\n".join(diff_lines[2:]),
         })
     return result
 
@@ -304,3 +290,36 @@ async def update_form(form_id: str, body: PatchFormBody, user: dict = Depends(ge
         raise HTTPException(status_code=404, detail="양식 없음")
     path.write_text(body.content, encoding="utf-8")
     return {"ok": True}
+
+
+class DeleteFormBody(BaseModel):
+    password: str
+
+
+@router.delete("/{form_id}")
+async def delete_form(form_id: str, body: DeleteFormBody, user: dict = Depends(get_current_user)):
+    import json as _json
+    settings = get_settings()
+
+    if not settings.admin_delete_password:
+        raise HTTPException(status_code=403, detail="ADMIN_DELETE_PASSWORD 환경변수가 설정되지 않았습니다.")
+    if body.password != settings.admin_delete_password:
+        raise HTTPException(status_code=403, detail="관리자 비밀번호가 올바르지 않습니다.")
+
+    path = settings.form_definitions_dir / f"{form_id}.md"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="양식 없음")
+
+    path.unlink()
+
+    form_types_path = settings.workspace_root / "config" / "form_types.json"
+    if form_types_path.exists():
+        form_types = _json.loads(form_types_path.read_text(encoding="utf-8"))
+        if form_id in form_types:
+            del form_types[form_id]
+            form_types_path.write_text(
+                _json.dumps(form_types, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+    return {"ok": True, "form_id": form_id}

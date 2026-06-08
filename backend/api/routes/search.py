@@ -15,6 +15,10 @@ router = APIRouter(prefix="/api/v3/search", tags=["search"])
 
 @lru_cache(maxsize=1)
 def _load_products(mappings_dir: Path) -> list[dict]:
+    from ...core.sheets_store import get_sheets_store
+    store = get_sheets_store()
+    if store:
+        return store.read_csv("unit_price.csv")
     path = mappings_dir / "unit_price.csv"
     with path.open(encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))
@@ -22,6 +26,10 @@ def _load_products(mappings_dir: Path) -> list[dict]:
 
 @lru_cache(maxsize=1)
 def _load_retailers(mappings_dir: Path) -> list[dict]:
+    from ...core.sheets_store import get_sheets_store
+    store = get_sheets_store()
+    if store:
+        return store.read_csv("retail_user.csv")
     path = mappings_dir / "retail_user.csv"
     with path.open(encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))
@@ -104,6 +112,31 @@ async def search_retailer_dists(
                 continue
             seen.add(code)
             results.append({"code": code, "name": r["판매처명"]})
+    return results
+
+
+@router.get("/dist")
+async def search_dist(
+    q: str = Query(..., min_length=1),
+    limit: int = Query(20, le=50),
+    _: dict = Depends(get_current_user),
+):
+    """판매처명 또는 코드로 retail_user.csv 검색."""
+    settings = get_settings()
+    rows = _load_retailers(settings.mappings_dir)
+    q_lower = q.lower()
+    seen: set[str] = set()
+    results = []
+    for r in rows:
+        code = r["판매처코드"]
+        name = r["판매처명"]
+        if q_lower in name.lower() or q in code:
+            if code in seen:
+                continue
+            seen.add(code)
+            results.append({"code": code, "name": name})
+            if len(results) >= limit:
+                break
     return results
 
 

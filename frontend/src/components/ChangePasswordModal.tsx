@@ -3,7 +3,7 @@ import { Eye, EyeOff } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 
 export function ChangePasswordModal() {
-  const { user, changePassword } = useAuth()
+  const { changePassword } = useAuth()
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
   const [confirm, setConfirm] = useState('')

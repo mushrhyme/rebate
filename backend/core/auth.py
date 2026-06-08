@@ -1,31 +1,28 @@
+"""JWT 기반 인증 — PostgreSQL session 제거."""
+import jwt
 from fastapi import Depends, Header, HTTPException, Query, status
-from .database import get_pool
+
+from .config import get_settings
 
 
-async def _resolve_session(session_id: str | None) -> dict:
-    if not session_id:
+def _decode_token(token: str) -> dict:
+    if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="세션 없음")
-    pool = get_pool()
-    row = await pool.fetchrow(
-        """
-        SELECT u.user_id, u.username, u.display_name, u.display_name_ja,
-               u.is_admin, u.force_password_change,
-               u.department_ko, u.department_ja, u.role, u.category
-        FROM user_sessions s
-        JOIN users u ON u.user_id = s.user_id
-        WHERE s.session_id = $1
-          AND s.expires_at > NOW()
-          AND u.is_active = TRUE
-        """,
-        session_id,
-    )
-    if not row:
+    settings = get_settings()
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="세션 만료")
-    return dict(row)
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="토큰 오류")
+
+    if not payload.get("is_active", True):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="비활성 사용자")
+    return payload
 
 
 async def get_current_user(x_session_id: str | None = Header(default=None)) -> dict:
-    return await _resolve_session(x_session_id)
+    return _decode_token(x_session_id or "")
 
 
 async def get_current_user_sse(
@@ -33,7 +30,7 @@ async def get_current_user_sse(
     sid: str | None = Query(default=None),
 ) -> dict:
     """SSE 전용 — EventSource는 커스텀 헤더 불가하므로 ?sid= 쿼리 파라미터도 허용."""
-    return await _resolve_session(x_session_id or sid)
+    return _decode_token(x_session_id or sid or "")
 
 
 async def require_admin(user: dict = Depends(get_current_user)) -> dict:

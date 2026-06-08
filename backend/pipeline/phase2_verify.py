@@ -28,6 +28,11 @@ _RE_TOTAL_CELL = re.compile(r'計[：:]')
 # 得意先/入出荷/支店/計上場所 계 행은 管理No計가 아님
 _EXCLUDE_KEYWORDS = ('得意先', '入出荷', '支店', '計上場所', '売上未収')
 
+# form_01용: 請求伝票番号 감지 (cells[1] = "4-A8001" 형식)
+_RE_INVOICE_BLOCK = re.compile(r'^\|\s*(\d+[-][A-Z0-9]\d+)\s*\|')
+# form_01용: 請求伝票番号 小計 행 감지
+_RE_INVOICE_TOTAL = re.compile(r'請求伝票番号\s*小計')
+
 
 def _extract_kanri_total(line: str) -> int | None:
     """管理No計 행에서 金額 추출. 해당 행이 아니면 None.
@@ -139,6 +144,63 @@ def _parse_kanri_totals(output_dir: Path) -> dict[str, dict]:
     return result
 
 
+def _parse_invoice_totals(output_dir: Path) -> dict[str, dict]:
+    """form_01용: 請求伝票番号 小計 행 → {invoice_no_prefix: {page, total}} 추출.
+
+    MD 구조:
+      | 4-A8001 | 4-A8001-01 | ... | 340,584 |   ← 블록 시작 (cells[1] = 伝票番号)
+      | | 4-A8001-02 | ... | 70,656 |
+      | | | 請求伝票番号 小計 | ... | 1,522,632 |  ← 소계 행
+    """
+    result: dict[str, dict] = {}
+    current_invoice: str | None = None
+    current_page: int = 0
+
+    md_files = sorted(
+        output_dir.glob("page_*.md"),
+        key=lambda f: int(re.search(r'(\d+)', f.name).group()),
+    )
+
+    for md_file in md_files:
+        m_pg = re.search(r'page_(\d+)\.md', md_file.name)
+        if not m_pg:
+            continue
+        page_num = int(m_pg.group(1))
+
+        content = md_file.read_text(encoding='utf-8')
+
+        # detail 페이지만 대상
+        hint_m = re.search(r'^page_type_hint:\s*(\w+)', content, re.MULTILINE | re.IGNORECASE)
+        if hint_m and hint_m.group(1).lower() in ('cover', 'summary', 'payment_form'):
+            continue
+
+        for line in content.splitlines():
+            if '|' not in line:
+                continue
+
+            # 請求伝票番号 감지 (cells[1] = "4-A8001" 형식)
+            m_inv = _RE_INVOICE_BLOCK.match(line)
+            if m_inv:
+                current_invoice = m_inv.group(1)
+                current_page = page_num
+                continue
+
+            # 請求伝票番号 小計 행 감지
+            if current_invoice and _RE_INVOICE_TOTAL.search(line):
+                cells = [c.strip() for c in line.split('|')]
+                total = None
+                for c in reversed(cells):
+                    num = c.replace(',', '').replace(' ', '')
+                    if num.isdigit() and int(num) > 0:
+                        total = int(num)
+                        break
+                if total is not None:
+                    result[current_invoice] = {'page': current_page, 'total': total}
+                current_invoice = None
+
+    return result
+
+
 def _insert_after_kanri(
     base: list[dict], kanri_no: str, new_items: list[dict]
 ) -> list[dict]:
@@ -168,16 +230,19 @@ def _recover_from_anchor(
     anchor: dict,
     template: dict,
 ) -> dict | None:
-    """단일 row anchor → item 복구.
+    """단일 row anchor → item 복구. 현재 form_04 레이아웃 전용.
 
     template item(같은 kanri_no의 다른 item)에서 상속 필드(customer, source_pages 등)를 가져온다.
     amount_hint가 없거나 product 셀이 비어 있으면 None 반환 (Haiku 폴백).
 
-    column 파싱 전략:
-      - 入数: cells[2] (두 레이아웃 공통)
-      - 数量: '個' 포함 셀
-      - 金額: anchor의 amount_hint (rightmost positive integer — 이미 검증됨)
-      - 備考: 마지막 비어있지 않은 셀이 '*' 이면 '*', 아니면 ''
+    form_04 컬럼 레이아웃 가정:
+      - cells[1]: product (得意先又は商品)
+      - cells[2]: 入数
+      - cells[3]: 数量 (또는 '個' 포함 셀)
+      - cells[5]: 未収条件 OCR
+      - cells[8]: 備考
+    다른 레이아웃을 가진 양식은 kanri_no 기반 template 조회가 실패해 이 함수가 호출되지 않는다.
+    신규 양식 추가 시 form_types.json에 recovery_cell_map을 추가하고 이 함수를 파라미터화할 것.
     """
     line  = anchor['raw_row']
     cells = [c.strip() for c in line.split('|')]
@@ -381,12 +446,18 @@ def _try_deterministic_recovery(
     expected_total: int,
     actual_total:   int,
 ) -> list[dict] | None:
-    """block_text에서 누락 항목을 결정적으로 추출 시도.
+    """block_text에서 누락 항목을 결정적으로 추출 시도. 현재 form_04 레이아웃 전용.
+
+    form_04 컬럼 레이아웃 가정:
+      - cells[1]: product (得意先又は商品)
+      - cells[2]: 入数, cells[3]: 数量, cells[5]: 未収OCR, cells[8]: 備考
+    kanri_no가 없는 양식(form_01 등)은 호출 경로가 없으므로 안전.
+    신규 양식 추가 시 recovery_cell_map 파라미터화 필요.
 
     알고리즘:
       1. block_text의 각 테이블 행을 파싱해 제품 행 후보를 추출
       2. 이미 추출된 항목(existing_items) 제품명과 비교 — 없는 행만 수집
-         (※ 접두사는 form_04 규칙에 따라 비교 시 제거)
+         (접두사 ※·▷는 비교 시 제거)
       3. 수집된 행의 金額 합산 == diff이면 항목 배열로 반환 (Haiku 불필요)
       4. 합산 불일치 시 None → 기존 Haiku 폴백
 
@@ -705,7 +776,39 @@ async def run_phase2_verify(
     phase2_result['items'] = [it for it in phase2_result['items'] if not it.get('not_item')]
     items = phase2_result['items']
 
-    # kanri_no 기반 양식이 아니면 2차 스킵
+    # ── form_01용 2차 역산검증 (請求伝票番号 小計) ─────────────────────────────
+    # kanri_no가 없고 invoice_no가 있는 양식(form_01)에서 실행
+    if (not any('kanri_no' in it for it in items)
+            and any('invoice_no' in it for it in items)):
+        invoice_totals = _parse_invoice_totals(output_dir)
+        if invoice_totals:
+            # items를 請求伝票番号(invoice_no 첫 번째 토큰) 기준으로 집계
+            items_by_invoice: dict[str, list[dict]] = {}
+            for it in items:
+                parts = (it.get('invoice_no') or '').split()
+                if parts:
+                    items_by_invoice.setdefault(parts[0], []).append(it)
+
+            mismatches = [
+                (inv_no, info['page'], info['total'],
+                 sum((it.get('columns', {}).get('金額') or 0)
+                     for it in items_by_invoice.get(inv_no, [])))
+                for inv_no, info in invoice_totals.items()
+                if sum((it.get('columns', {}).get('金額') or 0)
+                       for it in items_by_invoice.get(inv_no, [])) != info['total']
+            ]
+            if mismatches:
+                logger.warning(
+                    "[%s] form_01 역산검증 — %d/%d 伝票 불일치: %s",
+                    doc_id, len(mismatches), len(invoice_totals),
+                    [(inv, exp - act) for inv, _, exp, act in mismatches],
+                )
+            else:
+                logger.info(
+                    "[%s] form_01 역산검증 — 전체 일치 (%d 伝票)", doc_id, len(invoice_totals)
+                )
+
+    # kanri_no 기반 양식이 아니면 管理No計 2차 스킵
     if not any('kanri_no' in item for item in items):
         return phase2_result
 

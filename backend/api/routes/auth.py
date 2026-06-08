@@ -1,18 +1,36 @@
-"""인증 + 사용자 관리 라우트."""
-import uuid
+"""인증 + 사용자 관리 라우트 — JWT + S3 users.json 기반."""
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import bcrypt
+import jwt
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from ...core.auth import get_current_user, require_admin
-from ...core.database import get_pool
+from ...core.config import get_settings
+from ...db.queries import _find_user, _read_users, _write_users
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-SESSION_TTL_HOURS = 12
+
+def _issue_token(user: dict) -> str:
+    settings = get_settings()
+    payload = {
+        "user_id": user["user_id"],
+        "username": user["username"],
+        "display_name": user.get("display_name"),
+        "display_name_ja": user.get("display_name_ja"),
+        "department_ko": user.get("department_ko"),
+        "department_ja": user.get("department_ja"),
+        "role": user.get("role"),
+        "category": user.get("category"),
+        "is_admin": user.get("is_admin", False) or user.get("username") == "admin",
+        "is_active": user.get("is_active", True),
+        "force_password_change": user.get("force_password_change", False),
+        "exp": datetime.now(timezone.utc) + timedelta(hours=settings.jwt_expire_hours),
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
 # ── 인증 ──────────────────────────────────────────────────────────────────────
@@ -29,40 +47,29 @@ class ChangePasswordRequest(BaseModel):
 
 @router.post("/login")
 async def login(body: LoginRequest):
-    pool = get_pool()
-    user = await pool.fetchrow(
-        """SELECT user_id, username, display_name, display_name_ja,
-                  password_hash, is_admin, is_active, force_password_change
-           FROM users WHERE username = $1 AND is_active = TRUE""",
-        body.username,
-    )
-    if not user:
+    users = _read_users()
+    user = _find_user(users, username=body.username)
+    if not user or not user.get("is_active", True):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="사용자 없음")
 
-    pw_bytes = body.password.encode()[:72]
-    if not bcrypt.checkpw(pw_bytes, user["password_hash"].encode()):
+    if not bcrypt.checkpw(body.password.encode()[:72], user["password_hash"].encode()):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="비밀번호 불일치")
 
-    session_id = str(uuid.uuid4())
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)
-    await pool.execute(
-        "INSERT INTO user_sessions (session_id, user_id, expires_at) VALUES ($1, $2, $3)",
-        session_id, user["user_id"], expires_at,
-    )
-    await pool.execute(
-        "UPDATE users SET login_count = login_count + 1, last_login_at = NOW() WHERE user_id = $1",
-        user["user_id"],
-    )
+    # login_count + last_login_at 업데이트
+    user["login_count"] = user.get("login_count", 0) + 1
+    user["last_login_at"] = datetime.now(timezone.utc).isoformat()
+    _write_users(users)
 
+    token = _issue_token(user)
     return {
-        "session_id": session_id,
+        "session_id": token,  # 프론트가 X-Session-Id 헤더로 전송하는 값 — 필드명 유지
         "user": {
             "user_id": user["user_id"],
             "username": user["username"],
-            "display_name": user["display_name"],
-            "display_name_ja": user["display_name_ja"],
-            "is_admin": user["is_admin"] or user["username"] == "admin",
-            "force_password_change": user["force_password_change"],
+            "display_name": user.get("display_name"),
+            "display_name_ja": user.get("display_name_ja"),
+            "is_admin": user.get("is_admin", False) or user.get("username") == "admin",
+            "force_password_change": user.get("force_password_change", False),
         },
     }
 
@@ -84,19 +91,20 @@ async def validate_session(user: dict = Depends(get_current_user)):
 
 @router.post("/change-password")
 async def change_password(body: ChangePasswordRequest, user: dict = Depends(get_current_user)):
-    pool = get_pool()
-    row = await pool.fetchrow("SELECT password_hash FROM users WHERE user_id = $1", user["user_id"])
-    if not bcrypt.checkpw(body.current_password.encode()[:72], row["password_hash"].encode()):
+    users = _read_users()
+    target = _find_user(users, user_id=user["user_id"])
+    if not target:
+        raise HTTPException(status_code=404, detail="사용자 없음")
+
+    if not bcrypt.checkpw(body.current_password.encode()[:72], target["password_hash"].encode()):
         raise HTTPException(status_code=400, detail="현재 비밀번호 불일치")
 
-    if body.new_password == user["username"]:
+    if body.new_password == target["username"]:
         raise HTTPException(status_code=400, detail="ログインIDと同一のパスワードは使用できません")
 
-    new_hash = bcrypt.hashpw(body.new_password.encode()[:72], bcrypt.gensalt()).decode()
-    await pool.execute(
-        "UPDATE users SET password_hash = $1, force_password_change = FALSE WHERE user_id = $2",
-        new_hash, user["user_id"],
-    )
+    target["password_hash"] = bcrypt.hashpw(body.new_password.encode()[:72], bcrypt.gensalt()).decode()
+    target["force_password_change"] = False
+    _write_users(users)
     return {"ok": True}
 
 
@@ -122,74 +130,67 @@ class UpdateUserRequest(BaseModel):
     category: Optional[str] = None
     is_active: Optional[bool] = None
     is_admin: Optional[bool] = None
-    reset_password: bool = False  # True면 비밀번호를 username으로 초기화
+    reset_password: bool = False
 
 
 @router.get("/users")
 async def list_users(admin: dict = Depends(require_admin)):
-    pool = get_pool()
-    rows = await pool.fetch(
-        """SELECT user_id, username, display_name, display_name_ja,
-                  department_ko, department_ja, role, category,
-                  is_admin, is_active, force_password_change,
-                  login_count, last_login_at, created_at
-           FROM users
-           ORDER BY created_at"""
-    )
-    return [dict(r) for r in rows]
+    users = _read_users()
+    return [
+        {k: v for k, v in u.items() if k != "password_hash"}
+        for u in users
+    ]
 
 
 @router.post("/users", status_code=201)
 async def create_user(body: CreateUserRequest, admin: dict = Depends(require_admin)):
-    pool = get_pool()
-    existing = await pool.fetchrow("SELECT user_id FROM users WHERE username = $1", body.username)
-    if existing:
+    users = _read_users()
+    if _find_user(users, username=body.username):
         raise HTTPException(status_code=400, detail="이미 존재하는 ID입니다")
 
+    new_id = max((u["user_id"] for u in users), default=0) + 1
     pw_hash = bcrypt.hashpw(body.username.encode()[:72], bcrypt.gensalt()).decode()
-    row = await pool.fetchrow(
-        """INSERT INTO users
-               (username, display_name, display_name_ja, department_ko, department_ja,
-                role, category, is_admin, password_hash, force_password_change)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,TRUE)
-           RETURNING user_id""",
-        body.username, body.display_name, body.display_name_ja,
-        body.department_ko, body.department_ja,
-        body.role, body.category, body.is_admin, pw_hash,
-    )
-    return {"user_id": row["user_id"], "ok": True}
+    now = datetime.now(timezone.utc).isoformat()
+    new_user = {
+        "user_id": new_id,
+        "username": body.username,
+        "display_name": body.display_name,
+        "display_name_ja": body.display_name_ja,
+        "department_ko": body.department_ko,
+        "department_ja": body.department_ja,
+        "role": body.role,
+        "category": body.category,
+        "is_admin": body.is_admin,
+        "is_active": True,
+        "force_password_change": True,
+        "password_hash": pw_hash,
+        "login_count": 0,
+        "last_login_at": None,
+        "created_at": now,
+    }
+    users.append(new_user)
+    _write_users(users)
+    return {"user_id": new_id, "ok": True}
 
 
 @router.put("/users/{user_id}")
 async def update_user(user_id: int, body: UpdateUserRequest, admin: dict = Depends(require_admin)):
-    pool = get_pool()
-    target = await pool.fetchrow("SELECT username FROM users WHERE user_id = $1", user_id)
+    users = _read_users()
+    target = _find_user(users, user_id=user_id)
     if not target:
         raise HTTPException(status_code=404, detail="사용자 없음")
 
-    sets, vals = [], []
     for field in ("display_name", "display_name_ja", "department_ko", "department_ja",
                   "role", "category", "is_active", "is_admin"):
         v = getattr(body, field)
         if v is not None:
-            sets.append(f"{field} = ${len(vals)+1}")
-            vals.append(v)
+            target[field] = v
 
     if body.reset_password:
-        new_hash = bcrypt.hashpw(target["username"].encode()[:72], bcrypt.gensalt()).decode()
-        sets.append(f"password_hash = ${len(vals)+1}")
-        vals.append(new_hash)
-        sets.append(f"force_password_change = ${len(vals)+1}")
-        vals.append(True)
+        target["password_hash"] = bcrypt.hashpw(target["username"].encode()[:72], bcrypt.gensalt()).decode()
+        target["force_password_change"] = True
 
-    if not sets:
-        return {"ok": True}
-
-    vals.append(user_id)
-    await pool.execute(
-        f"UPDATE users SET {', '.join(sets)} WHERE user_id = ${len(vals)}",
-        *vals,
-    )
+    _write_users(users)
     return {"ok": True}
 
 
@@ -197,8 +198,9 @@ async def update_user(user_id: int, body: UpdateUserRequest, admin: dict = Depen
 async def delete_user(user_id: int, admin: dict = Depends(require_admin)):
     if user_id == admin["user_id"]:
         raise HTTPException(status_code=400, detail="자기 자신은 삭제할 수 없습니다")
-    pool = get_pool()
-    result = await pool.execute("DELETE FROM users WHERE user_id = $1", user_id)
-    if result == "DELETE 0":
+    users = _read_users()
+    new_users = [u for u in users if u["user_id"] != user_id]
+    if len(new_users) == len(users):
         raise HTTPException(status_code=404, detail="사용자 없음")
+    _write_users(new_users)
     return {"ok": True}

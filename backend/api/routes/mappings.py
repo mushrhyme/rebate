@@ -17,6 +17,8 @@ from ...pipeline.orchestrator import resume_phase4, resume_phase4_for_remap
 from ...pipeline.phase3 import (
     _build_issuer_fingerprint,
     _parse_fingerprint_fields,
+)
+from ...tools.mapping import (
     _upsert_cache_row,
     _upsert_dist_cache_row,
 )

@@ -41,7 +41,7 @@ Claude가 유사도로 후보를 고를 수 있지만, **유사도만으로는 C
 Phase 2 JSON items[]
   ↓
 unique 거래처명 목록 추출        unique 제품명 목록 추출
-  ↓ (Agent-소매처)                  ↓ (Agent-제품)        ← 동시 실행
+  ↓ (Claude 소매처)                 ↓ (Claude 제품)       ← 동시 실행
 ① 소매처코드 매핑                ③ 제품코드 매핑
   ↓ 확정 후
 ② 판매처코드 매핑                ④ タイプ 분류
@@ -97,16 +97,33 @@ Step 0: ocr_dist.csv에서 (form_id, issuer_fingerprint, 소매처코드) 조회
 
 Step 1: retail_user.csv에서 소매처코드로 판매처 후보 조회
         → 1건: 판매처코드 자동 확정
-        → 2건 이상(1:N): form_XX.md 판매처 결정 규칙 적용
-                         issuer fingerprint가 판매처명과 일치하면 자동 확정
-                         일치 없음: NEEDS_CONFIRMATION — 후보 목록 + cover issuer 함께 표시
-                                    → 사용자가 선택 → 확정 후 ocr_dist.csv에 저장
+        → 2건 이상(1:N): form_XX.md 판매처 결정 규칙 적용 (아래 참조)
         → 0건: NOT_FOUND
 ```
 
+### 1:N 판매처 결정 규칙
+
+후보가 2건 이상일 때, 아래 순서로 판단한다.
+
+**우선순위 1 — items 그룹 필드 참조** (양식에 그룹 식별 필드가 있는 경우)
+
+Phase 2가 추출한 items[]에서 해당 소매처의 그룹 식별 필드 값을 수집해 Claude에 전달한다.
+그룹 필드는 발행처의 담당 부문·지역을 직접 나타내므로 판매처를 특정하는 가장 신뢰할 수 있는 근거다.
+**어떤 필드를 쓸지, 값과 판매처의 대응 규칙은 각 `form_XX.md`의 "판매처 결정 규칙" 섹션에 정의한다.**
+
+**우선순위 2 — issuer fingerprint** (그룹 필드가 없는 양식, 또는 그룹 필드로 구분 불가 시)
+
+cover 페이지의 issuer(발행처명·전화번호)를 판매처 후보 명칭과 대조한다.
+`form_XX.md`의 `fingerprint_fields`에 정의된 필드를 사용한다.
+
+**우선순위 3 — NEEDS_CONFIRMATION**
+
+위 두 방법으로 특정 불가 시: 후보 목록과 cover issuer를 사용자에게 표시하고 선택을 요청한다.
+확정 후 ocr_dist.csv에 저장한다.
+
 **현재 구현 상태**: Python이 retail_user.csv에서 판매처 후보를 미리 조회한다.
-1:1 케이스는 Python이 자동 확정 + 캐시 저장. 1:N 케이스는 후보 목록을 Claude에 전달하고
-Claude가 issuer 정보를 바탕으로 추론 확정 또는 NEEDS_CONFIRMATION 처리 (2026-05-20).
+1:1 케이스는 Python이 자동 확정 + 캐시 저장. 1:N 케이스는 후보 목록 + 그룹 필드 값을 Claude에 전달하고
+Claude가 그룹 필드 → issuer → NEEDS_CONFIRMATION 순으로 판단한다.
 
 ---
 
@@ -188,4 +205,4 @@ ocr_name,제품코드
 
 - **消費税·ロットアウト 출현 조건**: 현업 확인 필요. form_02~05에서 나올 가능성.
 - **form_02~05 매핑 로직**: 해당 양식 form_XX.md 작성 후 검증 필요.
-- **판매처 1:N 자동 판단 규칙**: cover 페이지 発行元과 판매처 매핑 규칙을 현업과 협의해 form_XX.md에 추가 필요.
+- ~~**판매처 1:N 자동 판단 규칙**~~ → jisho 우선 → issuer fallback → NEEDS_CONFIRMATION 순서로 결정. §2 참조.

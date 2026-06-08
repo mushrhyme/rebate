@@ -144,6 +144,8 @@ export const api = {
     request<ProductResult[]>(`/api/v3/search/product?q=${encodeURIComponent(q)}`),
   searchRetailer: (q: string) =>
     request<RetailerResult[]>(`/api/v3/search/retailer?q=${encodeURIComponent(q)}`),
+  searchDist: (q: string) =>
+    request<DistResult[]>(`/api/v3/search/dist?q=${encodeURIComponent(q)}`),
   getDistCandidates: (retailerCode: string) =>
     request<DistResult[]>(`/api/v3/search/retailer-dists?retailer_code=${encodeURIComponent(retailerCode)}`),
 
@@ -337,7 +339,7 @@ export interface Document {
 export interface Mapping {
   id: number
   doc_id: string
-  mapping_type: 'retailer' | 'product'
+  mapping_type: 'retailer' | 'product' | 'dist'
   ocr_name: string
   candidates: MappingCandidate[]
   page_number: number | null

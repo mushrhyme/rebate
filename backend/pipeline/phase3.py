@@ -10,74 +10,29 @@
 タイプ분류는 Phase 2가 item_type 필드로 확정해서 넘겨줌.
 """
 import asyncio
-import csv
 import json
 import logging
-import re
-import unicodedata
 from pathlib import Path
 
 import anthropic
 
 from ..core.config import get_settings
+from ..tools.claude_retry import call_with_retry
+from ..tools.mapping import (
+    _read_csv,
+    confirm_mapping,
+    lookup_retailer,
+    normalize_ocr_name,  # re-export: phase3에서 직접 임포트하는 테스트와의 호환성 유지
+    parse_retailer_csv_sources,
+    search_product,
+)
 
 log = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT_CACHE: str | None = None
 
-# NFKC 정규화 후의 법인격 표기 목록
-# （株）→(株)、㈱→(株) 등은 NFKC로 먼저 변환되므로 반각 형태만 열거
-_LEGAL_MARKERS = [
-    "株式会社", "有限会社", "合同会社",
-    "(株)", "(有)", "(合)",
-]
-
-
-def normalize_ocr_name(name: str) -> str:
-    """OCR 명칭 정규화: 전각→반각(NFKC) + 법인격 제거 + 공백 압축.
-
-    캐시 조회 키로만 사용. 원본 OCR명은 캐시 파일에 그대로 저장한다.
-    같은 거래처를 다르게 표기한 OCR 결과가 동일 키로 매핑되도록 한다.
-    例)
-      "（株）ファミリーマート"  → "ファミリーマート"
-      "ファミリーマート（株）"  → "ファミリーマート"
-      "(株)ファミリーマート"    → "ファミリーマート"  (전각·반각 모두 처리)
-    """
-    # 전각→반각, 합자 정규화 (㈱→(株) 등)
-    name = unicodedata.normalize("NFKC", name)
-    # 법인격 제거
-    for marker in _LEGAL_MARKERS:
-        name = name.replace(marker, "")
-    # 연속 공백 → 단일 공백, 앞뒤 제거
-    return " ".join(name.split())
-
-
-# ── CSV 로더 ─────────────────────────────────────────────────────────────────
-
-def _read_csv(path: Path) -> list[dict]:
-    with path.open(encoding="utf-8-sig") as f:
-        return list(csv.DictReader(f))
-
 
 # ── 캐시 로더 ─────────────────────────────────────────────────────────────────
-
-def _load_retailer_cache(path: Path) -> dict[str, str]:
-    """normalize(ocr_name) → retailer_code.
-
-    키를 정규화해서 인덱싱하므로 전각·반각 차이나 법인격 표기 변동에
-    무관하게 캐시가 히트된다. 원본 OCR명은 CSV에 보존된다.
-    """
-    if not path.exists():
-        return {}
-    return {normalize_ocr_name(r["ocr_name"]): r["retailer_code"] for r in _read_csv(path)}
-
-
-def _load_product_cache(path: Path) -> dict[str, str]:
-    """normalize(ocr_name) → product_code."""
-    if not path.exists():
-        return {}
-    return {normalize_ocr_name(r["ocr_name"]): r["product_code"] for r in _read_csv(path)}
-
 
 def _load_dist_cache(path: Path) -> dict[tuple, str]:
     """(form_id, issuer_fingerprint, retailer_code) → dist_code"""
@@ -88,78 +43,6 @@ def _load_dist_cache(path: Path) -> dict[tuple, str]:
         key = (r.get("form_id", ""), r.get("issuer_fingerprint", ""), r.get("retailer_code", ""))
         result[key] = r["dist_code"]
     return result
-
-
-# ── 캐시 저장 ─────────────────────────────────────────────────────────────────
-
-
-def _upsert_cache_row(
-    path: Path, key_col: str, headers: list[str], key: str, new_row: list[str],
-) -> None:
-    """캐시 파일에 key 기준 upsert. 헤더 컬럼 확장 시 기존 행에 빈 값을 채운다."""
-    rows: list[list[str]] = []
-    if path.exists() and path.stat().st_size > 0:
-        try:
-            with path.open(encoding="utf-8-sig") as f:
-                rows = [[r.get(h, "") for h in headers] for r in csv.DictReader(f)]
-        except Exception:
-            pass
-    key_idx = headers.index(key_col)
-    updated = False
-    for i, row in enumerate(rows):
-        if len(row) > key_idx and row[key_idx] == key:
-            rows[i] = new_row
-            updated = True
-            break
-    if not updated:
-        rows.append(new_row)
-    with path.open("w", encoding="utf-8-sig", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(headers)
-        w.writerows(rows)
-
-
-def _upsert_dist_cache_row(
-    path: Path, form_id: str, issuer_fingerprint: str,
-    retailer_code: str, dist_code: str, dist_name: str = "",
-) -> None:
-    """ocr_dist.csv 복합키 upsert."""
-    headers = ["form_id", "issuer_fingerprint", "retailer_code", "dist_code", "dist_name"]
-    new_row = [form_id, issuer_fingerprint, retailer_code, dist_code, dist_name]
-    rows: list[list[str]] = []
-    if path.exists() and path.stat().st_size > 0:
-        try:
-            with path.open(encoding="utf-8-sig") as f:
-                rows = [[r.get(h, "") for h in headers] for r in csv.DictReader(f)]
-        except Exception:
-            pass
-    updated = False
-    for i, row in enumerate(rows):
-        if len(row) >= 3 and row[0] == form_id and row[1] == issuer_fingerprint and row[2] == retailer_code:
-            rows[i] = new_row
-            updated = True
-            break
-    if not updated:
-        rows.append(new_row)
-    with path.open("w", encoding="utf-8-sig", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(headers)
-        w.writerows(rows)
-
-
-def _append_retailer_cache(path: Path, ocr_name: str, retailer_code: str, retailer_name: str = "") -> None:
-    _upsert_cache_row(path, "ocr_name", ["ocr_name", "retailer_code", "retailer_name"], ocr_name, [ocr_name, retailer_code, retailer_name])
-
-
-def _append_product_cache(path: Path, ocr_name: str, product_code: str, product_name: str = "") -> None:
-    _upsert_cache_row(path, "ocr_name", ["ocr_name", "product_code", "product_name"], ocr_name, [ocr_name, product_code, product_name])
-
-
-def _append_dist_cache(
-    path: Path, form_id: str, issuer_fingerprint: str,
-    retailer_code: str, dist_code: str, dist_name: str = "",
-) -> None:
-    _upsert_dist_cache_row(path, form_id, issuer_fingerprint, retailer_code, dist_code, dist_name)
 
 
 # ── fingerprint 헬퍼 ──────────────────────────────────────────────────────────
@@ -199,48 +82,31 @@ def _get_system_prompt() -> str:
 
 # ── CSV 컨텍스트 구축 ──────────────────────────────────────────────────────────
 
-def _parse_bracket_code_csv(form_md: str) -> str:
-    """form_XX.md의 データソース 섹션에서 bracket_code_csv 지시어 추출.
-    없으면 빈 문자열 반환.
-    """
-    for line in form_md.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("bracket_code_csv:"):
-            return stripped[len("bracket_code_csv:"):].strip()
-    return ""
-
-
-def _parse_retailer_csvs(form_md: str) -> list[str]:
-    """form_XX.md의 ## データソース 섹션에서 소매처 매핑용 CSV 목록 추출.
-    섹션이 없으면 name 기반 검색 기본값 반환."""
-    lines = form_md.splitlines()
-    in_section = False
-    csvs: list[str] = []
-    for line in lines:
-        if line.strip().startswith("## データソース"):
-            in_section = True
-            continue
-        if in_section:
-            if line.startswith("##"):
-                break
-            stripped = line.strip()
-            if stripped.startswith("- ") and stripped.endswith(".csv"):
-                csvs.append(stripped[2:].strip())
-    return csvs or ["retail_user.csv"]
-
-
 def _build_retailer_csv_context(form_md: str, mappings_dir: Path) -> str:
     """form_XX.md의 データソース 섹션에 명시된 CSV만 로드 (소매처·판매처 매핑용)."""
+    from ..core.sheets_store import get_sheets_store, TAB_MAP
+    store = get_sheets_store()
     parts = []
-    for fname in _parse_retailer_csvs(form_md):
-        p = mappings_dir / fname
-        if p.exists():
-            parts.append(f"### {fname}\n{p.read_text(encoding='utf-8-sig')}")
+    for fname in parse_retailer_csv_sources(form_md):
+        if store and fname in TAB_MAP:
+            text = store.to_csv_text(fname)
+            if text:
+                parts.append(f"### {fname}\n{text}")
+        else:
+            p = mappings_dir / fname
+            if p.exists():
+                parts.append(f"### {fname}\n{p.read_text(encoding='utf-8-sig')}")
     return "\n\n".join(parts)
 
 
 def _build_product_csv_context(mappings_dir: Path) -> str:
     """제품 매핑용 CSV (unit_price.csv만)."""
+    from ..core.sheets_store import get_sheets_store
+    store = get_sheets_store()
+    if store:
+        text = store.to_csv_text("unit_price.csv")
+        if text:
+            return f"### unit_price.csv\n{text}"
     p = mappings_dir / "unit_price.csv"
     return f"### unit_price.csv\n{p.read_text(encoding='utf-8-sig')}" if p.exists() else ""
 
@@ -252,8 +118,9 @@ def _call_claude(
     system: list[dict],
     user_payload: dict,
 ) -> tuple[dict, int, int, int, int]:
-    """Claude API 호출 및 JSON 파싱 공통 로직."""
-    message = client.messages.create(
+    """Claude API 호출 및 JSON 파싱 공통 로직. retry/backoff 포함."""
+    message = call_with_retry(
+        client.messages.create,
         model="claude-haiku-4-5-20251001",
         max_tokens=8192,
         system=system,
@@ -419,6 +286,18 @@ async def run_phase3(
     form_path = settings.form_definitions_dir / f"{form_id}.md"
     form_md = form_path.read_text(encoding="utf-8") if form_path.exists() else ""
 
+    # form_types.json에서 1:N 판매처 결정 시 사용할 그룹 식별 필드명 조회
+    # cross_validation의 cover_breakdown_vs_detail 타입에 detail_group_field가 정의된 양식만 해당
+    _form_types_path = settings.workspace_root / "config" / "form_types.json"
+    _dist_group_field: str | None = None
+    if _form_types_path.exists():
+        import json as _json_tmp
+        _form_cfg = _json_tmp.loads(_form_types_path.read_text(encoding="utf-8")).get(form_id, {})
+        for _xv in _form_cfg.get("cross_validation", []):
+            if _xv.get("type") == "cover_breakdown_vs_detail":
+                _dist_group_field = _xv.get("detail_group_field")
+                break
+
     items = phase2_result.get("items", [])
 
     # cover 페이지에서 issuer 추출
@@ -452,73 +331,63 @@ async def run_phase3(
         if p and p not in product_page:
             product_page[p] = pg
 
-    # ── ① 캐시 조회 ───────────────────────────────────────────────────────────
-    cache_r = _load_retailer_cache(mappings_dir / "ocr_retailer.csv")
-    cache_p = _load_product_cache(mappings_dir / "ocr_product.csv")
+    # ── ① 소매처·제품 조회 준비 ───────────────────────────────────────────────
     cache_d = _load_dist_cache(mappings_dir / "ocr_dist.csv")
 
     fingerprint_fields = _parse_fingerprint_fields(form_md)
     issuer_fingerprint = _build_issuer_fingerprint(issuer, fingerprint_fields)
 
-    # 소매처 캐시 히트 (정규화 키로 조회)
-    confirmed_retailers: dict[str, dict] = {}
-    for name in unique_retailers:
-        norm = normalize_ocr_name(name)
-        if norm in cache_r:
-            retailer_code = cache_r[norm]
-            dist_key = (form_id, issuer_fingerprint, retailer_code)
-            dist_code = cache_d.get(dist_key, "")
-            confirmed_retailers[name] = {
-                "retailer_code": retailer_code,
-                "dist_code": dist_code,
-                "basis": "cache",
-            }
-
-    # 제품 캐시 히트 (정규화 키로 조회)
-    confirmed_products: dict[str, dict] = {}
-    for name in unique_products:
-        norm = normalize_ocr_name(name)
-        if norm in cache_p:
-            confirmed_products[name] = {"code": cache_p[norm], "basis": "cache"}
-
-    # retail_user.csv 행 목록 — bracket 코드 처리 + dist 1:1 자동확정에서 공통 사용
+    # retail_user.csv — dist 1:1 자동확정 + 캐시 저장 시 이름 조회용
     retail_user_rows = _read_csv(mappings_dir / "retail_user.csv") if (mappings_dir / "retail_user.csv").exists() else []
     retailer_name_by_code: dict[str, str] = {r["소매처코드"]: r["소매처명"] for r in retail_user_rows}
     dist_name_by_code: dict[str, str] = {r["판매처코드"]: r["판매처명"] for r in retail_user_rows}
 
-    # ── ①-2 괄호 코드 직접 조회 (form_01 등 bracket_code_csv 지정 양식) ─────────
-    # 결정적 처리이므로 Claude에 위임하지 않고 Python이 직접 수행
-    bracket_csv_name = _parse_bracket_code_csv(form_md)
-    if bracket_csv_name:
-        bracket_path = mappings_dir / bracket_csv_name
-        if bracket_path.exists():
-            domae_map: dict[str, str] = {}
-            for r in _read_csv(bracket_path):
-                keys = list(r.keys())
-                if len(keys) >= 2:
-                    domae_map[r[keys[0]]] = r[keys[1]]
-            for name in unique_retailers:
-                if name in confirmed_retailers:
-                    continue
-                m = re.search(r'\((\d+)\)', name)
-                if not m:
-                    continue
-                bracket_code = m.group(1)
-                retailer_code = domae_map.get(bracket_code, "")
-                if retailer_code:
-                    dist_key = (form_id, issuer_fingerprint, retailer_code)
-                    dist_code = cache_d.get(dist_key, "")
-                    confirmed_retailers[name] = {
-                        "retailer_code": retailer_code,
-                        "dist_code":     dist_code,
-                        "basis":         f"括弧コード {bracket_code} → {bracket_csv_name} 自動確定",
-                    }
-                    _append_retailer_cache(mappings_dir / "ocr_retailer.csv", name, retailer_code, retailer_name_by_code.get(retailer_code, ""))
-                    if dist_code:
-                        _append_dist_cache(
-                            mappings_dir / "ocr_dist.csv",
-                            form_id, issuer_fingerprint, retailer_code, dist_code, dist_name_by_code.get(dist_code, ""),
-                        )
+    confirmed_retailers: dict[str, dict] = {}
+    for name in unique_retailers:
+        result = await lookup_retailer(
+            ocr_name=name,
+            form_id=form_id,
+            mappings_dir=mappings_dir,
+            form_definitions_dir=settings.form_definitions_dir,
+        )
+
+        if result.basis in ("cache", "bracket_code"):
+            retailer_code = result.retailer_code
+            dist_key = (form_id, issuer_fingerprint, retailer_code)
+            dist_code = cache_d.get(dist_key, "")
+            confirmed_retailers[name] = {
+                "retailer_code": retailer_code,
+                "dist_code":     dist_code,
+                "basis":         result.basis,
+            }
+            if result.basis == "bracket_code":
+                await confirm_mapping(
+                    mapping_type="retailer",
+                    ocr_name=name,
+                    confirmed_code=retailer_code,
+                    context={"retailer_name": retailer_name_by_code.get(retailer_code, "")},
+                    mappings_dir=mappings_dir,
+                )
+                if dist_code:
+                    await confirm_mapping(
+                        mapping_type="dist",
+                        ocr_name=name,
+                        confirmed_code=dist_code,
+                        context={
+                            "form_id": form_id,
+                            "issuer_fingerprint": issuer_fingerprint,
+                            "retailer_code": retailer_code,
+                            "dist_name": dist_name_by_code.get(dist_code, ""),
+                        },
+                        mappings_dir=mappings_dir,
+                    )
+
+    # ── ① 제품 캐시 조회 (search_product: 캐시→유사도 후보) ─────────────────
+    confirmed_products: dict[str, dict] = {}
+    for name in unique_products:
+        sp_result = await search_product(ocr_name=name, mappings_dir=mappings_dir)
+        if sp_result.basis == "cache":
+            confirmed_products[name] = {"code": sp_result.product_code, "basis": "cache"}
 
     miss_retailers = [n for n in unique_retailers if n not in confirmed_retailers]
 
@@ -543,16 +412,34 @@ async def run_phase3(
             _dc = _candidates[0]["dist_code"]
             _dn = _candidates[0]["dist_name"]
             confirmed_retailers[_name]["dist_code"] = _dc
-            _append_dist_cache(
-                mappings_dir / "ocr_dist.csv",
-                form_id, issuer_fingerprint, _rc, _dc, _dn,
+            await confirm_mapping(
+                mapping_type="dist",
+                ocr_name=_name,
+                confirmed_code=_dc,
+                context={
+                    "form_id": form_id,
+                    "issuer_fingerprint": issuer_fingerprint,
+                    "retailer_code": _rc,
+                    "dist_name": _dn,
+                },
+                mappings_dir=mappings_dir,
             )
         elif len(_candidates) > 1:
-            # 1:N → Claude가 issuer 정보로 추론 (후보 목록 포함)
+            # 1:N → Claude가 판단 (후보 목록 + 그룹 식별 필드 값 포함)
+            # 그룹 식별 필드: form_types.json cross_validation의 detail_group_field에서 동적 조회
+            # issuer보다 직접적인 근거 — form별 필드명이 다르므로 값만 수집
+            _jisho_values: list[str] = []
+            if _dist_group_field:
+                _jisho_values = list({
+                    item.get(_dist_group_field, "")
+                    for item in items
+                    if item.get("customer") == _name and item.get(_dist_group_field)
+                })
             cached_retailers_needing_dist.append({
-                "ocr_name": _name,
+                "ocr_name":     _name,
                 "retailer_code": _rc,
-                "candidates": _candidates,
+                "candidates":   _candidates,
+                **({"jisho_values": _jisho_values} if _jisho_values else {}),
             })
         else:
             # 0건 → retail_user.csv에 해당 소매처코드 행 없음 (판매처코드 정의 미비)
@@ -569,7 +456,7 @@ async def run_phase3(
     miss_products = [
         {"product": n, "item_type": product_type_map.get(n, "条件")}
         for n in unique_products
-        if n not in confirmed_products  # cache_p 직접 참조 금지 — 정규화 히트는 confirmed_products에 반영됨
+        if n not in confirmed_products
     ]
 
     # ── ② Claude 병렬 호출 (소매처/판매처 + 제품을 독립 call로 분리) ───────────
@@ -618,11 +505,25 @@ async def run_phase3(
                     "dist_code":     dist_code,
                     "basis":         m.get("basis", "claude"),
                 }
-                _append_retailer_cache(mappings_dir / "ocr_retailer.csv", ocr, retailer_code, retailer_name_by_code.get(retailer_code, ""))
+                await confirm_mapping(
+                    mapping_type="retailer",
+                    ocr_name=ocr,
+                    confirmed_code=retailer_code,
+                    context={"retailer_name": retailer_name_by_code.get(retailer_code, "")},
+                    mappings_dir=mappings_dir,
+                )
                 if dist_code:
-                    _append_dist_cache(
-                        mappings_dir / "ocr_dist.csv",
-                        form_id, issuer_fingerprint, retailer_code, dist_code, dist_name_by_code.get(dist_code, ""),
+                    await confirm_mapping(
+                        mapping_type="dist",
+                        ocr_name=ocr,
+                        confirmed_code=dist_code,
+                        context={
+                            "form_id": form_id,
+                            "issuer_fingerprint": issuer_fingerprint,
+                            "retailer_code": retailer_code,
+                            "dist_name": dist_name_by_code.get(dist_code, ""),
+                        },
+                        mappings_dir=mappings_dir,
                     )
             else:
                 pending.append({
@@ -641,9 +542,17 @@ async def run_phase3(
                 dist_code     = m["dist_code"]
                 retailer_code = m["retailer_code"]
                 confirmed_retailers[ocr]["dist_code"] = dist_code
-                _append_dist_cache(
-                    mappings_dir / "ocr_dist.csv",
-                    form_id, issuer_fingerprint, retailer_code, dist_code, dist_name_by_code.get(dist_code, ""),
+                await confirm_mapping(
+                    mapping_type="dist",
+                    ocr_name=ocr,
+                    confirmed_code=dist_code,
+                    context={
+                        "form_id": form_id,
+                        "issuer_fingerprint": issuer_fingerprint,
+                        "retailer_code": retailer_code,
+                        "dist_name": dist_name_by_code.get(dist_code, ""),
+                    },
+                    mappings_dir=mappings_dir,
                 )
             else:
                 pending.append({
@@ -664,7 +573,13 @@ async def run_phase3(
                     "master_name": m.get("master_name", ""),
                     "basis":       m.get("basis", "claude"),
                 }
-                _append_product_cache(mappings_dir / "ocr_product.csv", ocr, m["product_code"], m.get("master_name", ""))
+                await confirm_mapping(
+                    mapping_type="product",
+                    ocr_name=ocr,
+                    confirmed_code=m["product_code"],
+                    context={"product_name": m.get("master_name", "")},
+                    mappings_dir=mappings_dir,
+                )
             else:
                 pending.append({
                     "mapping_type": "product",
@@ -692,7 +607,18 @@ async def run_phase3(
             _dc = _candidates[0]["dist_code"]
             _dn = _candidates[0]["dist_name"]
             confirmed_retailers[_name]["dist_code"] = _dc
-            _append_dist_cache(mappings_dir / "ocr_dist.csv", form_id, issuer_fingerprint, _rc, _dc, _dn)
+            await confirm_mapping(
+                mapping_type="dist",
+                ocr_name=_name,
+                confirmed_code=_dc,
+                context={
+                    "form_id": form_id,
+                    "issuer_fingerprint": issuer_fingerprint,
+                    "retailer_code": _rc,
+                    "dist_name": _dn,
+                },
+                mappings_dir=mappings_dir,
+            )
         else:
             if not _candidates:
                 log.warning(

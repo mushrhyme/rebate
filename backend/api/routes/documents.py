@@ -13,16 +13,23 @@ from pydantic import BaseModel
 
 from ...core.auth import get_current_user, get_current_user_sse
 from ...core.config import get_settings, get_drive
-from ...core.database import get_pool
-from ...db.queries import get_document, list_documents
+from ...db.queries import (
+    create_document,
+    clear_mappings,
+    delete_document_data,
+    get_document,
+    get_user_password_hash,
+    list_documents,
+    reset_document_for_retry,
+)
 from ...pipeline.orchestrator import run_pipeline
 
 router = APIRouter(prefix="/api/v3/documents", tags=["documents"])
 
 
 async def _get_hatsu_month(doc_id: str) -> str:
-    row = await get_pool().fetchrow("SELECT hatsu_month FROM v3_documents WHERE doc_id = $1", doc_id)
-    return (row["hatsu_month"] or "") if row else ""
+    doc = await get_document(doc_id)
+    return (doc.get("hatsu_month") or "") if doc else ""
 
 
 async def _ensure_pages_local(doc_id: str, pdf_filename: str) -> bool:
@@ -48,10 +55,10 @@ async def _ensure_pages_local(doc_id: str, pdf_filename: str) -> bool:
         except Exception:
             log.exception("[%s] Drive pages 복원 중 예외", doc_id)
 
-    # 폴백: Drive에 PNG가 없거나 pull 실패 → PDF에서 직접 재생성
+    # 폴백: PDF에서 직접 재생성
     if not pdf_filename:
-        row = await get_pool().fetchrow("SELECT pdf_filename FROM v3_documents WHERE doc_id = $1", doc_id)
-        pdf_filename = row["pdf_filename"] if row else ""
+        doc = await get_document(doc_id)
+        pdf_filename = (doc.get("pdf_filename") or "") if doc else ""
     if pdf_filename:
         pdf_path = settings.samples_dir / pdf_filename
         if not pdf_path.exists() and drive:
@@ -99,12 +106,13 @@ async def _ensure_extracted_local(doc_id: str) -> bool:
     )
     return ok
 
+
 def _make_doc_id(stem: str) -> str:
     """파일명 stem → 안전한 doc_id. 공백·점·괄호를 정규화하고 [\w\-]만 남긴다."""
-    s = re.sub(r"\s*\([^)]*\)", "", stem)   # 괄호·내용 제거: "foo (1)" → "foo"
-    s = re.sub(r"[\s.]+", "_", s)           # 공백·점 → 언더스코어
-    s = re.sub(r"[^\w\-]", "", s)           # 나머지 특수문자 제거
-    s = re.sub(r"_+", "_", s).strip("_")   # 연속 언더스코어 정리
+    s = re.sub(r"\s*\([^)]*\)", "", stem)
+    s = re.sub(r"[\s.]+", "_", s)
+    s = re.sub(r"[^\w\-]", "", s)
+    s = re.sub(r"_+", "_", s).strip("_")
     return s
 
 
@@ -129,26 +137,22 @@ async def upload_document(
     async with aiofiles.open(pdf_path, "wb") as f:
         await f.write(await file.read())
 
-    pool = get_pool()
-    existing = await pool.fetchrow(
-        "SELECT status FROM v3_documents WHERE doc_id = $1", doc_id
-    )
+    existing = await get_document(doc_id)
     if existing:
         status = existing["status"]
         if status in ("queued", "ocr", "analyzing", "phase1", "phase2", "phase3", "phase4"):
             raise HTTPException(status_code=409, detail=f"이미 분석 중입니다 (상태: {status}). 완료 후 재시도하세요.")
         if status in ("pending", "done"):
             raise HTTPException(status_code=409, detail=f"이미 분석된 문서입니다 (상태: {status}). 재분석은 문서 상세에서 진행하세요.")
-        # status == "error" → 재실행 허용: DB 초기화 후 낙하
+        # status == "error" → 재실행 허용
 
-    await pool.execute(
-        """INSERT INTO v3_documents (doc_id, pdf_filename, status, hatsu_month, uploaded_by, analysis_started_at)
-           VALUES ($1, $2, 'ocr', $3, $4, NOW())
-           ON CONFLICT (doc_id) DO UPDATE
-             SET status = 'ocr', error_type = NULL, error_phase = NULL,
-                 error_message = NULL, form_id = NULL, token_usage = '{}',
-                 hatsu_month = $3, updated_at = NOW(), analysis_started_at = NOW()""",
-        doc_id, file.filename, hatsu_month or None, user["user_id"],
+    await create_document(
+        doc_id=doc_id,
+        pdf_filename=file.filename,
+        hatsu_month=hatsu_month,
+        user_id=user["user_id"],
+        uploaded_by_username=user.get("username", ""),
+        uploaded_by_name_ja=user.get("display_name_ja", ""),
     )
 
     background_tasks.add_task(run_pipeline, doc_id, pdf_path, hatsu_month)
@@ -170,15 +174,10 @@ async def get_doc(doc_id: str, user: dict = Depends(get_current_user)):
     local_png_count = len(list(pages_dir.glob("page_*.png"))) if pages_dir.exists() else 0
     if local_png_count > 0:
         doc["pages_count"] = local_png_count
-    # local_png_count == 0이면 DB의 pages_count 그대로 유지 (파일이 Drive에 있는 경우)
     return doc
 
 
 def _resolve_page_file(pages_dir: Path, page: int, glob: str) -> Path | None:
-    """pages_dir에서 page번 파일을 찾는다.
-    1순위: page_{page:03d}.{ext} 직접 (mapping page_number 등 Azure 번호와 일치하는 경우)
-    2순위: glob으로 정렬한 뒤 page번째 파일 (Azure가 비연속 번호 반환 시 폴백)
-    """
     exact = pages_dir / glob.replace("*", f"{page:03d}")
     if exact.exists():
         return exact
@@ -229,14 +228,14 @@ async def get_page_bbox(
 @router.get("/{doc_id}/pdf")
 async def get_pdf(doc_id: str, user: dict = Depends(get_current_user_sse)):
     """PDF 원본 파일 제공 — iframe 렌더링용. ?sid= 쿼리 파라미터로 인증."""
-    pool = get_pool()
-    row = await pool.fetchrow("SELECT pdf_filename FROM v3_documents WHERE doc_id = $1", doc_id)
-    if not row:
+    doc = await get_document(doc_id)
+    if not doc:
         raise HTTPException(status_code=404, detail="문서 없음")
+    pdf_filename = doc.get("pdf_filename", "")
     settings = get_settings()
-    pdf_path = settings.samples_dir / row["pdf_filename"]
+    pdf_path = settings.samples_dir / pdf_filename
     if not pdf_path.exists():
-        await _ensure_pdf_local(doc_id, row["pdf_filename"])
+        await _ensure_pdf_local(doc_id, pdf_filename)
     if not pdf_path.exists():
         raise HTTPException(status_code=404, detail="PDF 파일이 로컬·Drive 모두에 없습니다")
     return FileResponse(str(pdf_path), media_type="application/pdf")
@@ -304,15 +303,12 @@ async def get_results(doc_id: str, user: dict = Depends(get_current_user)):
 
 @router.post("/{doc_id}/backfill-images")
 async def backfill_images(doc_id: str, user: dict = Depends(get_current_user)):
-    """기존 문서에 PNG 페이지 이미지 생성 — Azure DI 재호출 없음.
-    OCR은 이미 완료됐으나 .png가 없는 문서에 사용."""
-    pool = get_pool()
-    row = await pool.fetchrow("SELECT pdf_filename FROM v3_documents WHERE doc_id = $1", doc_id)
-    if not row:
+    doc = await get_document(doc_id)
+    if not doc:
         raise HTTPException(status_code=404, detail="문서 없음")
 
     settings = get_settings()
-    pdf_path = settings.samples_dir / row["pdf_filename"]
+    pdf_path = settings.samples_dir / doc["pdf_filename"]
     if not pdf_path.exists():
         raise HTTPException(status_code=404, detail="PDF 파일 없음")
 
@@ -322,14 +318,12 @@ async def backfill_images(doc_id: str, user: dict = Depends(get_current_user)):
 
     raw_path = pages_dir / "_azure_raw.json"
     if raw_path.exists():
-        # raw 결과가 있으면 PNG + .ocr.json 모두 재생성
         import json as _json
         from ...pipeline.ocr import _write_page_files
         result_json = _json.loads(raw_path.read_text(encoding="utf-8"))
         await asyncio.to_thread(_write_page_files, result_json, pages_dir, pdf_path)
         count = len(list(pages_dir.glob("page_*.png")))
     else:
-        # raw 없으면 PNG만 생성
         from ...pipeline.ocr import _generate_page_images
         count = await asyncio.to_thread(_generate_page_images, pdf_path, pages_dir)
     return {"doc_id": doc_id, "pages_generated": count}
@@ -342,22 +336,18 @@ async def retry_document(
     force: bool = False,
     user: dict = Depends(get_current_user),
 ):
-    """문서 재분석.
-    - 기본(force=false): OCR 캐시 유지, Phase 2+ 재실행. error/done/pending 모두 가능.
-    - force=true: OCR 캐시 포함 전체 초기화 후 재수행 (Azure DI 재호출 → 비용 발생)."""
-    pool = get_pool()
-    row = await pool.fetchrow(
-        "SELECT pdf_filename, status, hatsu_month FROM v3_documents WHERE doc_id = $1", doc_id
-    )
-    if not row:
+    """문서 재분석."""
+    doc = await get_document(doc_id)
+    if not doc:
         raise HTTPException(status_code=404, detail="문서 없음")
-    if row["status"] in ("queued", "ocr", "analyzing", "phase1", "phase2", "phase3", "phase4"):
+    if doc["status"] in ("queued", "ocr", "analyzing", "phase1", "phase2", "phase3", "phase4"):
         raise HTTPException(status_code=400, detail="현재 분석 중인 문서입니다. 완료 후 재분석하세요.")
 
     settings = get_settings()
-    pdf_path = settings.samples_dir / row["pdf_filename"]
+    pdf_filename = doc.get("pdf_filename", "")
+    pdf_path = settings.samples_dir / pdf_filename
     if not pdf_path.exists():
-        await _ensure_pdf_local(doc_id, row["pdf_filename"])
+        await _ensure_pdf_local(doc_id, pdf_filename)
     if not pdf_path.exists():
         raise HTTPException(
             status_code=404,
@@ -367,19 +357,15 @@ async def retry_document(
     extracted_dir = settings.extracted_dir / doc_id
     pages_dir = settings.samples_dir / f"{doc_id}_pages"
 
-    # OCR 캐시 유지 재분석 시 pages_dir이 Drive에만 있으면 복원
     if not force and not pages_dir.exists():
-        await _ensure_pages_local(doc_id, row["pdf_filename"])
+        await _ensure_pages_local(doc_id, pdf_filename)
 
     if force:
-        # OCR 캐시 포함 전체 초기화
-        import shutil
         if pages_dir.exists():
             shutil.rmtree(pages_dir)
         if extracted_dir.exists():
             shutil.rmtree(extracted_dir)
     else:
-        # Phase 2+ 산출물만 삭제 (OCR + Phase 1 MD 유지 — 재과금 방지)
         if extracted_dir.exists():
             for fname in ("phase2_output.json", "phase3_output.json", "phase4_output.json"):
                 p = extracted_dir / fname
@@ -388,20 +374,10 @@ async def retry_document(
             for f in extracted_dir.glob("phase2_partial_*.json"):
                 f.unlink()
 
-    # 미확정 매핑 초기화
-    await pool.execute("DELETE FROM v3_mappings WHERE doc_id = $1", doc_id)
+    await clear_mappings(doc_id)
+    await reset_document_for_retry(doc_id)
 
-    # 상태 + 토큰 사용량 초기화
-    await pool.execute(
-        """UPDATE v3_documents
-           SET status = 'ocr', error_type = NULL, error_phase = NULL,
-               error_message = NULL, token_usage = '{}', updated_at = NOW(),
-               analysis_started_at = NOW()
-           WHERE doc_id = $1""",
-        doc_id,
-    )
-
-    background_tasks.add_task(run_pipeline, doc_id, pdf_path, row["hatsu_month"] or "")
+    background_tasks.add_task(run_pipeline, doc_id, pdf_path, doc.get("hatsu_month") or "")
     return {"doc_id": doc_id, "status": "ocr"}
 
 
@@ -412,34 +388,29 @@ class DeleteBody(BaseModel):
 @router.delete("/{doc_id}")
 async def delete_document(doc_id: str, body: DeleteBody, user: dict = Depends(get_current_user)):
     """문서 삭제 — 본인 업로드 문서만 가능, 비밀번호 확인 필수."""
-    pool = get_pool()
-
-    row = await pool.fetchrow(
-        "SELECT pdf_filename, status, uploaded_by, hatsu_month FROM v3_documents WHERE doc_id = $1", doc_id
-    )
-    if not row:
+    doc = await get_document(doc_id)
+    if not doc:
         raise HTTPException(status_code=404, detail="문서 없음")
 
-    if not user.get("is_admin") and row["uploaded_by"] != user["user_id"]:
+    if not user.get("is_admin") and doc.get("uploaded_by") != user["user_id"]:
         raise HTTPException(status_code=403, detail="본인이 업로드한 문서만 삭제할 수 있습니다")
 
-    if row["status"] in ("queued", "ocr", "analyzing", "phase1", "phase2", "phase3", "phase4"):
+    if doc["status"] in ("queued", "ocr", "analyzing", "phase1", "phase2", "phase3", "phase4"):
         raise HTTPException(status_code=400, detail="분석 중인 문서는 삭제할 수 없습니다")
 
-    pw_row = await pool.fetchrow("SELECT password_hash FROM users WHERE user_id = $1", user["user_id"])
-    if not pw_row or not bcrypt.checkpw(body.password.encode()[:72], pw_row["password_hash"].encode()):
+    pw_hash = await get_user_password_hash(user["user_id"])
+    if not pw_hash or not bcrypt.checkpw(body.password.encode()[:72], pw_hash.encode()):
         raise HTTPException(status_code=400, detail="비밀번호가 올바르지 않습니다")
 
-    # DB 삭제
-    await pool.execute("DELETE FROM v3_reviews  WHERE doc_id = $1", doc_id)
-    await pool.execute("DELETE FROM v3_mappings WHERE doc_id = $1", doc_id)
-    await pool.execute("DELETE FROM v3_documents WHERE doc_id = $1", doc_id)
+    # S3 JSON 삭제
+    await delete_document_data(doc_id)
 
     # 로컬 파일 삭제
     settings = get_settings()
-    pdf_path   = settings.samples_dir / row["pdf_filename"]
-    pages_dir  = settings.samples_dir / f"{doc_id}_pages"
-    extracted  = settings.extracted_dir / doc_id
+    pdf_filename = doc.get("pdf_filename", "")
+    pdf_path = settings.samples_dir / pdf_filename
+    pages_dir = settings.samples_dir / f"{doc_id}_pages"
+    extracted = settings.extracted_dir / doc_id
 
     if pdf_path.exists():
         pdf_path.unlink()
@@ -455,9 +426,9 @@ async def delete_document(doc_id: str, body: DeleteBody, user: dict = Depends(ge
             await asyncio.to_thread(
                 drive.delete_doc,
                 settings.drive_root_folder_id,
-                row["hatsu_month"] or "",
+                doc.get("hatsu_month") or "",
                 doc_id,
-                row["pdf_filename"],
+                pdf_filename,
             )
         except Exception:
             import logging

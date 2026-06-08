@@ -1,0 +1,168 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "form_types.json schema",
+  "description": "config/form_types.json의 구조 검증 스키마. 알 수 없는 최상위 키는 허용한다.",
+  "type": "object",
+  "additionalProperties": {
+    "$ref": "#/definitions/FormConfig"
+  },
+  "definitions": {
+    "FormConfig": {
+      "type": "object",
+      "properties": {
+        "label": { "type": "string" },
+        "net": { "$ref": "#/definitions/NetConfig" },
+        "preprocess": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/PreprocessRule" }
+        },
+        "row_anchor": { "type": "object" },
+        "condition_display": { "type": "object" },
+        "cover_totals": { "type": "object" },
+        "cross_validation": { "type": "array" },
+        "show_sections": { "type": "array", "items": { "type": "string" } },
+        "aggregate_label": { "type": "string" },
+        "summary": { "type": "string" },
+        "summary_cover_keys": { "type": "object" },
+        "qty_field": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" } }
+          ]
+        },
+        "bara_source": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "NetConfig": {
+      "type": "object",
+      "oneOf": [
+        { "$ref": "#/definitions/NetExpr" },
+        { "$ref": "#/definitions/NetPlugin" },
+        { "$ref": "#/definitions/NetLegacy" }
+      ]
+    },
+    "NetExpr": {
+      "type": "object",
+      "required": ["formula_type", "expr"],
+      "properties": {
+        "formula_type": { "type": "string", "enum": ["expr"] },
+        "expr": {
+          "type": "string",
+          "minLength": 1,
+          "description": "산술 표현식. 허용 변수: shikiri, teiban, vars/computed_vars에 정의된 alias"
+        },
+        "vars": {
+          "type": "object",
+          "description": "alias → 컬럼명 매핑. null이면 0으로 처리",
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "string" },
+              { "type": "null" }
+            ]
+          }
+        },
+        "computed_vars": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/ComputedVar" }
+        },
+        "needs_teiban": { "type": "boolean" },
+        "teiban_type": { "type": "string" },
+        "no_net_kubun": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "ComputedVar": {
+      "type": "object",
+      "required": ["expr"],
+      "properties": {
+        "expr": { "type": "string", "minLength": 1 },
+        "divide_by": { "$ref": "#/definitions/DivideBy" }
+      },
+      "additionalProperties": false
+    },
+    "DivideBy": {
+      "type": "object",
+      "required": ["field"],
+      "properties": {
+        "field": { "type": "string", "minLength": 1 },
+        "when": {
+          "type": "object",
+          "required": ["field", "equals"],
+          "properties": {
+            "field": { "type": "string" },
+            "equals": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "default": { "type": "number" },
+        "zero_policy": {
+          "type": "string",
+          "enum": ["skip_divide", "return_none"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "NetPlugin": {
+      "type": "object",
+      "required": ["formula_type", "plugin"],
+      "properties": {
+        "formula_type": { "type": "string", "enum": ["plugin"] },
+        "plugin": {
+          "type": "string",
+          "minLength": 1,
+          "description": "FORMULA_REGISTRY キー名. 開発者が手動登録が必要."
+        }
+      },
+      "additionalProperties": true
+    },
+    "NetLegacy": {
+      "type": "object",
+      "required": ["formula"],
+      "properties": {
+        "formula": {
+          "type": "string",
+          "enum": [
+            "subtract_conditions",
+            "subtract_conditions_or_fallback",
+            "subtract_teiban_and_self",
+            "subtract_pack_conditions"
+          ],
+          "description": "하위 호환 named formula. 신규 양식에는 formula_type=expr 권장"
+        },
+        "c1": { "type": "string" },
+        "c2": {
+          "oneOf": [{ "type": "string" }, { "type": "null" }]
+        },
+        "cs_divide_by_case_qty": { "type": "boolean" },
+        "fallback": { "type": "string" },
+        "self_field": { "type": "string" },
+        "divisor": { "type": "string" },
+        "no_net_kubun": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "PreprocessRule": {
+      "type": "object",
+      "required": ["field", "op"],
+      "properties": {
+        "field": { "type": "string" },
+        "op": {
+          "type": "string",
+          "enum": ["divide_by_100"]
+        },
+        "guard_fields": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

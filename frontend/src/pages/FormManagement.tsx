@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, Send, ChevronRight, AlertCircle, Paperclip, X, Image, Save, CheckCircle, MessageSquare, Loader, RefreshCw } from 'lucide-react'
+import { Plus, Send, ChevronRight, AlertCircle, Paperclip, X, Image, Save, CheckCircle, MessageSquare, Loader, RefreshCw, Trash2 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useForms } from '../context/FormsContext'
@@ -18,11 +18,11 @@ function countTbd(md: string) {
 
 function highlightTbd(children: React.ReactNode): React.ReactNode {
   return Array.isArray(children)
-    ? children.map((child, i) => highlightTbd(child) as React.ReactNode)
+    ? children.map((child) => highlightTbd(child) as React.ReactNode)
     : typeof children === 'string' && children.includes('TBD')
-      ? children.split(/\b(TBD)\b/).map((part, i) =>
+      ? children.split(/\b(TBD)\b/).map((part, idx) =>
           part === 'TBD'
-            ? <mark key={i} style={{ background: '#fde68a', color: '#92400e', borderRadius: 3, padding: '0 3px', fontWeight: 700 }}>TBD</mark>
+            ? <mark key={idx} style={{ background: '#fde68a', color: '#92400e', borderRadius: 3, padding: '0 3px', fontWeight: 700 }}>TBD</mark>
             : part
         )
       : children
@@ -46,7 +46,7 @@ type ChatMsg = {
 
 export function FormManagement() {
   const navigate = useNavigate()
-  const { forms } = useForms()
+  const { forms, reload } = useForms()
   const [selectedId, setSelectedId] = useState<string>('form_01')
   const [chatInput, setChatInput] = useState('')
   const [chatHistory, setChatHistory] = useState<ChatMsg[]>([])
@@ -67,7 +67,11 @@ export function FormManagement() {
   const [expandedDiff, setExpandedDiff] = useState<number | null>(null)
   const [isSyncing, setIsSyncing] = useState(false)
   const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null)
-  const [syncChanges, setSyncChanges] = useState<string[] | null>(null)
+  const [_syncChanges, setSyncChanges] = useState<string[] | null>(null)
+  const [isDeleteOpen, setIsDeleteOpen] = useState(false)
+  const [deletePw, setDeletePw] = useState('')
+  const [isDeleting, setIsDeleting] = useState(false)
+  const [deleteErr, setDeleteErr] = useState<string | null>(null)
   const chatEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -292,6 +296,35 @@ export function FormManagement() {
     }
   }
 
+  async function handleDelete() {
+    if (isDeleting || !deletePw) return
+    setIsDeleting(true)
+    setDeleteErr(null)
+    try {
+      const res = await fetch(`${BASE}/api/v3/forms/${selectedId}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', ...sessionHeaders() },
+        body: JSON.stringify({ password: deletePw }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: '삭제 실패' }))
+        setDeleteErr(err.detail ?? '삭제 실패')
+        return
+      }
+      setContentByForm(prev => { const n = { ...prev }; delete n[selectedId]; return n })
+      setHashByForm(prev => { const n = { ...prev }; delete n[selectedId]; return n })
+      await reload()
+      setIsDeleteOpen(false)
+      setDeletePw('')
+      const remaining = forms.filter(f => f.id !== selectedId)
+      setSelectedId(remaining[0]?.id ?? '')
+    } catch {
+      setDeleteErr('삭제 중 오류가 발생했습니다.')
+    } finally {
+      setIsDeleting(false)
+    }
+  }
+
   function showToast(msg: string, ok: boolean) {
     setSaveToast({ msg, ok })
     setTimeout(() => setSaveToast(null), 3000)
@@ -411,6 +444,22 @@ export function FormManagement() {
                     TBD {tbdCount}개
                   </span>
                 )}
+                {/* 삭제 버튼 */}
+                <button
+                  onClick={() => { setIsDeleteOpen(true); setDeleteErr(null); setDeletePw('') }}
+                  title="양식 삭제 (관리자 전용)"
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    padding: '7px 13px', borderRadius: 8,
+                    border: '1px solid #fca5a5',
+                    background: '#fff5f5', color: '#dc2626',
+                    fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                  }}
+                >
+                  <Trash2 size={12} />
+                  삭제
+                </button>
+
                 {/* 동기화 버튼 */}
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
                   <button
@@ -820,6 +869,75 @@ export function FormManagement() {
         </div>
 
       </div>
+
+      {/* 삭제 확인 모달 */}
+      {isDeleteOpen && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 1000,
+        }}>
+          <div style={{
+            background: '#fff', borderRadius: 16, padding: '28px 32px',
+            width: 380, boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+            display: 'flex', flexDirection: 'column', gap: 18,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Trash2 size={20} color="#dc2626" />
+              <span style={{ fontSize: 16, fontWeight: 700, color: '#111' }}>양식 삭제</span>
+            </div>
+            <p style={{ fontSize: 13, color: '#444', lineHeight: 1.7, margin: 0 }}>
+              <strong style={{ fontFamily: 'var(--mono)' }}>{selectedId}.md</strong>를 삭제합니다.<br />
+              MD 파일과 form_types.json 항목이 영구 삭제됩니다.<br />
+              <span style={{ color: '#dc2626', fontSize: 12 }}>이 작업은 되돌릴 수 없습니다.</span>
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <label style={{ fontSize: 12, fontWeight: 600, color: '#555' }}>관리자 비밀번호</label>
+              <input
+                type="password"
+                value={deletePw}
+                onChange={e => { setDeletePw(e.target.value); setDeleteErr(null) }}
+                onKeyDown={e => e.key === 'Enter' && handleDelete()}
+                placeholder="비밀번호 입력"
+                autoFocus
+                style={{
+                  border: `1.5px solid ${deleteErr ? '#dc2626' : '#d1d5db'}`,
+                  borderRadius: 8, padding: '9px 13px', fontSize: 13,
+                  outline: 'none', fontFamily: 'inherit', color: '#111',
+                }}
+              />
+              {deleteErr && (
+                <span style={{ fontSize: 11, color: '#dc2626', fontWeight: 600 }}>{deleteErr}</span>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => { setIsDeleteOpen(false); setDeletePw(''); setDeleteErr(null) }}
+                disabled={isDeleting}
+                style={{
+                  padding: '8px 20px', borderRadius: 8,
+                  border: '1px solid #d1d5db', background: 'transparent',
+                  color: '#555', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                }}
+              >
+                취소
+              </button>
+              <button
+                onClick={handleDelete}
+                disabled={!deletePw || isDeleting}
+                style={{
+                  padding: '8px 20px', borderRadius: 8, border: 'none',
+                  background: !deletePw || isDeleting ? '#fca5a5' : '#dc2626',
+                  color: '#fff', fontSize: 13, fontWeight: 600,
+                  cursor: !deletePw || isDeleting ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {isDeleting ? '삭제 중...' : '삭제'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -10,9 +10,22 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+import uuid as _uuid
+from datetime import datetime, timezone
+
 from ...core.auth import get_current_user
 from ...core.config import get_settings
-from ...core.database import get_pool
+from ...core.s3_store import read_json, write_json
+
+
+def _get_form_edit_log(form_id: str) -> list[dict]:
+    return read_json(f"config/form_edit_logs/{form_id}.json") or []
+
+
+def _append_form_edit_log(form_id: str, entry: dict) -> None:
+    log = _get_form_edit_log(form_id)
+    log.insert(0, entry)
+    write_json(f"config/form_edit_logs/{form_id}.json", log[:50])
 
 
 def _content_hash(content: str) -> str:
@@ -167,14 +180,11 @@ async def apply(body: ChatRequest, user: dict = Depends(get_current_user)):
     if body.expected_hash:
         current_hash = _content_hash(current_content)
         if current_hash != body.expected_hash:
-            pool = get_pool()
-            last = await pool.fetchrow(
-                "SELECT display_name, saved_at FROM form_edit_logs WHERE form_id = $1 ORDER BY saved_at DESC LIMIT 1",
-                body.form_id,
-            )
-            if last:
-                t = last["saved_at"].strftime("%H:%M")
-                detail = f"{last['display_name']}님이 {t}에 수정했습니다. 최신 내용을 다시 불러온 뒤 저장해 주세요."
+            log = _get_form_edit_log(body.form_id)
+            if log:
+                last = log[0]
+                t = last.get("saved_at", "")[:16].replace("T", " ")
+                detail = f"{last.get('display_name', '?')}님이 {t}에 수정했습니다. 최신 내용을 다시 불러온 뒤 저장해 주세요."
             else:
                 detail = "파일이 외부에서 변경되었습니다. 최신 내용을 다시 불러온 뒤 저장해 주세요."
             raise HTTPException(status_code=409, detail=detail)
@@ -204,18 +214,16 @@ async def apply(body: ChatRequest, user: dict = Depends(get_current_user)):
 
             # 변경 이력 기록
             new_hash = _content_hash(updated)
-            pool = get_pool()
-            await pool.execute(
-                """INSERT INTO form_edit_logs
-                   (form_id, user_id, display_name, content_hash, content_before, content_after)
-                   VALUES ($1, $2, $3, $4, $5, $6)""",
-                body.form_id,
-                user["user_id"],
-                user["display_name"],
-                new_hash,
-                current_content,
-                updated,
-            )
+            _append_form_edit_log(body.form_id, {
+                "id": str(_uuid.uuid4()),
+                "form_id": body.form_id,
+                "user_id": user["user_id"],
+                "display_name": user.get("display_name"),
+                "content_hash": new_hash,
+                "content_before": current_content,
+                "content_after": updated,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+            })
 
             tbd_count = len(re.findall(r"\bTBD\b", updated))
             yield f"data: {json.dumps({'type': 'done', 'tbd_count': tbd_count, 'content_hash': new_hash})}\n\n"

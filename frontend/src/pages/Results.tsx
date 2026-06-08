@@ -243,22 +243,37 @@ function DistSearchModal({
   onClose: () => void
 }) {
   const [q, setQ] = useState('')
-  const [candidates, setCandidates] = useState<DistResult[]>([])
-  const [loading, setLoading] = useState(true)
+  const [candidates, setCandidates] = useState<DistResult[]>([])  // 소매처 기반 후보군
+  const [results, setResults] = useState<DistResult[]>([])        // 타이핑 검색 결과
+  const [loadingCandidates, setLoadingCandidates] = useState(false)
+  const [searching, setSearching] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => { inputRef.current?.focus() }, [])
 
+  // 모달 열릴 때 소매처 연결 후보군 미리 로드
   useEffect(() => {
-    setLoading(true)
+    if (!retailerCode) return
+    setLoadingCandidates(true)
     api.getDistCandidates(retailerCode)
       .then(setCandidates)
-      .finally(() => setLoading(false))
+      .catch(() => {})
+      .finally(() => setLoadingCandidates(false))
   }, [retailerCode])
 
-  const filtered = q.trim()
-    ? candidates.filter(c => c.name.toLowerCase().includes(q.toLowerCase()) || c.code.includes(q))
-    : candidates
+  // 타이핑 시 전체 검색
+  useEffect(() => {
+    if (!q.trim()) { setResults([]); return }
+    setSearching(true)
+    const timer = setTimeout(async () => {
+      try { setResults(await api.searchDist(q)) }
+      finally { setSearching(false) }
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [q])
+
+  // 입력 전: 후보군 표시 / 입력 후: 검색 결과 표시
+  const displayList = q.trim() ? results : candidates
 
   return (
     <div
@@ -293,49 +308,62 @@ function DistSearchModal({
             <X size={15} />
           </button>
         </div>
-        {candidates.length > 4 && (
-          <div style={{ padding: '12px 18px', borderBottom: '1px solid var(--border)', position: 'relative' }}>
-            <Search size={14} style={{ position: 'absolute', left: 32, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-3)', pointerEvents: 'none' }} />
-            <input
-              ref={inputRef}
-              value={q}
-              onChange={e => setQ(e.target.value)}
-              placeholder="판매처명 또는 코드"
-              style={{
-                width: '100%', boxSizing: 'border-box',
-                padding: '8px 12px 8px 34px',
-                border: '1px solid var(--border)', borderRadius: 8,
-                fontSize: 13, outline: 'none',
-                background: 'var(--bg)', color: 'var(--text-1)',
-              }}
-            />
-          </div>
-        )}
+        <div style={{ padding: '12px 18px', borderBottom: '1px solid var(--border)', position: 'relative' }}>
+          <Search size={14} style={{
+            position: 'absolute', left: 32, top: '50%', transform: 'translateY(-50%)',
+            color: 'var(--text-3)', pointerEvents: 'none',
+          }} />
+          <input
+            ref={inputRef}
+            value={q}
+            onChange={e => setQ(e.target.value)}
+            placeholder="판매처명"
+            style={{
+              width: '100%', boxSizing: 'border-box',
+              padding: '8px 12px 8px 34px',
+              border: '1px solid var(--border)', borderRadius: 8,
+              fontSize: 13, outline: 'none',
+              background: 'var(--bg)', color: 'var(--text-1)',
+            }}
+          />
+          {searching && (
+            <Loader2 size={13} style={{
+              position: 'absolute', right: 32, top: '50%', transform: 'translateY(-50%)',
+              color: 'var(--text-3)', animation: 'spin 0.8s linear infinite',
+            }} />
+          )}
+        </div>
         <div style={{ flex: 1, overflowY: 'auto' }}>
-          {loading && (
+          {(loadingCandidates || searching) && displayList.length === 0 && (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, gap: 8, color: 'var(--text-3)' }}>
               <Loader2 size={14} style={{ animation: 'spin 0.8s linear infinite' }} />
               <span style={{ fontSize: 12 }}>로딩 중...</span>
             </div>
           )}
-          {!loading && filtered.length === 0 && (
-            <p style={{ padding: 20, textAlign: 'center', fontSize: 12, color: 'var(--text-3)' }}>후보가 없습니다</p>
+          {!loadingCandidates && !searching && displayList.length === 0 && !q.trim() && (
+            <p style={{ padding: 20, textAlign: 'center', fontSize: 12, color: 'var(--text-3)' }}>판매처명으로 검색하세요</p>
           )}
-          {filtered.map((c, i) => (
+          {!searching && displayList.length === 0 && q.trim() && (
+            <p style={{ padding: 20, textAlign: 'center', fontSize: 12, color: 'var(--text-3)' }}>검색 결과가 없습니다</p>
+          )}
+          {displayList.map((r, i) => (
             <button
-              key={c.code}
-              onClick={() => { onSelect(c.code, c.name); onClose() }}
+              key={r.code}
+              onClick={() => { onSelect(r.code, r.name); onClose() }}
               style={{
                 width: '100%', textAlign: 'left', padding: '11px 18px',
-                borderBottom: i < filtered.length - 1 ? '1px solid var(--border)' : 'none',
+                borderBottom: i < displayList.length - 1 ? '1px solid var(--border)' : 'none',
                 background: 'transparent', border: 'none', cursor: 'pointer',
                 display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12,
               }}
               onMouseEnter={e => (e.currentTarget.style.background = '#f5ede0')}
               onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
             >
-              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-1)' }}>{c.name}</span>
-              <span style={{ fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text-3)', background: '#ede9e1', borderRadius: 6, padding: '3px 8px', flexShrink: 0 }}>{c.code}</span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-1)' }}>{r.name}</span>
+              <span style={{
+                fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text-3)',
+                background: '#ede9e1', borderRadius: 6, padding: '3px 8px', flexShrink: 0,
+              }}>{r.code}</span>
             </button>
           ))}
         </div>
@@ -1252,20 +1280,20 @@ export function Results() {
             </div>
           )}
 
-          {/* 행별 상세 탭 — flat grid */}
+          {/* 행별 상세 탭 — 테이블 */}
           {detailTab === 'detail' && (
             <div style={{ flex: 1, overflowY: 'auto' }}>
               <div style={{ padding: '0 24px 14px', overflowX: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                   <thead>
                     <tr style={{ color: 'var(--text-3)' }}>
-                      {(['', '得意先', ...(hasJisho ? ['入荷支店'] : []), '商品名', 'タイプ', '条件', '仕切', 'NET', '수량', '금액'] as string[]).map((h, i) => {
-                        const leftColCount = hasJisho ? 4 : 3
+                      {(['', '得意先', ...(hasJisho ? ['入荷支店'] : []), '商品名', 'タイプ', '条件', '仕切', 'NET', '本部長', '수량', '금액'] as string[]).map((h, i) => {
+                        const textCols = hasJisho ? 4 : 3
                         return (
                           <th key={i} style={{
-                            padding: i >= leftColCount ? '10px 0 8px 16px' : '10px 12px 8px 0',
+                            padding: i >= textCols ? '6px 0 6px 8px' : '6px 8px 6px 0',
                             fontWeight: 600, fontSize: 10,
-                            textAlign: i < leftColCount ? 'left' : 'right',
+                            textAlign: i < textCols ? 'left' : 'right',
                             letterSpacing: '0.04em', textTransform: 'uppercase',
                             borderBottom: '1px solid var(--border)',
                             whiteSpace: 'nowrap',
@@ -1278,41 +1306,31 @@ export function Results() {
                   </thead>
                   <tbody>
                     {filteredFlatRows.map((row, i) => {
-                      const tc          = typeColor(row.タイプ ?? '')
-                      const cond        = row['条件1（パック）'] ?? row['条件1（ケース）']
-                      const ocrName     = row.customer_ocr || '—'
+                      const tc           = typeColor(row.タイプ ?? '')
+                      const cond         = row['条件1（パック）'] ?? row['条件1（ケース）']
+                      const ocrName      = row.customer_ocr || '—'
                       const retailerCode = row.代表スーパー ?? ''
-                      const retailer    = row.スーパー ?? '—'
-                      const distCode    = row.受注先コード ?? ''
-                      const dist        = row.受注先 ?? '—'
-                      const highlightKey = row.jisho || row.product_ocr || row.customer_ocr || null
-                      const warnBg = (row.unconfirmed || row.net_lt_honbu)
+                      const retailer     = row.スーパー ?? '—'
+                      const distCode     = row.受注先コード ?? ''
+                      const dist         = row.受注先 ?? '—'
+                      const warnBg       = row.unconfirmed || row.net_lt_honbu
                       return (
-                        <tr key={i}
-                          onClick={() => {
-                            if (row.page_number != null) setPage(row.page_number)
-                            setSelectedCustomer(prev => prev === highlightKey ? null : highlightKey)
-                          }}
+                        <tr
+                          key={i}
+                          onClick={() => { if (row.page_number != null) setPage(row.page_number) }}
                           onMouseEnter={e => (e.currentTarget.style.background = warnBg ? '#fff0c2' : '#f5ede0')}
                           onMouseLeave={e => (e.currentTarget.style.background = warnBg ? '#fff8e1' : 'transparent')}
-                          style={{
-                            borderBottom: '1px solid #f1f3f5',
-                            background: warnBg ? '#fff8e1' : 'transparent',
-                            cursor: 'pointer',
-                          }}>
+                          style={{ borderBottom: '1px solid #f1f3f5', background: warnBg ? '#fff8e1' : 'transparent', cursor: 'pointer' }}
+                        >
                           {/* 경고 */}
-                          <td style={{ padding: '8px 4px 8px 0', width: 20, verticalAlign: 'top' }}>
-                            {row.unconfirmed && (
-                              <span title="매핑 미확정" style={{ display: 'block', width: 14, height: 14, borderRadius: '50%', background: '#fab005', color: '#fff', fontSize: 9, fontWeight: 800, lineHeight: '14px', textAlign: 'center' }}>?</span>
-                            )}
-                            {row.net_lt_honbu && (
-                              <span title="NET 본부장 미달" style={{ display: 'block', fontSize: 11, lineHeight: 1, color: '#e03131', fontWeight: 800 }}>↓</span>
-                            )}
+                          <td style={{ padding: '8px 4px 8px 0', width: 18, verticalAlign: 'top' }}>
+                            {row.unconfirmed && <span title="매핑 미확정" style={{ display: 'block', width: 14, height: 14, borderRadius: '50%', background: '#fab005', color: '#fff', fontSize: 9, fontWeight: 800, lineHeight: '14px', textAlign: 'center' }}>?</span>}
+                            {row.net_lt_honbu && <span title="NET 본부장 미달" style={{ display: 'block', fontSize: 11, lineHeight: 1, color: '#e03131', fontWeight: 800 }}>↓</span>}
                           </td>
                           {/* 得意先 */}
-                          <td style={{ padding: '8px 12px 8px 0', maxWidth: 200, verticalAlign: 'top' }}>
+                          <td style={{ padding: '8px 8px 8px 0', maxWidth: 170, verticalAlign: 'top' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-                              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 150 }}>{ocrName}</span>
+                              <HoverTooltip text={ocrName} style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-1)' }} />
                               <button onClick={e => { e.stopPropagation(); setRemapTarget({ ocrName }) }} title="소매처 수정" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0 1px', color: 'var(--text-3)', display: 'inline-flex', alignItems: 'center', flexShrink: 0 }}>
                                 <Pencil size={9} />
                               </button>
@@ -1320,20 +1338,20 @@ export function Results() {
                             <div style={{ display: 'flex', alignItems: 'center', gap: 3, marginTop: 2 }}>
                               <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#339af0', flexShrink: 0 }} />
                               <span style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text-3)' }}>{retailerCode || '—'}</span>
-                              <span style={{ fontSize: 10, color: 'var(--text-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110 }}>{retailer}</span>
+                              <HoverTooltip text={retailer} style={{ fontSize: 10, color: 'var(--text-3)' }} />
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 3, marginTop: 1 }}>
                               <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#fd7e14', flexShrink: 0 }} />
                               <span style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text-3)' }}>{distCode || '—'}</span>
-                              <span style={{ fontSize: 10, color: 'var(--text-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110 }}>{dist}</span>
+                              <HoverTooltip text={dist} style={{ fontSize: 10, color: 'var(--text-3)' }} />
                               <button onClick={e => { e.stopPropagation(); setDistRemapTarget({ ocrName, retailerCode }) }} title="판매처 수정" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0 1px', color: 'var(--text-3)', display: 'inline-flex', alignItems: 'center', flexShrink: 0 }}>
                                 <Pencil size={9} />
                               </button>
                             </div>
                           </td>
-                          {/* 入荷支店 — jisho データあり時のみ */}
+                          {/* 入荷支店 */}
                           {hasJisho && (
-                            <td style={{ padding: '8px 12px 8px 0', fontSize: 11, color: 'var(--text-2)', whiteSpace: 'nowrap', verticalAlign: 'top' }}>
+                            <td style={{ padding: '8px 8px 8px 0', fontSize: 11, color: 'var(--text-2)', whiteSpace: 'nowrap', verticalAlign: 'top' }}>
                               {row.jisho || '—'}
                             </td>
                           )}
@@ -1353,31 +1371,23 @@ export function Results() {
                             )}
                           </td>
                           {/* タイプ */}
-                          <td style={{ padding: '8px 0 8px 16px', textAlign: 'right', verticalAlign: 'top' }}>
-                            <span style={{ background: tc.bg, color: tc.color, borderRadius: 5, padding: '2px 8px', fontWeight: 600, fontSize: 11, whiteSpace: 'nowrap', display: 'inline-block' }}>
+                          <td style={{ padding: '8px 0 8px 14px', textAlign: 'right', verticalAlign: 'top' }}>
+                            <span style={{ background: tc.bg, color: tc.color, borderRadius: 5, padding: '2px 7px', fontWeight: 600, fontSize: 11, whiteSpace: 'nowrap', display: 'inline-block' }}>
                               {row.タイプ ?? '—'}
                             </span>
                           </td>
                           {/* 条件 */}
-                          <td style={{ padding: '8px 0 8px 16px', textAlign: 'right', color: 'var(--text-2)', fontFamily: 'var(--mono)', verticalAlign: 'top' }}>
-                            {fmt(cond)}
-                          </td>
+                          <td style={{ padding: '8px 0 8px 8px', textAlign: 'right', color: 'var(--text-2)', fontFamily: 'var(--mono)', verticalAlign: 'top' }}>{fmt(cond)}</td>
                           {/* 仕切 */}
-                          <td style={{ padding: '8px 0 8px 16px', textAlign: 'right', color: 'var(--text-2)', fontFamily: 'var(--mono)', verticalAlign: 'top' }}>
-                            {fmt(row.仕切)}
-                          </td>
+                          <td style={{ padding: '8px 0 8px 8px', textAlign: 'right', color: 'var(--text-2)', fontFamily: 'var(--mono)', verticalAlign: 'top' }}>{fmt(row.仕切)}</td>
                           {/* NET */}
-                          <td style={{ padding: '8px 0 8px 16px', textAlign: 'right', fontWeight: 700, fontFamily: 'var(--mono)', color: row.net_lt_honbu ? '#e03131' : 'var(--text-1)', verticalAlign: 'top' }}>
-                            {fmt(row.NET)}
-                          </td>
+                          <td style={{ padding: '8px 0 8px 8px', textAlign: 'right', fontWeight: 700, fontFamily: 'var(--mono)', color: row.net_lt_honbu ? '#e03131' : 'var(--text-1)', verticalAlign: 'top' }}>{fmt(row.NET)}</td>
+                          {/* 本部長 */}
+                          <td style={{ padding: '8px 0 8px 8px', textAlign: 'right', color: 'var(--text-2)', fontFamily: 'var(--mono)', verticalAlign: 'top' }}>{fmt(row.本部長価格)}</td>
                           {/* 수량 */}
-                          <td style={{ padding: '8px 0 8px 16px', textAlign: 'right', color: 'var(--text-2)', fontFamily: 'var(--mono)', verticalAlign: 'top' }}>
-                            {fmt(row.個数計)}
-                          </td>
+                          <td style={{ padding: '8px 0 8px 8px', textAlign: 'right', color: 'var(--text-2)', fontFamily: 'var(--mono)', verticalAlign: 'top' }}>{fmt(row.個数計)}</td>
                           {/* 금액 */}
-                          <td style={{ padding: '8px 0 8px 16px', textAlign: 'right', fontWeight: 600, color: 'var(--text-1)', fontFamily: 'var(--mono)', verticalAlign: 'top' }}>
-                            {fmt(row['未収金額合計'])}
-                          </td>
+                          <td style={{ padding: '8px 0 8px 8px', textAlign: 'right', fontWeight: 700, color: 'var(--primary)', fontFamily: 'var(--mono)', verticalAlign: 'top' }}>{fmt(row['未収金額合計'])}</td>
                         </tr>
                       )
                     })}

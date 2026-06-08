@@ -11,21 +11,26 @@ from uuid import uuid4
 import anthropic
 
 from ..core.config import get_settings, get_drive
-from ..core.database import get_pool
 from ..db.queries import (
     update_document_status,
     update_document_error,
+    get_document,
+    get_all_mappings,
     save_pending_mappings,
     has_pending_mappings,
     set_current_run_id,
     get_current_run_id,
+    set_form_id,
+    set_pages_count,
 )
 from .ocr import run_ocr
 from .phase1 import run_phase1
 from .phase2 import run_phase2
 from .phase2_row_anchor import build_row_anchors, save_row_anchors
 from .phase2_verify import run_phase2_verify
-from .phase3 import run_phase3, _upsert_cache_row, _upsert_dist_cache_row, _build_issuer_fingerprint, _parse_fingerprint_fields
+from .phase3 import run_phase3, _build_issuer_fingerprint, _parse_fingerprint_fields
+from .phase3_fallback import run_phase3_with_tool_use_or_fallback
+from ..tools.mapping import confirm_mapping
 from .phase4 import run_phase4
 
 log = logging.getLogger(__name__)
@@ -52,6 +57,19 @@ def _get_pipeline_semaphore() -> asyncio.Semaphore:
     return _pipeline_semaphore
 
 
+# Phase 2 청크 동시 실행 상한 (env: MAX_CONCURRENT_PHASE2_CHUNKS, 기본 3)
+# 파이프라인 5개 × 청크 3개 = 최대 15 Sonnet 동시 호출
+_chunk_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_chunk_semaphore() -> asyncio.Semaphore:
+    global _chunk_semaphore
+    if _chunk_semaphore is None:
+        limit = int(os.getenv("MAX_CONCURRENT_PHASE2_CHUNKS", "3"))
+        _chunk_semaphore = asyncio.Semaphore(limit)
+    return _chunk_semaphore
+
+
 async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> None:
     """업로드 직후 백그라운드에서 실행. 상태를 DB에 계속 업데이트."""
     settings = get_settings()
@@ -73,11 +91,7 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
 
             # OCR 완료 후 페이지 수 저장 (다중 번들 경고용)
             pages_count = len(list(pages_dir.glob("page_*.ocr.txt")))
-            pool = get_pool()
-            await pool.execute(
-                "UPDATE v3_documents SET pages_count = $1 WHERE doc_id = $2",
-                pages_count, doc_id,
-            )
+            await set_pages_count(doc_id, pages_count)
             if pages_count > 20:
                 log.warning("[%s] 페이지 수 %d — 단일 청구서 세트 초과 가능성", doc_id, pages_count)
 
@@ -136,15 +150,20 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
                     )
                     if detail_chunks:
                         log.info(
-                            "[%s] 번들 (%d-%d) 청크 분할 (%d청크)",
+                            "[%s] 번들 (%d-%d) 청크 분할 (%d청크) — 병렬 실행",
                             doc_id, start, end, len(detail_chunks),
                         )
-                        for chunk_pages in detail_chunks:
-                            r = await run_phase2(
-                                doc_id, form_id, extracted_dir, page_numbers=chunk_pages,
-                                run_id=run_id, row_anchors=_filter_anchors(chunk_pages),
-                            )
-                            phase2_results.append(r)
+                        async def _run_bundle_chunk(chunk_pages: list[int]) -> dict:
+                            async with _get_chunk_semaphore():
+                                return await run_phase2(
+                                    doc_id, form_id, extracted_dir, page_numbers=chunk_pages,
+                                    run_id=run_id, row_anchors=_filter_anchors(chunk_pages),
+                                    write_output=False,
+                                )
+                        bundle_results = await asyncio.gather(
+                            *[_run_bundle_chunk(c) for c in detail_chunks]
+                        )
+                        phase2_results.extend(bundle_results)
                     else:
                         r = await run_phase2(
                             doc_id, form_id, extracted_dir, page_range=(start, end),
@@ -165,15 +184,18 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
             else:
                 detail_chunks = await asyncio.to_thread(_build_detail_chunks, extracted_dir)
                 if detail_chunks:
-                    log.info("[%s] detail 페이지 청크 분할 (%d청크)", doc_id, len(detail_chunks))
-                    phase2_results = []
-                    for chunk_pages in detail_chunks:
-                        r = await run_phase2(
-                            doc_id, form_id, extracted_dir, page_numbers=chunk_pages,
-                            run_id=run_id, row_anchors=_filter_anchors(chunk_pages),
-                        )
-                        phase2_results.append(r)
-                    phase2_result = _merge_phase2_results(phase2_results)
+                    log.info("[%s] detail 페이지 청크 분할 (%d청크) — 병렬 실행", doc_id, len(detail_chunks))
+                    async def _run_chunk(chunk_pages: list[int]) -> dict:
+                        async with _get_chunk_semaphore():
+                            return await run_phase2(
+                                doc_id, form_id, extracted_dir, page_numbers=chunk_pages,
+                                run_id=run_id, row_anchors=_filter_anchors(chunk_pages),
+                                write_output=False,
+                            )
+                    phase2_results = await asyncio.gather(
+                        *[_run_chunk(c) for c in detail_chunks]
+                    )
+                    phase2_result = _merge_phase2_results(list(phase2_results))
                     await asyncio.to_thread(
                         (extracted_dir / "phase2_output.json").write_text,
                         json.dumps(phase2_result, ensure_ascii=False, indent=2),
@@ -196,7 +218,15 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
 
             # ── Phase 3 ──────────────────────────────────────────
             await update_document_status(doc_id, "phase3")
-            _, pending = await run_phase3(doc_id, phase2_result, extracted_dir, form_id=form_id, hatsu_month=hatsu_month, run_id=run_id)
+            _, pending = await _call_phase3_by_flag(
+                doc_id=doc_id,
+                phase2_result=phase2_result,
+                extracted_dir=extracted_dir,
+                form_id=form_id,
+                hatsu_month=hatsu_month,
+                run_id=run_id,
+                settings=settings,
+            )
 
             if pending:
                 await save_pending_mappings(doc_id, pending)
@@ -210,6 +240,48 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
         except Exception as exc:
             log.exception("[%s] 파이프라인 오류", doc_id)
             await update_document_error(doc_id, error_type="technical", error_phase="pipeline", message=str(exc))
+
+
+async def _call_phase3_by_flag(
+    doc_id: str,
+    phase2_result: dict,
+    extracted_dir,
+    form_id: str,
+    hatsu_month: str,
+    run_id: str,
+    settings,
+) -> tuple:
+    """PHASE3_TOOL_USE_ENABLED flag에 따라 적절한 Phase 3 경로를 실행한다.
+
+    flag OFF (기본값): legacy run_phase3() 직접 호출
+    flag ON:           run_phase3_with_tool_use_or_fallback() 호출
+                       Tool Use 실패 시 자동 fallback → legacy 결과 반환
+
+    Returns:
+        (phase3_result, pending)  — flag OFF: 2-tuple
+        (phase3_result, pending)  — flag ON: 내부적으로 3-tuple을 받아 2-tuple로 반환
+    """
+    if settings.phase3_tool_use_enabled:
+        # Tool Use 경로 (experimental) — 실패 시 legacy로 자동 fallback
+        # settings를 명시적으로 전달 → wrapper 내부 get_settings() 호출 불필요
+        _, pending, _fb_stats = await run_phase3_with_tool_use_or_fallback(
+            doc_id, phase2_result, extracted_dir,
+            form_id=form_id, hatsu_month=hatsu_month, run_id=run_id,
+            enable_tool_use=True,
+            settings=settings,           # ← 명시적 주입
+        )
+        if _fb_stats.fallback_triggered:
+            log.warning(
+                "[%s] Phase 3 Tool Use fallback 발생: [%s] %s",
+                doc_id, _fb_stats.fallback_class, _fb_stats.fallback_reason,
+            )
+        return _, pending
+    else:
+        # Legacy 경로 (기본값, flag OFF)
+        return await run_phase3(
+            doc_id, phase2_result, extracted_dir,
+            form_id=form_id, hatsu_month=hatsu_month, run_id=run_id,
+        )
 
 
 async def resume_phase4(doc_id: str) -> None:
@@ -241,11 +313,7 @@ async def _merge_confirmed_mappings(doc_id: str) -> None:
         return
 
     result = json.loads(out_path.read_text(encoding="utf-8"))
-    pool = get_pool()
-    rows = await pool.fetch(
-        "SELECT mapping_type, ocr_name, confirmed_code, confirmed_name FROM v3_mappings WHERE doc_id = $1",
-        doc_id,
-    )
+    rows = await get_all_mappings(doc_id)
 
     confirmed_retailers = result.setdefault("confirmed_retailers", {})
     confirmed_products  = result.setdefault("confirmed_products", {})
@@ -298,26 +366,41 @@ async def _merge_confirmed_mappings(doc_id: str) -> None:
     issuer_fp = _build_issuer_fingerprint(issuer, _parse_fingerprint_fields(form_md))
 
     for row in rows:
-        code = row["confirmed_code"]
-        name = row["confirmed_name"] or ""
+        code = row.get("confirmed_code")
+        name = row.get("confirmed_name") or ""
         if not code:
             continue
         if row["mapping_type"] == "retailer":
-            _upsert_cache_row(
-                md / "ocr_retailer.csv", "ocr_name",
-                ["ocr_name", "retailer_code", "retailer_name"],
-                row["ocr_name"], [row["ocr_name"], code, name],
+            await confirm_mapping(
+                mapping_type="retailer",
+                ocr_name=row["ocr_name"],
+                confirmed_code=code,
+                context={"retailer_name": name},
+                mappings_dir=md,
             )
         elif row["mapping_type"] == "product":
-            _upsert_cache_row(
-                md / "ocr_product.csv", "ocr_name",
-                ["ocr_name", "product_code", "product_name"],
-                row["ocr_name"], [row["ocr_name"], code, name],
+            await confirm_mapping(
+                mapping_type="product",
+                ocr_name=row["ocr_name"],
+                confirmed_code=code,
+                context={"product_name": name},
+                mappings_dir=md,
             )
         elif row["mapping_type"] == "dist":
             rc = confirmed_retailers.get(row["ocr_name"], {}).get("retailer_code", "")
             if rc:
-                _upsert_dist_cache_row(md / "ocr_dist.csv", form_id, issuer_fp, rc, code, name)
+                await confirm_mapping(
+                    mapping_type="dist",
+                    ocr_name=row["ocr_name"],
+                    confirmed_code=code,
+                    context={
+                        "form_id": form_id,
+                        "issuer_fingerprint": issuer_fp,
+                        "retailer_code": rc,
+                        "dist_name": name,
+                    },
+                    mappings_dir=md,
+                )
 
 
 async def _run_phase4_and_finish(doc_id: str, run_id: str = "", skip_xv: bool = False) -> None:
@@ -334,16 +417,15 @@ async def _push_to_drive(doc_id: str) -> None:
     if not drive:
         return
     settings = get_settings()
-    pool = get_pool()
-    row = await pool.fetchrow("SELECT pdf_filename, hatsu_month FROM v3_documents WHERE doc_id = $1", doc_id)
-    if not row:
+    doc = await get_document(doc_id)
+    if not doc:
         return
     try:
         await asyncio.to_thread(
             drive.push_doc,
             settings.drive_root_folder_id,
-            row["hatsu_month"] or "",
-            row["pdf_filename"],
+            doc.get("hatsu_month") or "",
+            doc.get("pdf_filename", ""),
             settings.samples_dir,
             settings.extracted_dir,
             doc_id,
@@ -421,8 +503,7 @@ async def _identify_form(doc_id: str, pages_dir: Path) -> tuple[str, float]:
 
 
 async def _set_form_id(doc_id: str, form_id: str) -> None:
-    pool = get_pool()
-    await pool.execute("UPDATE v3_documents SET form_id = $1 WHERE doc_id = $2", form_id, doc_id)
+    await set_form_id(doc_id, form_id)
 
 
 def _get_page_roles(extracted_dir: Path) -> dict[int, str]:

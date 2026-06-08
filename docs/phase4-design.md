@@ -30,15 +30,28 @@
 
 ### Step 3 — NET 계산
 
-수식 세부 내용은 각 양식 정의 파일을 단일 출처로 한다.
+수식 세부 내용은 각 양식 정의 파일을 단일 출처로 한다.  
+수식 정의는 `config/form_types.json`의 `net` 섹션에 저장되며, `scripts/phase4_calc.py`가 읽는다.
 
-| 양식 | 조건 필드 | 세부 수식 |
-| ---- | --------- | --------- |
-| **01** | `条件` / `ケース入数` | → [form_01.md](../form_definitions/form_01.md) |
-| **02** | `条件` | → form_02.md (미작성) |
-| **03** | `条件` | → form_03.md (미작성) |
-| **04** | `未収条件` | → [form_04.md](../form_definitions/form_04.md) |
-| **05** | `個別条件` | → form_05.md (미작성) |
+**수식 경로 (우선순위 순)**:
+
+| 경로 | 키 | 용도 |
+|------|-----|------|
+| **DSL expr** (기본) | `formula_type: "expr"` | 산술 표현식 + 변수 매핑. 신규 양식 기본 경로. |
+| Plugin (예외) | `formula_type: "plugin"` | DSL로 표현 불가한 복잡한 산식. 개발자 승인 필요. |
+| Legacy named formula | `formula: "subtract_conditions"` 등 | 하위 호환. 신규 추가 금지. |
+
+> **원칙**: Claude는 form_XX.md에서 수식 구조를 읽어 DSL expr 설정을 생성한다.  
+> 실제 계산은 Python 결정적 코드(`phase4_calc.py`)만 수행한다. Claude가 직접 계산하지 않는다.  
+> 자세한 내용 → [docs/phase4-dsl-readiness.md](phase4-dsl-readiness.md)
+
+| 양식 | 현재 수식 | 세부 |
+| ---- | --------- | ---- |
+| **01** | `shikiri - discount` (DSL expr + computed_vars) | → [form_01.md](../form_definitions/form_01.md) |
+| **02** | 미작성 | → form_02.md 수령 후 DSL 매핑 |
+| **03** | 미작성 | → form_03.md 수령 후 DSL 매핑 |
+| **04** | `shikiri - teiban - c1` (DSL expr + needs_teiban) | → [form_04.md](../form_definitions/form_04.md) |
+| **05** | 미작성 | → form_05.md 수령 후 DSL 매핑 |
 
 ### Step 4 — 교차검증
 

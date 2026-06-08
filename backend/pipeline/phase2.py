@@ -45,11 +45,12 @@ async def run_phase2(
     page_numbers: list[int] | None = None,
     run_id: str = "",
     row_anchors: list[dict] | None = None,
+    write_output: bool = True,
 ) -> dict:
     """지정 페이지의 page MD + form 정의 → items[] JSON.
     page_range=(start, end): 연속 범위 (번들 분리용).
     page_numbers=[1,2,7,8,...]: 비연속 페이지 목록 (청크 분할용).
-    row_anchors: form_04 전용 — 후보 상품 행 앵커 목록. None이면 기존 방식.
+    row_anchors: 후보 상품 행 앵커 목록 (form_types.json row_anchor 설정이 있는 양식). None이면 기존 방식.
     스트리밍으로 10분 이상 요청도 처리 가능.
     """
     settings = get_settings()
@@ -72,12 +73,12 @@ async def run_phase2(
         for f in md_files
     )
 
-    # row anchor 섹션 (form_04 전용) — LLM 계약 변경:
+    # row anchor 섹션 — LLM 계약 변경:
     #   "문서에서 item을 찾아라" → "이 row_id 목록을 빠짐없이 처리하라"
     anchor_section = ""
     if row_anchors:
         anchor_section = (
-            "## row anchor 목록 (form_04 전용)\n\n"
+            "## row anchor 목록\n\n"
             "다음 후보 상품 행 앵커를 **모두 빠짐없이** 처리하라.\n"
             "- 상품 행이면: item JSON에 `\"row_id\"` 필드를 포함한다.\n"
             "- 상품 행이 아니면: `{\"row_id\": \"...\", \"not_item\": true}` 형식으로 items[]에 포함한다.\n"
@@ -161,6 +162,7 @@ async def run_phase2(
             f"raw 앞 300자: {raw[:300]!r}"
         ) from e
 
-    out_path = output_dir / "phase2_output.json"
-    out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    if write_output:
+        out_path = output_dir / "phase2_output.json"
+        out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result

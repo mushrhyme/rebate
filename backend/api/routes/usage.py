@@ -1,11 +1,10 @@
 """Admin — 사용량 모니터링 API."""
 from datetime import datetime, timezone, timedelta
-import json as _json
 
 from fastapi import APIRouter, Depends, Query
 
 from ...core.auth import require_admin
-from ...core.database import get_pool
+from ...db.queries import list_documents
 
 router = APIRouter(prefix="/api/admin/usage", tags=["admin-usage"])
 
@@ -29,19 +28,31 @@ def _period_range(period: str) -> tuple[datetime, datetime]:
     return start, end
 
 
+def _safe_dt(s: str | None) -> datetime | None:
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
 @router.get("")
 async def get_usage(
     period: str = Query(default="this_month"),
-    start_date: str | None = Query(default=None),   # YYYY-MM-DD
-    end_date:   str | None = Query(default=None),   # YYYY-MM-DD
+    start_date: str | None = Query(default=None),
+    end_date: str | None = Query(default=None),
     _admin: dict = Depends(require_admin),
 ):
-    """기간별 분석 실행 이력 (run 단위, 재분석 포함) — 관리자 전용."""
-    pool = get_pool()
+    """기간별 분석 실행 이력 — 관리자 전용.
+    S3 meta.json의 usage_log 리스트 기반 집계."""
     if start_date and end_date:
         try:
             start = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
-            end   = datetime.fromisoformat(end_date).replace(
+            end = datetime.fromisoformat(end_date).replace(
                 hour=23, minute=59, second=59, microsecond=999999, tzinfo=timezone.utc,
             )
             period = "custom"
@@ -50,70 +61,71 @@ async def get_usage(
     else:
         start, end = _period_range(period)
 
-    # phase별 합산 → run_id 단위로 JSONB 집계
-    rows = await pool.fetch(
-        """
-        WITH phase_totals AS (
-            SELECT
-                l.run_id,
-                l.doc_id,
-                MIN(l.run_at)    AS run_at,
-                l.phase,
-                MAX(l.model)     AS model,
-                SUM(l.input_tok) AS input_tok,
-                SUM(l.output_tok) AS output_tok,
-                SUM(l.cache_read) AS cache_read,
-                SUM(l.cache_write) AS cache_write
-            FROM v3_usage_log l
-            WHERE l.run_at >= $1 AND l.run_at < $2
-            GROUP BY l.run_id, l.doc_id, l.phase
-        )
-        SELECT
-            pt.run_id,
-            pt.doc_id,
-            MIN(pt.run_at)                       AS run_at,
-            d.pdf_filename,
-            d.status,
-            d.confirmed_at,
-            d.pages_count,
-            u.username                           AS uploader_username,
-            u.display_name_ja                    AS uploader_name_ja,
-            u.display_name                       AS uploader_name,
-            jsonb_object_agg(
-                pt.phase,
-                jsonb_build_object(
-                    'input',       pt.input_tok,
-                    'output',      pt.output_tok,
-                    'model',       pt.model,
-                    'cache_read',  pt.cache_read,
-                    'cache_write', pt.cache_write
-                )
-            ) AS phases
-        FROM phase_totals pt
-        LEFT JOIN v3_documents d ON d.doc_id = pt.doc_id
-        LEFT JOIN users u ON u.user_id = d.uploaded_by
-        GROUP BY pt.run_id, pt.doc_id,
-                 d.pdf_filename, d.status, d.confirmed_at, d.pages_count,
-                 u.username, u.display_name_ja, u.display_name
-        ORDER BY MIN(pt.run_at) DESC
-        """,
-        start,
-        end,
-    )
+    docs = await list_documents()
+    # doc 정보 인덱스
+    doc_index = {d["doc_id"]: d for d in docs}
 
-    runs = []
-    for r in rows:
-        d = dict(r)
-        phases = d.get("phases")
-        if isinstance(phases, str):
-            d["phases"] = _json.loads(phases)
-        elif phases is None:
-            d["phases"] = {}
-        for k in ("run_at", "confirmed_at"):
-            if d.get(k) is not None:
-                d[k] = d[k].isoformat()
-        runs.append(d)
+    # usage_log 항목을 run_id 단위로 집계
+    runs_by_id: dict[str, dict] = {}
+    for doc in docs:
+        for entry in doc.get("usage_log", []):
+            recorded_at = _safe_dt(entry.get("recorded_at"))
+            if not recorded_at:
+                continue
+            if recorded_at < start or recorded_at >= end:
+                continue
+            run_id = entry.get("run_id") or f"single_{doc['doc_id']}"
+            if run_id not in runs_by_id:
+                runs_by_id[run_id] = {
+                    "run_id": run_id,
+                    "doc_id": doc["doc_id"],
+                    "run_at": recorded_at.isoformat(),
+                    "pdf_filename": doc.get("pdf_filename", ""),
+                    "status": doc.get("status"),
+                    "confirmed_at": doc.get("confirmed_at"),
+                    "pages_count": doc.get("pages_count"),
+                    "uploader_username": doc.get("uploaded_by_username"),
+                    "uploader_name_ja": doc.get("uploaded_by_name_ja"),
+                    "uploader_name": doc.get("uploaded_by_name_ja"),
+                    "phases": {},
+                }
+            phase = entry.get("phase", "unknown")
+            runs_by_id[run_id]["phases"][phase] = {
+                "input": entry.get("input_tok", 0),
+                "output": entry.get("output_tok", 0),
+                "model": entry.get("model", ""),
+                "cache_read": entry.get("cache_read", 0),
+                "cache_write": entry.get("cache_write", 0),
+            }
 
+    # usage_log 없는 문서는 token_usage로 폴백 (기존 데이터 표시용)
+    for doc in docs:
+        if doc.get("usage_log"):
+            continue
+        token_usage = doc.get("token_usage") or {}
+        if not token_usage:
+            continue
+        run_id = f"legacy_{doc['doc_id']}"
+        if run_id in runs_by_id:
+            continue
+        updated = _safe_dt(doc.get("updated_at"))
+        if not updated or updated < start or updated >= end:
+            continue
+        runs_by_id[run_id] = {
+            "run_id": run_id,
+            "doc_id": doc["doc_id"],
+            "run_at": (doc.get("updated_at") or ""),
+            "pdf_filename": doc.get("pdf_filename", ""),
+            "status": doc.get("status"),
+            "confirmed_at": doc.get("confirmed_at"),
+            "pages_count": doc.get("pages_count"),
+            "uploader_username": doc.get("uploaded_by_username"),
+            "uploader_name_ja": doc.get("uploaded_by_name_ja"),
+            "uploader_name": doc.get("uploaded_by_name_ja"),
+            "phases": token_usage,
+        }
+
+    runs = sorted(runs_by_id.values(), key=lambda r: r.get("run_at", ""), reverse=True)
     return {
         "runs": runs,
         "period": period,

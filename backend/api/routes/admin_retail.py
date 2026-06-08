@@ -1,38 +1,26 @@
-"""Admin — 소매처 담당자 배정 관리 (retail_user.csv 직접 읽기/쓰기)."""
-import csv
-import os
-from pathlib import Path
-
-from fastapi import APIRouter, Depends
+"""Admin — 소매처 담당자 배정 관리 (Google Sheets retail_user 탭)."""
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ...core.auth import require_admin
-from ...core.config import get_settings
+from ...core.sheets_store import get_sheets_store
 
 router = APIRouter(prefix="/api/admin/retail-assignment", tags=["admin-retail"])
 
-
-def _read_csv(path: Path) -> tuple[list[dict], list[str]]:
-    with open(path, encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-        fieldnames = reader.fieldnames or []
-    return rows, list(fieldnames)
+_CSV = "retail_user.csv"
 
 
-def _write_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
-    tmp = path.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-    os.replace(tmp, path)
+def _get_store():
+    store = get_sheets_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="Google Sheets 연동이 설정되지 않았습니다.")
+    return store
 
 
 @router.get("")
-async def get_assignments(user=Depends(require_admin), settings=Depends(get_settings)):
-    csv_path = settings.mappings_dir / "retail_user.csv"
-    rows, _ = _read_csv(csv_path)
+async def get_assignments(user=Depends(require_admin)):
+    store = _get_store()
+    rows = store.read_csv(_CSV)
 
     reps: dict[str, dict] = {}
     for row in rows:
@@ -55,9 +43,8 @@ async def get_assignments(user=Depends(require_admin), settings=Depends(get_sett
             "dist_name": row.get("판매처명", ""),
         })
 
-    rep_list = sorted(reps.values(), key=lambda r: r["rep_name"])
     return {
-        "reps": rep_list,
+        "reps": sorted(reps.values(), key=lambda r: r["rep_name"]),
         "total_retailers": len(rows),
     }
 
@@ -73,11 +60,13 @@ class PatchAssignment(BaseModel):
 async def patch_assignment(
     body: PatchAssignment,
     user=Depends(require_admin),
-    settings=Depends(get_settings),
 ):
-    csv_path = settings.mappings_dir / "retail_user.csv"
-    rows, fieldnames = _read_csv(csv_path)
+    store = _get_store()
+    rows = store.read_csv(_CSV)
+    if not rows:
+        raise HTTPException(status_code=404, detail="retail_user 데이터가 없습니다.")
 
+    fieldnames = list(rows[0].keys())
     code_set = set(body.retailer_codes)
     updated = 0
     for row in rows:
@@ -87,5 +76,5 @@ async def patch_assignment(
             row["ID"] = body.new_system_id
             updated += 1
 
-    _write_csv(csv_path, rows, fieldnames)
+    store.write_all(_CSV, rows, fieldnames)
     return {"ok": True, "updated": updated}

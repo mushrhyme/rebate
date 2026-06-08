@@ -44,6 +44,15 @@ export function PdfViewer({ docId, page, totalPages, highlightText, mappingType,
   const [bboxData, setBboxData] = useState<PageBbox | null>(null)
   const [zoomIdx, setZoomIdx] = useState(2) // 100%
   const zoom = ZOOM_STEPS[zoomIdx]
+  const [pageInput, setPageInput] = useState(String(page))
+
+  useEffect(() => { setPageInput(String(page)) }, [page])
+
+  const commitPage = (val: string) => {
+    const n = parseInt(val, 10)
+    if (!isNaN(n) && totalPages) onPageChange(Math.max(1, Math.min(totalPages, n)))
+    setPageInput(String(page))
+  }
 
   const pageImageUrl = docId && page
     ? `${BASE}/api/v3/documents/${docId}/page-image?page=${page}${sid ? `&sid=${encodeURIComponent(sid)}` : ''}`
@@ -182,11 +191,20 @@ export function PdfViewer({ docId, page, totalPages, highlightText, mappingType,
             }}>
             <ChevronLeft size={13} />
           </button>
-          <span style={{
-            fontSize: 11, color: 'var(--text-2)', fontFamily: 'var(--mono)',
-            minWidth: 52, textAlign: 'center',
-          }}>
-            {page} / {totalPages || '—'}
+          <input
+            value={pageInput}
+            onChange={e => setPageInput(e.target.value)}
+            onBlur={e => commitPage(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') { commitPage(pageInput); e.currentTarget.blur() } }}
+            style={{
+              width: 32, textAlign: 'center', fontFamily: 'var(--mono)',
+              fontSize: 11, color: 'var(--text-1)',
+              border: '1px solid var(--border)', borderRadius: 5,
+              background: 'var(--card)', padding: '3px 4px', outline: 'none',
+            }}
+          />
+          <span style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>
+            / {totalPages || '—'}
           </span>
           <button
             onClick={() => onPageChange(Math.min(totalPages, page + 1))}

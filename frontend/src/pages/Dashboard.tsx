@@ -830,7 +830,7 @@ export function Dashboard() {
           filteredDocs.map((doc, idx) => {
             const cfg = statusConfig[doc.status]
             const uploaderName = doc.uploaded_by_name_ja || doc.uploaded_by_name || doc.uploaded_by_username
-            const runStartMs = isInProgress(doc.status) && doc.analysis_started_at
+            const runStartMs = doc.analysis_started_at
               ? new Date(doc.analysis_started_at).getTime()
               : new Date(doc.created_at).getTime()
             const endMs = isInProgress(doc.status)

@@ -35,11 +35,12 @@ def _is_product_row(
     cells: list[str],
     header_keywords: tuple[str, ...],
     re_total: re.Pattern,
+    cell_idx: int = 1,
 ) -> bool:
     """상품 행 판정 — header/aggregate/separator 제외."""
-    if len(cells) < 3:
+    if len(cells) <= cell_idx:
         return False
-    product = cells[1]
+    product = cells[cell_idx]
     if not product:
         return False
     if re_total.search(line):
@@ -67,12 +68,20 @@ def build_row_anchors(row_anchor_config: dict, output_dir: Path) -> list[dict]:
     """form_types.json row_anchor 설정 기반 범용 행 앵커 생성.
 
     신규 양식 추가 시 코드 수정 없이 form_types.json의 row_anchor 섹션만으로 동작한다.
+
+    추가 설정 키:
+      block_includes_product — True: 블록 헤더 행도 product 행으로 간주 (form_01 등)
+      product_cell           — product 판정 시 사용할 cell 인덱스 (기본값 1)
+      row_id_cell            — row_id에 사용할 cell 인덱스. 지정 시 해당 셀 값을 row_id로 사용
     """
     re_block      = re.compile(row_anchor_config["block_pattern"])
     re_subgroup   = re.compile(row_anchor_config["subgroup_pattern"]) if row_anchor_config.get("subgroup_pattern") else None
     re_condition  = re.compile(row_anchor_config["condition_pattern"]) if row_anchor_config.get("condition_pattern") else None
     re_total      = re.compile(row_anchor_config.get("total_pattern", r'計[：:]'))
-    header_kws    = tuple(row_anchor_config.get("header_keywords", []))
+    header_kws             = tuple(row_anchor_config.get("header_keywords", []))
+    block_includes_product = row_anchor_config.get("block_includes_product", False)
+    product_cell           = row_anchor_config.get("product_cell", 1)
+    row_id_cell            = row_anchor_config.get("row_id_cell")
 
     anchors: list[dict] = []
     current_subgroup:  str        = ""
@@ -116,7 +125,7 @@ def build_row_anchors(row_anchor_config: dict, output_dir: Path) -> list[dict]:
                     current_subgroup = m_sub.group(1).strip()
                     continue
 
-            # 블록 헤더 감지 (예: 管理No:1710151)
+            # 블록 헤더 감지 (예: 管理No:1710151 / 請求伝票番号)
             m_block = re_block.search(line)
             if m_block and not re_total.search(line):
                 current_block = m_block.group(1)
@@ -125,15 +134,21 @@ def build_row_anchors(row_anchor_config: dict, output_dir: Path) -> list[dict]:
                     if re_condition and re_condition.search(line) else None
                 )
                 row_idx = 0
-                continue
+                if not block_includes_product:
+                    continue
+                # block_includes_product=True: 블록 헤더 행이 동시에 첫 product 행 — fall through
 
             if current_block is None:
                 continue
 
-            if not _is_product_row(line, cells, header_kws, re_total):
+            if not _is_product_row(line, cells, header_kws, re_total, product_cell):
                 continue
 
-            row_id = f"p{page_num:03d}:k{current_block}:r{row_idx:02d}"
+            if row_id_cell is not None and len(cells) > row_id_cell and cells[row_id_cell]:
+                row_id = cells[row_id_cell]
+            else:
+                row_id = f"p{page_num:03d}:k{current_block}:r{row_idx:02d}"
+
             anchors.append({
                 'row_id':              row_id,
                 'page':                page_num,

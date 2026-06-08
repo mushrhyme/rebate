@@ -12,15 +12,41 @@ LLM 없음. 완전 결정적. 재현성이 생명.
 모든 양식별 분기는 config/form_types.json에서 읽는다.
 이 파일에 form_id를 직접 비교하는 분기(if form_id == "form_XX")를 추가하지 말 것.
 """
-import argparse, csv, json, math, re, sys, time
+import ast
+import argparse, csv, json, math, operator, os, re, sys, time
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
 BASE = Path(__file__).parent.parent
+sys.path.insert(0, str(BASE))
+
+
+def _get_sheets_store():
+    """GOOGLE_SHEETS_MAPPINGS_ID 환경변수가 설정된 경우 SheetsStore 반환."""
+    sid = os.environ.get("GOOGLE_SHEETS_MAPPINGS_ID", "")
+    if not sid:
+        # backend/.env에서 직접 읽기 (subprocess 환경에서 env가 전달 안 될 때 대비)
+        env_path = BASE / "backend" / ".env"
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                if line.startswith("GOOGLE_SHEETS_MAPPINGS_ID="):
+                    sid = line.split("=", 1)[1].strip()
+                    break
+    if not sid:
+        return None
+    try:
+        from backend.core.sheets_store import SheetsStore
+        return SheetsStore(sid)
+    except Exception:
+        return None
 
 with open(BASE / "config" / "form_types.json", encoding="utf-8") as _f:
     FORM_TYPES: dict = json.load(_f)
+
+# Plugin 레지스트리 — formula_type: "plugin" 경로에서 사용
+# 시그니처: fn(cols, shikiri, teiban_joken, cfg) -> float | None
+FORMULA_REGISTRY: dict = {}
 
 # ── 헬퍼 ─────────────────────────────────────────────────────────────────────
 def to_f(v, default=None):
@@ -42,6 +68,155 @@ def _clean_cell(val) -> str:
         return ""
     return re.sub(r'\s*(?:\|\s*)+$', '', str(val)).strip()
 
+# ── DSL 수식 평가기 ───────────────────────────────────────────────────────────
+_SAFE_OPS = {
+    ast.Add:  operator.add,
+    ast.Sub:  operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div:  operator.truediv,
+    ast.USub: operator.neg,
+}
+
+def _safe_eval(expr: str, ctx: dict, *, _form_id: str = "", _label: str = "") -> float:
+    """산술 표현식만 허용하는 안전한 평가기. eval() 미사용.
+    허용: 숫자 리터럴, ctx 변수명, +  -  *  /  ()
+    금지: 함수 호출, 속성 접근, 비교 연산, 그 외 모든 것.
+
+    _form_id, _label: 오류 메시지에 포함할 컨텍스트 정보.
+    """
+    _ctx_str = f"form={_form_id!r} label={_label!r}" if _form_id or _label else ""
+
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError as e:
+        raise ValueError(
+            f"DSL 수식 구문 오류 [{_ctx_str}]: expr={expr!r} → {e}"
+        ) from e
+
+    def _eval(node):
+        if isinstance(node, ast.Expression):
+            return _eval(node.body)
+        if isinstance(node, ast.Constant):
+            if not isinstance(node.value, (int, float)):
+                raise ValueError(
+                    f"비수치 상수 [{_ctx_str}]: expr={expr!r}, value={node.value!r}"
+                )
+            return float(node.value)
+        if isinstance(node, ast.Name):
+            if node.id not in ctx:
+                available = sorted(ctx.keys())
+                raise ValueError(
+                    f"알 수 없는 변수 [{_ctx_str}]: "
+                    f"expr={expr!r}, 변수={node.id!r}, "
+                    f"사용 가능한 변수={available}"
+                )
+            v = ctx[node.id]
+            return float(v) if v is not None else 0.0
+        if isinstance(node, ast.BinOp):
+            op = _SAFE_OPS.get(type(node.op))
+            if op is None:
+                raise ValueError(
+                    f"허용되지 않은 연산자 [{_ctx_str}]: "
+                    f"expr={expr!r}, 연산자={type(node.op).__name__}"
+                )
+            left = _eval(node.left)
+            right = _eval(node.right)
+            if isinstance(node.op, ast.Div) and right == 0.0:
+                raise ZeroDivisionError(
+                    f"0 나누기 [{_ctx_str}]: expr={expr!r}, "
+                    f"우변=0 (변수: {ast.unparse(node.right) if hasattr(ast, 'unparse') else '?'})"
+                )
+            return op(left, right)
+        if isinstance(node, ast.UnaryOp):
+            op = _SAFE_OPS.get(type(node.op))
+            if op is None:
+                raise ValueError(
+                    f"허용되지 않은 단항 연산자 [{_ctx_str}]: "
+                    f"expr={expr!r}, 연산자={type(node.op).__name__}"
+                )
+            return op(_eval(node.operand))
+        raise ValueError(
+            f"허용되지 않은 AST 노드 [{_ctx_str}]: "
+            f"expr={expr!r}, 노드={type(node).__name__} "
+            f"(함수 호출·속성 접근·비교 연산 등은 DSL에서 지원하지 않음)"
+        )
+
+    return _eval(tree)
+
+
+def _eval_expr(
+    net_cfg: dict,
+    cols: dict,
+    shikiri: float,
+    teiban_joken: float,
+    *,
+    _form_id: str = "",
+) -> float:
+    """formula_type == 'expr' 경로 처리.
+    1. vars 해석 → ctx 변수 주입
+    2. computed_vars 해석 (divide_by 포함)
+    3. 본 expr 실행
+
+    _form_id: 오류 메시지에 포함할 form 식별자.
+    """
+    ctx: dict = {
+        "shikiri": shikiri,
+        "teiban":  teiban_joken,
+    }
+
+    # 1. vars
+    for alias, field in (net_cfg.get("vars") or {}).items():
+        ctx[alias] = to_f(cols.get(field) if field else None, 0) or 0.0
+
+    # 2. computed_vars
+    for var_name, var_cfg in (net_cfg.get("computed_vars") or {}).items():
+        cv_expr = var_cfg.get("expr", "")
+        if not cv_expr:
+            raise ValueError(
+                f"computed_vars[{var_name!r}].expr가 비어 있음 [form={_form_id!r}]"
+            )
+        try:
+            base = _safe_eval(
+                cv_expr, ctx,
+                _form_id=_form_id, _label=f"computed_vars.{var_name}",
+            )
+        except (ValueError, ZeroDivisionError) as e:
+            raise ValueError(
+                f"computed_vars[{var_name!r}] 계산 실패 [form={_form_id!r}]: {e}"
+            ) from e
+
+        divide_by = var_cfg.get("divide_by")
+        if divide_by:
+            when = divide_by.get("when", {})
+            condition_met = (
+                cols.get(when.get("field", ""), "") == when.get("equals", "")
+                if when else True
+            )
+            if condition_met:
+                divisor_field = divide_by["field"]
+                divisor = to_f(cols.get(divisor_field), 0) or 0.0
+                zero_policy = divide_by.get("zero_policy", "skip_divide")
+                if divisor > 0:
+                    base = base / divisor
+                elif zero_policy == "return_none":
+                    return None  # type: ignore[return-value]
+                # zero_policy == "skip_divide" → 나누지 않음 (base 유지)
+                # divisor=0 + skip_divide → 로그 없이 통과 (정상 정책)
+            else:
+                default = divide_by.get("default", 1)
+                if default != 1:
+                    base = base / default
+        ctx[var_name] = base
+
+    # 3. 본 expr
+    main_expr = net_cfg.get("expr", "")
+    if not main_expr:
+        raise ValueError(
+            f"net.expr가 비어 있음 [form={_form_id!r}] — form_types.json을 확인하세요"
+        )
+    return _safe_eval(main_expr, ctx, _form_id=_form_id, _label="net.expr")
+
+
 # ── Step 2: 전처리 (JSON 규칙 실행) ──────────────────────────────────────────
 def preprocess(form_id, cols):
     cols = dict(cols)
@@ -62,6 +237,24 @@ def calc_net(form_id, cols, shikiri, teiban_joken=0.0):
     """결정적 NET 계산. LLM 없음. 수식은 config/form_types.json에서 읽음."""
     cfg = FORM_TYPES.get(form_id, {})
     net_cfg = cfg.get("net", {})
+
+    # ── Layer 1: DSL 경로 ────────────────────────────────────────────────────
+    if net_cfg.get("formula_type") == "expr":
+        return _eval_expr(net_cfg, cols, shikiri, teiban_joken, _form_id=form_id)
+
+    # ── Layer 2: Plugin 경로 (향후 확장용) ───────────────────────────────────
+    if net_cfg.get("formula_type") == "plugin":
+        plugin_name = net_cfg.get("plugin", "")
+        fn = FORMULA_REGISTRY.get(plugin_name)
+        if fn:
+            return fn(cols, shikiri, teiban_joken, net_cfg)
+        raise ValueError(
+            f"Plugin 미등록 [form={form_id!r}]: plugin={plugin_name!r} — "
+            f"FORMULA_REGISTRY에 등록하거나 formula_type=expr로 변경하세요. "
+            f"등록된 plugin: {sorted(FORMULA_REGISTRY.keys()) or '(없음)'}"
+        )
+
+    # ── 하위 호환: named formula 경로 ────────────────────────────────────────
     formula = net_cfg.get("formula")
 
     if formula == "subtract_conditions":
@@ -93,10 +286,32 @@ def calc_net(form_id, cols, shikiri, teiban_joken=0.0):
             return None
         return shikiri - (c1 + c2) / case_in
 
-    raise ValueError(f"Unknown net formula '{formula}' for {form_id}")
+    _supported_legacy = [
+        "subtract_conditions",
+        "subtract_conditions_or_fallback",
+        "subtract_teiban_and_self",
+        "subtract_pack_conditions",
+    ]
+    if formula is None:
+        raise ValueError(
+            f"net 수식 미정의 [form={form_id!r}]: "
+            f"net.formula_type 또는 net.formula가 없습니다. "
+            f"form_types.json을 확인하세요."
+        )
+    raise ValueError(
+        f"지원하지 않는 legacy formula [form={form_id!r}]: formula={formula!r}. "
+        f"지원되는 legacy formula: {_supported_legacy}. "
+        f"신규 양식은 formula_type=expr 사용을 권장합니다."
+    )
 
 # ── CSV 마스터 로드 ───────────────────────────────────────────────────────────
+_sheets_store = _get_sheets_store()
+
 def load_csv_dict(filename, key_col, base_dir=None):
+    if _sheets_store:
+        rows = _sheets_store.read_csv(filename)
+        if rows:
+            return {r[key_col]: r for r in rows if r.get(key_col)}
     path = (base_dir or BASE) / "mappings" / filename
     with open(path, encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
@@ -376,7 +591,7 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
                 totals = page.get("totals") or {}
                 cover_pages.append({"_page": page.get("page"), **totals})
             elif role == "summary":
-                raw = page.get("totals") or {}
+                raw = page.get("totals") or page.get("customer_summaries") or {}
                 for k, v in raw.items():
                     k2 = re.sub(r"^得意先\s*小計\s*", "", k).strip()
                     summary_totals[k2] = v
@@ -391,13 +606,15 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
     # subtract_teiban_and_self 수식에서만 필요.
     # teiban_type은 config에서 읽음 — 하드코딩 금지.
     teiban_map: dict[tuple, float] = {}
-    if net_cfg.get("formula") == "subtract_teiban_and_self":
+    if net_cfg.get("needs_teiban") or net_cfg.get("formula") == "subtract_teiban_and_self":
         teiban_type = net_cfg.get("teiban_type", "定番条件")
         for _item in items_in:
             if _item.get("condition_type") == teiban_type:
                 _key = (_item.get("customer_ocr", ""), _item.get("product_ocr", ""))
                 _cols_pre = preprocess(form_id, _item.get("columns", {}))
-                _u = to_f(_cols_pre.get(net_cfg["self_field"], 0), 0)
+                # self_field: named formula 호환 / DSL은 vars.c1 에서 읽음
+                _sf = net_cfg.get("self_field") or (net_cfg.get("vars") or {}).get("c1", "")
+                _u = to_f(_cols_pre.get(_sf, 0), 0)
                 teiban_map[_key] = _u
 
     cond_disp = form_cfg.get("condition_display", {})
@@ -409,14 +626,17 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
     retail_tantou:    dict[str, list[str]] = {}
     retail_tantou_id: dict[str, list[str]] = {}
     dist_name_by_code: dict[str, str] = {}   # 판매처코드 → 판매처명 2차 조회용
-    with open(root / "mappings" / "retail_user.csv", encoding="utf-8-sig") as f:
-        for r in csv.DictReader(f):
-            retail_tantou.setdefault(r["소매처코드"],    []).append(r["담당자명"])
-            retail_tantou_id.setdefault(r["소매처코드"], []).append(r["ID"])
-            dc = r.get("판매처코드", "").strip()
-            dn = r.get("판매처명",   "").strip()
-            if dc and dn:
-                dist_name_by_code[dc] = dn
+    _ru_rows = (_sheets_store.read_csv("retail_user.csv") if _sheets_store else [])
+    if not _ru_rows:
+        with open(root / "mappings" / "retail_user.csv", encoding="utf-8-sig") as f:
+            _ru_rows = list(csv.DictReader(f))
+    for r in _ru_rows:
+        retail_tantou.setdefault(r["소매처코드"],    []).append(r["담당자명"])
+        retail_tantou_id.setdefault(r["소매처코드"], []).append(r["ID"])
+        dc = r.get("판매처코드", "").strip()
+        dn = r.get("판매처명",   "").strip()
+        if dc and dn:
+            dist_name_by_code[dc] = dn
 
     rows_out: list[dict] = []
 
@@ -458,7 +678,10 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
         _k2          = to_f(up.get("2합환산값"))
         booru_iru    = (int(_k2 / keesu_iru) if (_k2 and keesu_iru and keesu_iru > 0) else None)  # O: ボール入数
 
-        qty      = to_f(cols.get("数量",      0), 0)
+        qty_fields = form_cfg.get("qty_field", ["数量"])
+        if isinstance(qty_fields, str):
+            qty_fields = [qty_fields]
+        qty = next((to_f(cols.get(f, 0), 0) for f in qty_fields if cols.get(f)), 0.0)
         unit_val = cols.get("数量単位", "")
         case_qty = to_f(cols.get("ケース入数", 0), 0)
         kin_gaku = to_f(cols.get("金額",      0), 0)
@@ -489,7 +712,7 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
 
         net = None
         if shikiri is not None and kubun_val not in no_net_kubun:
-            if net_cfg.get("formula") == "subtract_teiban_and_self":
+            if net_cfg.get("needs_teiban") or net_cfg.get("formula") == "subtract_teiban_and_self":
                 teiban_type = net_cfg.get("teiban_type", "定番条件")
                 ctype = item.get("condition_type", teiban_type)
                 tj = 0.0 if ctype == teiban_type else teiban_map.get((customer_ocr, product_ocr), 0.0)

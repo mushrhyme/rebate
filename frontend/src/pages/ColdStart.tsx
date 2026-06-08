@@ -77,7 +77,7 @@ export function ColdStart() {
         const canvas = document.createElement('canvas')
         canvas.width = viewport.width
         canvas.height = viewport.height
-        await page.render({ canvasContext: canvas.getContext('2d')!, viewport }).promise
+        await page.render({ canvas, canvasContext: canvas.getContext('2d')!, viewport }).promise
         const dataUrl = canvas.toDataURL('image/jpeg', 0.7)
         setThumbnails(prev => [...prev, { pageNum: i, dataUrl }])
       }

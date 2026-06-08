@@ -18,6 +18,10 @@ dependencies = [
     # Auth
     "bcrypt==5.0.0",
     "passlib==1.7.4",
+    "PyJWT==2.13.0",
+
+    # AWS S3
+    "boto3==1.43.24",
 
     # Config / util
     "python-dotenv==1.2.1",
@@ -44,3 +48,15 @@ dependencies = [
 [tool.uv]
 # uv sync 로 가상환경 생성 및 패키지 설치
 # uv run uvicorn backend.main:app --reload  로 서버 실행
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "anyio>=4.13.0",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+    "jsonschema>=4.0.0",   # form_types.json Schema 검증 (tests/unit/test_form_types_schema.py)
+]

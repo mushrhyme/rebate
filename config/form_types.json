@@ -2,12 +2,31 @@
   "form_01": {
     "label": "FINET 買掛金特別値引請求明細書",
     "bara_source": "by_unit",
+    "qty_field": ["数量", "請求計上数量"],
     "preprocess": [],
+    "row_anchor": {
+      "block_pattern": "^\\|\\s*(\\d+[-][A-Z0-9]\\d+)\\s*\\|",
+      "block_includes_product": true,
+      "product_cell": 2,
+      "row_id_cell": 2,
+      "total_pattern": "小計|合計",
+      "header_keywords": ["計上No"]
+    },
     "net": {
-      "formula": "subtract_conditions",
-      "c1": "条件",
-      "c2": null,
-      "cs_divide_by_case_qty": true,
+      "formula_type": "expr",
+      "expr": "shikiri - discount",
+      "vars": { "c1": "条件", "c2": null },
+      "computed_vars": {
+        "discount": {
+          "expr": "c1 + c2",
+          "divide_by": {
+            "field": "ケース入数",
+            "when": { "field": "数量単位", "equals": "CS" },
+            "default": 1,
+            "zero_policy": "skip_divide"
+          }
+        }
+      },
       "no_net_kubun": ["円"]
     },
     "condition_display": {
@@ -27,16 +46,11 @@
         "cover_key_10": "販促金請求 10%対象 税抜"
       },
       {
-        "type": "cover_total_vs_summary",
-        "label": "Cover(税込合計) vs Summary合計",
-        "cover_key": "販促金請求 今回請求金額合計"
-      },
-      {
         "type": "per_customer_vs_summary",
         "label": "得意先 {key}"
       }
     ],
-    "show_sections": ["rate_summary", "xv"],
+    "show_sections": ["xv"],
     "aggregate_label": "소매처별 집계",
     "summary": "rate_then_customer",
     "summary_cover_keys": {
@@ -48,40 +62,15 @@
       "taxex_10": "販促金請求 10%対象 税抜"
     }
   },
-  "form_02": {
-    "label": "야마에구미",
-    "bara_source": "column:契約No対象の取引数量合計（総数：内数）",
-    "preprocess": [],
-    "net": {
-      "formula": "subtract_conditions",
-      "c1": "リベート条件",
-      "c2": null,
-      "cs_divide_by_case_qty": false
-    },
-    "condition_display": {
-      "mode": "keesu",
-      "c1": "リベート条件",
-      "c2": null
-    },
-    "cover_totals": {},
-    "cross_validation": [
-      {
-        "type": "cover_honbai_vs_detail",
-        "label": "Cover(税抜金額) vs Detail",
-        "cover_key": "税抜金額"
-      }
-    ],
-    "show_sections": ["xv", "retailer"],
-    "aggregate_label": "소매처별 집계",
-    "summary": "standard"
-  },
   "form_04": {
     "label": "日本アクセス 販売促進金請求書 (CVS)",
     "bara_source": "column:数量",
     "preprocess": [],
     "net": {
-      "formula": "subtract_teiban_and_self",
-      "self_field": "未収条件",
+      "formula_type": "expr",
+      "expr": "shikiri - teiban - c1",
+      "vars": { "c1": "未収条件" },
+      "needs_teiban": true,
       "teiban_type": "定番条件"
     },
     "condition_display": {

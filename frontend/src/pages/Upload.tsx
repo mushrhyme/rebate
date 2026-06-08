@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Upload as UploadIcon, FileText, X, Info, Loader2, CheckCircle2, AlertCircle, Clock } from 'lucide-react'
+import { Upload as UploadIcon, FileText, X, Info, Loader2, CheckCircle2, AlertCircle } from 'lucide-react'
 import { api } from '../api/client'
 
 function defaultHatsuMonth(): string {

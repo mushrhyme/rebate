@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from ...core.auth import get_current_user
 from ...core.config import get_settings
-from ...db.queries import get_pool
+from ...db.queries import list_documents
 
 router = APIRouter(prefix="/api/v3/sap", tags=["sap"])
 
@@ -108,17 +108,28 @@ async def list_confirmed_docs(
     user: dict = Depends(get_current_user),
 ):
     """확정된 문서 목록 (연월 필터 가능)."""
-    pool = get_pool()
-    rows = await pool.fetch(
-        """SELECT doc_id, pdf_filename, confirmed_at, created_at
-           FROM v3_documents
-           WHERE confirmed_at IS NOT NULL
-             AND ($1::int IS NULL OR EXTRACT(YEAR  FROM confirmed_at)::int = $1)
-             AND ($2::int IS NULL OR EXTRACT(MONTH FROM confirmed_at)::int = $2)
-           ORDER BY confirmed_at DESC""",
-        year, month,
-    )
-    return [dict(r) for r in rows]
+    from datetime import datetime
+    docs = await list_documents()
+    result = []
+    for d in docs:
+        ca = d.get("confirmed_at")
+        if not ca:
+            continue
+        try:
+            dt = datetime.fromisoformat(ca)
+            if year and dt.year != year:
+                continue
+            if month and dt.month != month:
+                continue
+        except (ValueError, TypeError):
+            pass
+        result.append({
+            "doc_id": d["doc_id"],
+            "pdf_filename": d.get("pdf_filename", ""),
+            "confirmed_at": ca,
+            "created_at": d.get("created_at"),
+        })
+    return result
 
 
 class DocIdsBody(BaseModel):
