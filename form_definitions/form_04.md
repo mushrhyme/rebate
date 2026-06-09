@@ -352,10 +352,7 @@ Phase 2 출력 시 `columns["数量"]`에는 **정수**를 기록한다.
 ## データソース
 
 Phase 3 소매처·판매처 매핑 시 로드할 CSV 파일 목록.
-(form_04는 이름 기반 검색 방식 — domae_retail_1 불필요)
-
 - retail_user.csv
-- domae_retail_2.csv
 
 ---
 

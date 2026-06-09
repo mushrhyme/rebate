@@ -146,7 +146,8 @@ class TestLookupRetailerMetrics:
             {"소매처명": "ファミリーマート", "소매처코드": "R001", "판매처코드": "D1", "판매처명": "t"},
         ])
         from backend.tools.mapping import lookup_retailer
-        result = await lookup_retailer("ファミリーマート", "form_02", mappings, form_defs)
+        # "ファミリーマート系" → similarity ≈ 0.94 (not exact_match) → candidate 경로
+        result = await lookup_retailer("ファミリーマート系", "form_02", mappings, form_defs)
         assert result.basis == "candidate"
 
         m = get_metrics("lookup_retailer")

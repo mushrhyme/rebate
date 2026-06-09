@@ -28,16 +28,10 @@ def main() -> None:
     print(f"credentials.json: {settings.drive_credentials_path}")
     print(f"token.json 저장 위치: {settings.drive_token_path}")
 
-    sa_path = settings.drive_service_account_path
-    if sa_path.exists():
-        print(f"서비스 계정 인증 사용: {sa_path}")
-        drive = DriveStorage(settings.drive_credentials_path, settings.drive_token_path, service_account_path=sa_path)
-    else:
-        print("OAuth 인증 사용 (service_account.json 없음)")
-        if not settings.drive_credentials_path.exists():
-            print("\n오류: credentials.json 없음 — Google Cloud Console에서 다운로드 후 프로젝트 루트에 넣으세요.")
-            sys.exit(1)
-        drive = DriveStorage(settings.drive_credentials_path, settings.drive_token_path)
+    if not settings.drive_credentials_path.exists():
+        print("\n오류: credentials.json 없음 — Google Cloud Console에서 다운로드 후 프로젝트 루트에 넣으세요.")
+        sys.exit(1)
+    drive = DriveStorage(settings.drive_credentials_path, settings.drive_token_path)
 
     # 서비스 접근으로 인증 트리거
     _ = drive._service

@@ -273,8 +273,8 @@ token 기록 누락: [ ] 없음  [ ] 있음
 # backend/.env에서 아래 줄을 false로 변경 또는 제거
 PHASE3_TOOL_USE_ENABLED=false
 
-# 2. 백엔드 재시작 (환경변수 재로드)
-# — 배포 방식에 따라 다름 (예: systemctl restart backend, docker restart ...)
+# 2. 백엔드 재시작
+# systemctl restart backend  또는  uv run uvicorn backend.main:app ...
 
 # 3. 확인
 python -c "
@@ -466,7 +466,7 @@ uv run python scripts/phase3_rollout_observe.py --db
 PHASE3_TOOL_USE_ENABLED=false
 
 # 백엔드 재시작
-# (배포 방식에 따라: systemctl restart, docker restart, uv run uvicorn ...)
+# systemctl restart backend  또는  uv run uvicorn backend.main:app ...
 
 # 확인
 uv run python scripts/phase3_rollout_observe.py --precheck

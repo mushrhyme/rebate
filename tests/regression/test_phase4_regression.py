@@ -16,16 +16,28 @@ sys.path.insert(0, str(ROOT))
 FIXTURES = ROOT / "tests" / "fixtures"
 
 # doc_id → form_id, 픽스처 파일명
+def _needs_extracted(doc_id: str) -> "pytest.MarkDecorator":
+    """extracted/{doc_id}/phase3_output.json 없으면 skip."""
+    p = ROOT / "extracted" / doc_id / "phase3_output.json"
+    return pytest.mark.skipif(
+        not p.exists(),
+        reason=f"extracted/{doc_id}/phase3_output.json 없음 — 로컬 분석 후 재실행",
+    )
+
+
 CASES = [
-    (
+    pytest.param(
         "4월伊藤忠食品株式会社登録番号T2120001077362",
         "form_01",
         "form_01_expected.json",
+        id="form_01",
     ),
-    (
+    pytest.param(
         "3월日本アクセスＣＶＳ①",
         "form_04",
         "form_04_expected.json",
+        marks=_needs_extracted("3월日本アクセスＣＶＳ①"),
+        id="form_04",
     ),
 ]
 

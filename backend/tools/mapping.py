@@ -67,6 +67,8 @@ def _read_csv(path: Path) -> list[dict]:
     store = get_sheets_store()
     if store and path.name in TAB_MAP:
         return store.read_csv(path.name)
+    if not path.exists():
+        return []
     with path.open(encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))
 
@@ -135,16 +137,16 @@ class LookupRetailerResult:
 
     Guarantees:
       - confidence ∈ [0.0, 1.0]
-      - basis ∈ {"cache", "bracket_code", "candidate", "not_found"}
-      - basis="cache"|"bracket_code" → retailer_code is not None, confidence=1.0,
-                                       candidates=[]
+      - basis ∈ {"cache", "bracket_code", "exact_match", "candidate", "not_found"}
+      - basis="cache"|"bracket_code"|"exact_match" → retailer_code is not None,
+                                                     confidence=1.0, candidates=[]
       - basis="candidate" → retailer_code is None, len(candidates) >= 1,
                             confidence = candidates[0]["similarity"]
       - basis="not_found" → retailer_code is None, candidates=[], confidence=0.0
       - candidates는 similarity 내림차순 정렬, retailer_code 기준 dedup
     """
     retailer_code: str | None
-    basis: Literal["cache", "bracket_code", "candidate", "not_found"]
+    basis: Literal["cache", "bracket_code", "exact_match", "candidate", "not_found"]
     confidence: float
     candidates: list[RetailerCandidate] = field(default_factory=list)
 
@@ -295,7 +297,7 @@ async def confirm_mapping(
         if mapping_type == "retailer":
             row = [ocr_name, confirmed_code, context.get("retailer_name", "")]
             if store:
-                await asyncio.to_thread(store.append_row, "ocr_retailer.csv", row)
+                await asyncio.to_thread(store.upsert_row, "ocr_retailer.csv", [0], row)
             else:
                 cache_path = mappings_dir / "ocr_retailer.csv"
                 async with _get_csv_lock(cache_path):
@@ -306,7 +308,7 @@ async def confirm_mapping(
         elif mapping_type == "product":
             row = [ocr_name, confirmed_code, context.get("product_name", "")]
             if store:
-                await asyncio.to_thread(store.append_row, "ocr_product.csv", row)
+                await asyncio.to_thread(store.upsert_row, "ocr_product.csv", [0], row)
             else:
                 cache_path = mappings_dir / "ocr_product.csv"
                 async with _get_csv_lock(cache_path):
@@ -326,7 +328,7 @@ async def confirm_mapping(
                 context["retailer_code"], confirmed_code, context.get("dist_name", ""),
             ]
             if store:
-                await asyncio.to_thread(store.append_row, "ocr_dist.csv", row)
+                await asyncio.to_thread(store.upsert_row, "ocr_dist.csv", [0, 1, 2], row)
             else:
                 cache_path = mappings_dir / "ocr_dist.csv"
                 async with _get_csv_lock(cache_path):
@@ -369,19 +371,19 @@ async def search_product(
         없음 — CSV 파일이 없거나 컬럼이 누락되어도 not_found로 반환
     """
     # ── ① 캐시 조회 ────────────────────────────────────────────────────────────
+    # cache_path.exists() 조건 없이 항상 시도 — Sheets 모드에서는 로컬 파일 없어도 읽음
     cache_path = mappings_dir / "ocr_product.csv"
-    if cache_path.exists():
-        norm_query = normalize_ocr_name(ocr_name)
-        for row in _read_csv(cache_path):
-            if normalize_ocr_name(row.get("ocr_name", "")) == norm_query:
-                code = row.get("product_code", "")
-                if code:  # 컬럼 누락 행은 캐시 미스로 처리
-                    _record_search_product("cache")
-                    return SearchProductResult(
-                        product_code=code,
-                        basis="cache",
-                        confidence=1.0,
-                    )
+    norm_query = normalize_ocr_name(ocr_name)
+    for row in _read_csv(cache_path):
+        if normalize_ocr_name(row.get("ocr_name", "")) == norm_query:
+            code = row.get("product_code", "")
+            if code:  # 컬럼 누락 행은 캐시 미스로 처리
+                _record_search_product("cache")
+                return SearchProductResult(
+                    product_code=code,
+                    basis="cache",
+                    confidence=1.0,
+                )
 
     # ── ② 유사도 검색 ───────────────────────────────────────────────────────────
     candidates = _search_product_candidates(ocr_name, mappings_dir, top_k)
@@ -428,6 +430,7 @@ async def lookup_retailer(
         LookupRetailerResult
           basis="cache"        → retailer_code 확정 (confidence=1.0)
           basis="bracket_code" → retailer_code 확정 (confidence=1.0)
+          basis="exact_match"  → 정규화 완전 일치로 자동 확정 (confidence=1.0)
           basis="candidate"    → 후보 목록, Claude 판단 필요
           basis="not_found"    → 조회 불가 (CSV·MD 없음 포함)
 
@@ -439,19 +442,19 @@ async def lookup_retailer(
         form_definitions_dir = get_settings().form_definitions_dir
 
     # ── ① 캐시 조회 ────────────────────────────────────────────────────────────
+    # cache_path.exists() 조건 없이 항상 시도 — Sheets 모드에서는 로컬 파일 없어도 읽음
     cache_path = mappings_dir / "ocr_retailer.csv"
-    if cache_path.exists():
-        norm_query = normalize_ocr_name(ocr_name)
-        for row in _read_csv(cache_path):
-            if normalize_ocr_name(row.get("ocr_name", "")) == norm_query:
-                code = row.get("retailer_code", "")
-                if code:  # 컬럼 누락 행은 캐시 미스로 처리
-                    _record_lookup_retailer("cache")
-                    return LookupRetailerResult(
-                        retailer_code=code,
-                        basis="cache",
-                        confidence=1.0,
-                    )
+    norm_query = normalize_ocr_name(ocr_name)
+    for row in _read_csv(cache_path):
+        if normalize_ocr_name(row.get("ocr_name", "")) == norm_query:
+            code = row.get("retailer_code", "")
+            if code:  # 컬럼 누락 행은 캐시 미스로 처리
+                _record_lookup_retailer("cache")
+                return LookupRetailerResult(
+                    retailer_code=code,
+                    basis="cache",
+                    confidence=1.0,
+                )
 
     # ── form_XX.md 로드 ─────────────────────────────────────────────────────────
     form_path = form_definitions_dir / f"{form_id}.md"
@@ -488,6 +491,14 @@ async def lookup_retailer(
         top_k=top_k,
     )
     if candidates:
+        # 정규화 완전 일치(similarity=1.0)는 Claude 판단 없이 자동 확정
+        if candidates[0]["similarity"] == 1.0:
+            _record_lookup_retailer("exact_match")
+            return LookupRetailerResult(
+                retailer_code=candidates[0]["retailer_code"],
+                basis="exact_match",
+                confidence=1.0,
+            )
         _record_lookup_retailer("candidate")
         return LookupRetailerResult(
             retailer_code=None,
@@ -522,9 +533,6 @@ def _search_product_candidates(
     seen_codes: set[str] = set()
 
     p = mappings_dir / "unit_price.csv"
-    if not p.exists():
-        return []
-
     rows = _read_csv(p)
     if not rows:
         return []
@@ -566,10 +574,9 @@ def _search_retailer_candidates(
     mappings_dir: Path,
     top_k: int,
 ) -> list[RetailerCandidate]:
-    """retail_user.csv + 양식별 domae_retail CSV 유사도 기반 후보 검색.
+    """retail_user.csv + 양식별 CSV 유사도 기반 후보 검색.
 
     - retail_user.csv     : 소매처명 열로 검색
-    - domae_retail_2.csv  : 첫 번째 열(도매소매처명)로 검색
     - domae_retail_1.csv  : 코드→코드 매핑이므로 이름 검색 대상 아님 (스킵)
 
     동일 소매처코드가 여러 행에 등장하면 최고 점수 1건만 유지.
@@ -583,9 +590,10 @@ def _search_retailer_candidates(
 
     for csv_name in csv_sources:
         p = mappings_dir / csv_name
-        if not p.exists():
+        try:
+            rows = _read_csv(p)
+        except Exception:
             continue
-        rows = _read_csv(p)
         if not rows:
             continue
 
@@ -597,7 +605,7 @@ def _search_retailer_candidates(
             if name_col not in first or code_col not in first:
                 continue
         else:
-            # domae_retail_2.csv 등: 첫 열 = 이름, 두 번째 열 = 코드
+            # 기타 CSV: 첫 열 = 이름, 두 번째 열 = 코드
             # domae_retail_1.csv 는 코드→코드 매핑 — 첫 열이 숫자(도매코드)이므로
             # 유사도 검색 대상이 아님. normalize 후 숫자 문자열만 남으면 스킵.
             keys = list(first.keys())

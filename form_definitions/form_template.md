@@ -193,7 +193,7 @@ Phase 3 소매처·판매처 매핑 시 로드할 CSV 파일 목록.
 
 <!-- bracket_code_csv: domae_retail_1.csv -->
 
-<!-- domae_retail_csv: domae_retail_2.csv -->
+<!-- domae_retail_csv: (사용 안 함 — retail_user.csv로 통합) -->
 
 - retail_user.csv
 

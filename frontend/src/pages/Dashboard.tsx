@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Upload, ArrowRight, AlertCircle, X, RotateCcw, CheckCircle2, LockOpen, Trash2 } from 'lucide-react'
+import { Upload, ArrowRight, AlertCircle, X, RotateCcw, CheckCircle2, LockOpen, Trash2, StopCircle } from 'lucide-react'
 import { api, type Document } from '../api/client'
 import { useAuth } from '../context/AuthContext'
 import { useForms } from '../context/FormsContext'
@@ -16,24 +16,30 @@ function PhaseIndicator({ doc }: { doc: Document }) {
   const tu = doc.token_usage
   const s = doc.status
 
+  // phase3_tool_use는 phase3의 별칭 — tool use 경로가 활성화된 경우 이 키로 저장됨
+  const hasPhase = (key: string) =>
+    !!tu?.[key] || (key === 'phase3' && !!tu?.['phase3_tool_use'])
+
   function getState(key: string): 'done' | 'active' | 'waiting' | 'error' {
     if (key === 'ocr') {
       if (s === 'queued') return 'waiting'
       if (s === 'ocr') return 'active'
       return 'done'
     }
-    if (s === 'done' || s === 'pending') return 'done'
+    if (s === 'done') return 'done'
     if (s === 'error') {
       const errIdx = doc.error_phase ? PHASE_ORDER.indexOf(doc.error_phase as typeof PHASE_ORDER[number]) : -1
       const thisIdx = PHASE_ORDER.indexOf(key as typeof PHASE_ORDER[number])
-      if (errIdx === -1) return tu?.[key] ? 'done' : 'waiting'
+      if (errIdx === -1) return hasPhase(key) ? 'done' : 'waiting'
       if (thisIdx < errIdx) return 'done'
       if (thisIdx === errIdx) return 'error'
       return 'waiting'
     }
     if (s === 'queued' || s === 'ocr') return 'waiting'
-    if (tu?.[key]) return 'done'
-    const active = PHASE_ORDER.find(p => !tu?.[p]) ?? 'phase1'
+    // pending = phase3까지 완료, phase4 미시작
+    if (s === 'pending') return key === 'phase4_xv' ? 'waiting' : 'done'
+    if (hasPhase(key)) return 'done'
+    const active = PHASE_ORDER.find(p => !hasPhase(p)) ?? 'phase1'
     return key === active ? 'active' : 'waiting'
   }
 
@@ -81,6 +87,7 @@ function PhaseIndicator({ doc }: { doc: Document }) {
 }
 
 const statusConfig: Record<Status, { label: string; bg: string; color: string; dot: string }> = {
+  uploaded:  { label: '업로드됨',  bg: '#f0f0f4', color: '#666680', dot: '#888899' },
   queued:    { label: '대기중',    bg: '#f0f0f4', color: '#666680', dot: '#888899' },
   ocr:       { label: 'OCR중',    bg: '#e8eef4', color: '#3a6b8a', dot: '#3a6b8a' },
   analyzing: { label: '분석중',   bg: '#e8eef4', color: '#3a6b8a', dot: '#3a6b8a' },
@@ -90,7 +97,8 @@ const statusConfig: Record<Status, { label: string; bg: string; color: string; d
   phase4:    { label: 'Phase 4',  bg: '#e8eef4', color: '#3a6b8a', dot: '#3a6b8a' },
   pending:   { label: '확인 대기', bg: '#fdf0e8', color: '#c4622c', dot: '#e07840' },
   done:      { label: '완료',     bg: '#eaf4ee', color: '#2d7d4a', dot: '#3a9960' },
-  error:     { label: '오류',     bg: '#fae8e8', color: '#b03030', dot: '#cc4040' },
+  error:      { label: '오류',     bg: '#fae8e8', color: '#b03030', dot: '#cc4040' },
+  xv_warning: { label: '검증 경고', bg: '#fdf6e0', color: '#a07020', dot: '#c49030' },
 }
 
 const card = {
@@ -129,14 +137,22 @@ function fmtDuration(ms: number): string {
 // 청구연월 우선, 없으면 업로드일에서 추출. 결과는 항상 "YYYY.MM"
 function docYM(doc: Document): string {
   if (doc.hatsu_month) return doc.hatsu_month
+  if (!doc.created_at) return '----.-'
   return fmtYM(doc.created_at).replace('-', '.')
 }
 
-// ── 재분석 확인 모달 ──────────────────────────────────────────────────────────
+// ── 재분석 모달 (2-step: pending → 방식 선택 → 확인 / 그 외 → 바로 확인) ────
 
-function RetryConfirmModal({ doc, onClose, onConfirm }: {
-  doc: Document; onClose: () => void; onConfirm: () => Promise<void>
+type RetryMode = 'cache_remap' | 'full_retry'
+
+function RetryModal({ doc, onClose, onConfirm }: {
+  doc: Document
+  onClose: () => void
+  onConfirm: (mode: RetryMode) => Promise<void>
 }) {
+  const isPending = doc.status === 'pending'
+  const [step, setStep] = useState<1 | 2>(isPending ? 1 : 2)
+  const [mode, setMode] = useState<RetryMode>('cache_remap')
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -144,76 +160,202 @@ function RetryConfirmModal({ doc, onClose, onConfirm }: {
     setLoading(true)
     setErr(null)
     try {
-      await onConfirm()
+      await onConfirm(mode)
       onClose()
     } catch (e) {
-      setErr(e instanceof Error ? e.message : '재분석 실패')
+      setErr(e instanceof Error ? e.message : '실행 실패. 잠시 후 다시 시도하세요.')
     } finally {
       setLoading(false)
     }
   }
 
+  const backdrop: React.CSSProperties = {
+    position: 'fixed', inset: 0, zIndex: 100,
+    background: 'rgba(26,21,18,0.45)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    backdropFilter: 'blur(2px)',
+  }
+  const modalBox: React.CSSProperties = {
+    width: 420, background: 'var(--card)', borderRadius: 16,
+    border: '1px solid var(--border)', boxShadow: '0 20px 60px rgba(26,21,18,0.18)',
+    overflow: 'hidden',
+  }
+
+  // ── Step 1: 방식 선택 (pending 전용) ──────────────────────────────────────
+  if (step === 1) {
+    return (
+      <div onClick={onClose} style={backdrop}>
+        <div onClick={e => e.stopPropagation()} style={modalBox}>
+          <div style={{
+            padding: '18px 22px', borderBottom: '1px solid var(--border)',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          }}>
+            <div>
+              <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-1)' }}>재분석 방식 선택</p>
+              <p style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)', marginTop: 2 }}>{doc.doc_id}</p>
+            </div>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: 4 }}>
+              <X size={16} />
+            </button>
+          </div>
+
+          <div style={{ padding: '16px 22px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {(['cache_remap', 'full_retry'] as RetryMode[]).map(m => {
+              const selected = mode === m
+              const isCR = m === 'cache_remap'
+              const accent = isCR ? 'var(--primary)' : '#c4622c'
+              return (
+                <div
+                  key={m}
+                  onClick={() => setMode(m)}
+                  style={{
+                    borderRadius: 10, padding: '12px 14px', cursor: 'pointer',
+                    border: selected ? `2px solid ${accent}` : '1px solid var(--border)',
+                    background: selected ? (isCR ? 'var(--primary-light)' : '#fdf0e8') : 'var(--card)',
+                    transition: 'all 0.12s',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
+                    <span style={{
+                      width: 14, height: 14, borderRadius: '50%', flexShrink: 0,
+                      border: `2px solid ${selected ? accent : 'var(--border)'}`,
+                      background: selected ? accent : 'transparent',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      {selected && <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#fff' }} />}
+                    </span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-1)' }}>
+                      {isCR ? '캐시 재매핑' : '전체 재분석'}
+                    </span>
+                    {isCR && (
+                      <span style={{
+                        fontSize: 10, fontWeight: 700, color: 'var(--primary)',
+                        background: 'var(--primary-light)', border: '1px solid rgba(10,110,110,0.2)',
+                        borderRadius: 10, padding: '1px 7px',
+                      }}>추천</span>
+                    )}
+                  </div>
+                  <p style={{ fontSize: 11, color: 'var(--text-2)', lineHeight: 1.6, paddingLeft: 22 }}>
+                    {isCR
+                      ? 'Phase 2 추출 결과를 유지하고, 최신 매핑 캐시로만 재시도합니다. Azure·Claude 비용 없음.'
+                      : 'OCR을 제외한 Phase 2~4 전체를 재실행합니다. 기존 매핑 확인 내역이 초기화됩니다.'}
+                  </p>
+                </div>
+              )
+            })}
+          </div>
+
+          <div style={{ padding: '12px 22px 20px', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button
+              onClick={onClose}
+              style={{
+                padding: '9px 18px', borderRadius: 9, fontSize: 12, fontWeight: 600,
+                background: 'var(--card)', border: '1px solid var(--border)',
+                color: 'var(--text-2)', cursor: 'pointer',
+              }}
+            >취소</button>
+            <button
+              onClick={() => setStep(2)}
+              style={{
+                padding: '9px 18px', borderRadius: 9, fontSize: 12, fontWeight: 700,
+                background: mode === 'cache_remap' ? 'var(--primary)' : '#c4622c',
+                color: '#fff', border: 'none', cursor: 'pointer',
+              }}
+            >다음 →</button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Step 2: 확인 ──────────────────────────────────────────────────────────
+  const isCacheRemap = mode === 'cache_remap'
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: 'fixed', inset: 0, zIndex: 100,
-        background: 'rgba(26,21,18,0.45)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        backdropFilter: 'blur(2px)',
-      }}
-    >
-      <div
-        onClick={e => e.stopPropagation()}
-        style={{
-          width: 400, background: 'var(--card)', borderRadius: 16,
-          border: '1px solid var(--border)', boxShadow: '0 20px 60px rgba(26,21,18,0.18)',
-          overflow: 'hidden',
-        }}
-      >
-        <div style={{ padding: '20px 22px', borderBottom: '1px solid var(--border)' }}>
-          <p style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-1)', marginBottom: 4 }}>재분석 하시겠습니까?</p>
-          <p style={{ fontSize: 12, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>{doc.doc_id}</p>
+    <div onClick={onClose} style={backdrop}>
+      <div onClick={e => e.stopPropagation()} style={modalBox}>
+        <div style={{
+          padding: '18px 22px', borderBottom: '1px solid var(--border)',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <div>
+            <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-1)' }}>
+              {isCacheRemap ? '캐시 재매핑' : '재분석'}
+            </p>
+            <p style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)', marginTop: 2 }}>{doc.doc_id}</p>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: 4 }}>
+            <X size={16} />
+          </button>
         </div>
 
         <div style={{ padding: '18px 22px' }}>
           <div style={{
-            background: '#fdf0e8', border: '1px solid #dbb590', borderRadius: 10,
-            padding: '12px 14px', fontSize: 12, color: '#8a4a20', lineHeight: 1.6,
+            borderRadius: 10, padding: '12px 14px', fontSize: 12, lineHeight: 1.7,
+            background: isCacheRemap ? 'var(--primary-light)' : '#fdf0e8',
+            border: `1px solid ${isCacheRemap ? 'rgba(10,110,110,0.2)' : '#dbb590'}`,
+            color: isCacheRemap ? 'var(--primary)' : '#8a4a20',
           }}>
-            <strong>초기화되는 항목:</strong><br />
-            · 기존 매핑 확인 내용 (소매처·제품 코드)<br />
-            · Phase 2~4 분석 산출물<br /><br />
-            OCR 결과와 Phase 1 MD는 유지됩니다 (Azure 재과금 없음).
+            {isCacheRemap ? (
+              <>
+                최신 캐시 CSV를 기준으로 Phase 3만 재실행합니다.<br />
+                · Phase 2 추출 결과 유지 (Azure·Claude 재호출 없음)<br />
+                · 캐시에 추가된 항목은 자동 완료 → Phase 4 진행<br />
+                · 여전히 미매핑인 항목은 다시 대기 상태로 남음
+              </>
+            ) : (
+              <>
+                <strong>초기화되는 항목:</strong><br />
+                · 기존 매핑 확인 내용 (소매처·제품 코드)<br />
+                · Phase 2~4 분석 산출물<br /><br />
+                OCR 결과와 Phase 1 MD는 유지됩니다 (Azure 재과금 없음).
+              </>
+            )}
           </div>
+
           {err && (
-            <p style={{ marginTop: 10, fontSize: 12, color: '#b03030' }}>{err}</p>
+            <div style={{
+              marginTop: 10, padding: '10px 14px', borderRadius: 9,
+              background: '#fae8e8', border: '1px solid #f0c8c8',
+              fontSize: 12, color: '#8a2020', lineHeight: 1.6,
+            }}>
+              {err}
+            </div>
           )}
         </div>
 
-        <div style={{ padding: '12px 22px 20px', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <div style={{ padding: '12px 22px 20px', display: 'flex', gap: 8, alignItems: 'center' }}>
+          {isPending && (
+            <button
+              onClick={() => { setStep(1); setErr(null) }}
+              style={{
+                padding: '9px 14px', borderRadius: 9, fontSize: 12, fontWeight: 600,
+                background: 'var(--card)', border: '1px solid var(--border)',
+                color: 'var(--text-3)', cursor: 'pointer', marginRight: 'auto',
+              }}
+            >← 이전</button>
+          )}
           <button
             onClick={onClose}
             style={{
               padding: '9px 18px', borderRadius: 9, fontSize: 12, fontWeight: 600,
               background: 'var(--card)', border: '1px solid var(--border)',
               color: 'var(--text-2)', cursor: 'pointer',
+              marginLeft: isPending ? undefined : 'auto',
             }}
-          >
-            취소
-          </button>
+          >취소</button>
           <button
             onClick={handleConfirm}
             disabled={loading}
             style={{
               display: 'flex', alignItems: 'center', gap: 6,
               padding: '9px 18px', borderRadius: 9, fontSize: 12, fontWeight: 700,
-              background: '#c4622c', color: '#fff', border: 'none',
+              background: isCacheRemap ? 'var(--primary)' : '#c4622c',
+              color: '#fff', border: 'none',
               cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.6 : 1,
             }}
           >
             <RotateCcw size={13} style={loading ? { animation: 'spin 0.8s linear infinite' } : undefined} />
-            {loading ? '재분석 중...' : '재분석'}
+            {loading ? '실행 중...' : isCacheRemap ? '재매핑 시작' : '재분석'}
           </button>
         </div>
       </div>
@@ -591,6 +733,7 @@ export function Dashboard() {
   const [retryDoc, setRetryDoc] = useState<Document | null>(null)
   const [unconfirmDoc, setUnconfirmDoc] = useState<Document | null>(null)
   const [deleteDoc, setDeleteDoc] = useState<Document | null>(null)
+  const [cancelingIds, setCancelingIds] = useState<Set<string>>(new Set())
   const [filterYM, setFilterYM] = useState<string>('')
   const [filterStatus, setFilterStatus] = useState<StatusFilter>('all')
   const [filterUploader, setFilterUploader] = useState<string>('')
@@ -605,6 +748,20 @@ export function Dashboard() {
   }, [])
 
   useEffect(() => { fetchDocs() }, [fetchDocs])
+
+  async function handleCancel(docId: string) {
+    if (!window.confirm('분석을 취소하시겠습니까?')) return
+    setCancelingIds(prev => new Set(prev).add(docId))
+    try {
+      await api.cancelDocument(docId)
+      await fetchDocs()
+    } catch {
+      // 이미 완료된 경우 등 무시하고 목록만 갱신
+      await fetchDocs()
+    } finally {
+      setCancelingIds(prev => { const s = new Set(prev); s.delete(docId); return s })
+    }
+  }
 
   const formMap = useMemo(
     () => Object.fromEntries(forms.map(f => [f.id, f.short_name])),
@@ -830,13 +987,16 @@ export function Dashboard() {
           filteredDocs.map((doc, idx) => {
             const cfg = statusConfig[doc.status]
             const uploaderName = doc.uploaded_by_name_ja || doc.uploaded_by_name || doc.uploaded_by_username
+            const phaseSum = Object.values(doc.phase_timings ?? {}).reduce((a, b) => a + b, 0)
             const runStartMs = doc.analysis_started_at
               ? new Date(doc.analysis_started_at).getTime()
               : new Date(doc.created_at).getTime()
-            const endMs = isInProgress(doc.status)
-              ? Date.now()
-              : doc.updated_at ? new Date(doc.updated_at).getTime() : Date.now()
-            const durationStr = fmtDuration(endMs - runStartMs)
+            const endMs = doc.updated_at ? new Date(doc.updated_at).getTime() : Date.now()
+            const durationStr = isInProgress(doc.status)
+              ? fmtDuration(Date.now() - runStartMs)
+              : phaseSum > 0
+                ? fmtDuration(phaseSum * 1000)
+                : fmtDuration(endMs - runStartMs)
             const canDelete = !!(user?.is_admin || !doc.uploaded_by_username || user?.username === doc.uploaded_by_username)
             return (
               <div
@@ -1009,6 +1169,24 @@ export function Dashboard() {
                       <RotateCcw size={13} />
                     </button>
                   )}
+                  {isInProgress(doc.status) && (
+                    <button
+                      onClick={() => handleCancel(doc.doc_id)}
+                      disabled={cancelingIds.has(doc.doc_id)}
+                      title="분석 취소"
+                      style={{
+                        width: 30, height: 30, borderRadius: 7, flexShrink: 0,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        border: '1px solid #dbb590',
+                        background: '#fdf0e8',
+                        color: '#c4622c',
+                        cursor: cancelingIds.has(doc.doc_id) ? 'not-allowed' : 'pointer',
+                        opacity: cancelingIds.has(doc.doc_id) ? 0.5 : 1,
+                      }}
+                    >
+                      <StopCircle size={13} />
+                    </button>
+                  )}
                   {!isInProgress(doc.status) && (
                     <button
                       onClick={canDelete ? () => setDeleteDoc(doc) : undefined}
@@ -1051,13 +1229,17 @@ export function Dashboard() {
         />
       )}
 
-      {/* 재분석 확인 모달 */}
+      {/* 재분석 모달 */}
       {retryDoc && (
-        <RetryConfirmModal
+        <RetryModal
           doc={retryDoc}
           onClose={() => setRetryDoc(null)}
-          onConfirm={async () => {
-            await api.retryDocument(retryDoc.doc_id)
+          onConfirm={async (mode) => {
+            if (mode === 'cache_remap') {
+              await api.remapCached(retryDoc.doc_id)
+            } else {
+              await api.retryDocument(retryDoc.doc_id)
+            }
             await fetchDocs()
           }}
         />

@@ -26,3 +26,17 @@ form_01 타입 분류하는 기능
 03: 03 旭食品/ヤマキ
 04: 04 ACCESS
 05: 05 湧川
+
+
+
+aws ec2 stop-instances --instance-ids i-01248e65698af51d1 --region ap-northeast-2
+
+
+aws ec2 start-instances --instance-ids i-01248e65698af51d1 --region ap-northeast-2
+
+
+
+https://dceaaeg5w4k3w.cloudfront.net/
+
+sudo su -
+journalctl -u rebate -f

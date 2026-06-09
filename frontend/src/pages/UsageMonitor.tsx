@@ -498,9 +498,12 @@ export function UsageMonitor() {
                   const cost        = runCost(run.phases)
                   const isConfirmed = !!run.confirmed_at
                   const isRerun     = docRunCount[run.doc_id] > 1 && run.run_id !== originalRunId[run.doc_id]
-                  const p1 = run.phases['phase1']
-                  const p2 = run.phases['phase2']
-                  const p3 = run.phases['phase3']
+                  const p1   = run.phases['phase1']
+                  const p2   = run.phases['phase2']
+                  const p3   = run.phases['phase3']
+                  const p3tu = run.phases['phase3_tool_use']
+                  const p3display = p3tu ?? p3
+                  const isTU = !!p3tu
                   const runAt = run.run_at ? fmtRunAt(run.run_at) : '—'
                   // pdf_filename이 없으면 (삭제된 문서 등) doc_id를 대신 표시
                   const displayName = run.pdf_filename || run.doc_id
@@ -535,8 +538,8 @@ export function UsageMonitor() {
                           {run.uploader_name_ja ?? run.uploader_name ?? <span style={{ color: 'var(--border)' }}>—</span>}
                         </td>
 
-                        {/* Phase 1/2/3 토큰 */}
-                        {[p1, p2, p3].map((ph, i) => (
+                        {/* Phase 1/2 토큰 */}
+                        {[p1, p2].map((ph, i) => (
                           <td key={i} style={{ padding: '11px 16px', fontFamily: 'var(--mono)', fontSize: 11, textAlign: 'right', whiteSpace: 'nowrap' }}>
                             {ph ? (
                               <>
@@ -549,6 +552,29 @@ export function UsageMonitor() {
                             )}
                           </td>
                         ))}
+
+                        {/* Phase 3 — legacy vs Tool Use 구분 */}
+                        <td style={{ padding: '11px 16px', fontFamily: 'var(--mono)', fontSize: 11, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                          {p3display ? (
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 5 }}>
+                              {isTU && (
+                                <span style={{
+                                  padding: '1px 5px', borderRadius: 3, flexShrink: 0,
+                                  fontSize: 9, fontWeight: 700, letterSpacing: '0.05em',
+                                  background: 'rgba(10,110,110,0.1)', color: 'var(--primary)',
+                                  border: '1px solid rgba(10,110,110,0.25)',
+                                }}>TU</span>
+                              )}
+                              <span>
+                                <span style={{ color: 'var(--text-2)' }}>{fmtTok(p3display.input)}</span>
+                                <span style={{ color: 'var(--border)', margin: '0 2px' }}>/</span>
+                                <span style={{ color: 'var(--text-3)' }}>{fmtTok(p3display.output)}</span>
+                              </span>
+                            </div>
+                          ) : (
+                            <span style={{ color: 'var(--border)' }}>—</span>
+                          )}
+                        </td>
 
                         {/* 페이지 수 + 장당 비용 */}
                         <td style={{ padding: '11px 16px', textAlign: 'right', whiteSpace: 'nowrap' }}>

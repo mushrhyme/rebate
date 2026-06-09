@@ -52,8 +52,16 @@ from contextlib import asynccontextmanager
 async def lifespan(app: FastAPI):
     await reset_stalled_on_startup()
     watcher = asyncio.create_task(stall_watcher())
+    from .core.config import get_settings
+    settings = get_settings()
+    poller = None
+    if settings.drive_inbox_folder_id:
+        from .core.inbox_poller import inbox_poller_loop
+        poller = asyncio.create_task(inbox_poller_loop())
     yield
     watcher.cancel()
+    if poller:
+        poller.cancel()
 
 
 app = FastAPI(title="Rebate Lecture API", version="3.0.0", lifespan=lifespan)

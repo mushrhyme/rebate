@@ -93,17 +93,17 @@ def reset_metrics(tool_name: str | None = None) -> None:
 # ── 내부 기록 함수 (mapping.py 전용) ─────────────────────────────────────────
 
 def _record_lookup_retailer(
-    basis: str,  # "cache" | "bracket_code" | "candidate" | "not_found"
+    basis: str,  # "cache" | "bracket_code" | "exact_match" | "candidate" | "not_found"
 ) -> None:
     """lookup_retailer 결과를 기록한다.
 
-    cache / bracket_code → cache_hits + success 증가
-    candidate            → success 증가
-    not_found            → not_found 증가
+    cache / bracket_code / exact_match → cache_hits + success 증가
+    candidate                          → success 증가
+    not_found                          → not_found 증가
     """
     m = _METRICS["lookup_retailer"]
     m.calls += 1
-    if basis in ("cache", "bracket_code"):
+    if basis in ("cache", "bracket_code", "exact_match"):
         m.cache_hits += 1
         m.success += 1
     elif basis == "candidate":

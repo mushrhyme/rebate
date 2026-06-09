@@ -32,10 +32,15 @@ async def _try_auto_confirm(doc_id: str) -> bool:
     """모든 소매처 그룹의 1차+2차가 완료되면 자동 확정. 확정 시 True 반환."""
     settings = get_settings()
     out_path: Path = settings.extracted_dir / doc_id / "phase4_output.json"
-    if not out_path.exists():
-        return False
+    if out_path.exists():
+        data = _json.loads(out_path.read_text(encoding="utf-8"))
+    else:
+        from ...core.s3_store import read_json as _s3_read
+        data = _s3_read(f"documents/{doc_id}/extracted/phase4_output.json")
+        if data is None:
+            return False
 
-    rows = _json.loads(out_path.read_text(encoding="utf-8")).get("rows", [])
+    rows = data.get("rows", [])
     # 代表スーパー가 있는 행만 대상 — 빈 값(消費税計上 등 비소매처 행) 제외
     retailer_codes = {r["代表スーパー"] for r in rows if r.get("代表スーパー")}
     if not retailer_codes:
@@ -126,19 +131,26 @@ async def my_retailers(user: dict = Depends(get_current_user)):
     """로그인 사용자가 담당하는 소매처 목록.
     retail_user.csv의 ID 컬럼과 username을 대조해 반환한다."""
     settings = get_settings()
-    csv_path: Path = settings.mappings_dir / "retail_user.csv"
-    if not csv_path.exists():
-        return []
-
     username = user["username"]
-    result: list[dict] = []
-    with csv_path.open(encoding="utf-8-sig", newline="") as f:
-        for row in csv.DictReader(f):
-            if row.get("ID", "").strip() == username:
-                result.append({
-                    "retailer_code": row["소매처코드"],
-                    "retailer_name": row["소매처명"],
-                    "dist_code":     row.get("판매처코드", ""),
-                    "dist_name":     row.get("판매처명", ""),
-                })
-    return result
+
+    from ...core.sheets_store import get_sheets_store
+    store = get_sheets_store()
+    if store:
+        rows = store.read_csv("retail_user.csv")
+    else:
+        csv_path: Path = settings.mappings_dir / "retail_user.csv"
+        if not csv_path.exists():
+            return []
+        with csv_path.open(encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.DictReader(f))
+
+    return [
+        {
+            "retailer_code": r["소매처코드"],
+            "retailer_name": r["소매처명"],
+            "dist_code":     r.get("판매처코드", ""),
+            "dist_name":     r.get("판매처명", ""),
+        }
+        for r in rows
+        if r.get("ID", "").strip() == username
+    ]

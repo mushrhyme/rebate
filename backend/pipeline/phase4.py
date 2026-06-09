@@ -122,7 +122,7 @@ async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id
     if p3_path.exists():
         p3_data = json.loads(p3_path.read_text(encoding="utf-8"))
         for item in p3_data.get("items", []):
-            cust = item.get("customer", "")
+            cust = item.get("customer_ocr", "") or item.get("customer", "")
             kin_gaku = int(item.get("columns", {}).get("金額", 0) or 0)
             if cust and kin_gaku:
                 by_customer_detail[cust] = by_customer_detail.get(cust, 0) + kin_gaku
@@ -207,6 +207,7 @@ async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id
         max_tokens=1024,
         system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": user_content}],
+        temperature=0,
     )
 
     # 토큰 사용량 기록

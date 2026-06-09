@@ -761,6 +761,7 @@ def _batch_result_to_retailer_decisions(
     issuer_fingerprint: str,
     cached_dist: dict,
     retail_user_rows: list[dict],
+    customer_page: dict | None = None,
 ) -> tuple[list[RetailerMappingDecision], dict[str, DistResolution], list[dict]]:
     """RetailerBatchResult 목록을 RetailerMappingDecision 목록으로 변환한다.
 
@@ -780,7 +781,7 @@ def _batch_result_to_retailer_decisions(
             continue
 
         lb = r.lookup_basis or ""
-        basis = lb if lb in {"cache", "bracket_code"} else "tool_use"
+        basis = lb if lb in {"cache", "bracket_code", "exact_match"} else "tool_use"
 
         retailer_code = r.confirmed_code
         dist_res = build_dist_resolution_from_cache(
@@ -793,7 +794,8 @@ def _batch_result_to_retailer_decisions(
             dist_pending.append({
                 "mapping_type": "dist", "ocrName": r.ocr_name,
                 "retailer_code": retailer_code,   # dist 1:N Tool Use에서 컨텍스트로 사용
-                "candidates": dist_res.candidates, "page_number": None,
+                "candidates": dist_res.candidates,
+                "page_number": (customer_page or {}).get(r.ocr_name),
             })
             dist_code = ""
         else:
@@ -994,7 +996,7 @@ async def _build_dist_decisions_with_tool_use(
 ) -> "tuple[dict[str, DistResolution], list[dict]]":
     """dist_pending의 1:N 항목들을 Claude Tool Use로 결정한다.
 
-    dist_pending: [{"mapping_type":"dist","ocrName":str,"candidates":[...],"page_number":None}]
+    dist_pending: [{"mapping_type":"dist","ocrName":str,"candidates":[...],"page_number":int|None}]
 
     반환:
       (resolved: {ocr_name: DistResolution},  # tool_use 또는 needs_confirmation
@@ -1095,11 +1097,12 @@ async def _execute_success_path(
     model: str = _TOOL_USE_MODEL,
     concurrency: int = 1,
     _token_acc: ToolUseTokenStats | None = None,
+    precomputed_product_decisions: list | None = None,
 ) -> tuple[dict, list[dict]]:
     """Tool Use 성공 시 실제 phase3 출력을 생성한다."""
     # ── CSV 사전 로드 (파일 I/O 1회, 이후 재사용) ─────────────────────────────
     retail_user_path = mappings_dir / "retail_user.csv"
-    retail_user_rows = _read_csv(retail_user_path) if retail_user_path.exists() else []
+    retail_user_rows = _read_csv(retail_user_path)  # _read_csv: Sheets 우선, 파일 없으면 []
     retailer_name_by_code = {r["소매처코드"]: r["소매처명"] for r in retail_user_rows if r.get("소매처코드")}
     dist_name_by_code     = {r["판매처코드"]: r["판매처명"] for r in retail_user_rows if r.get("판매처코드")}
 
@@ -1122,6 +1125,18 @@ async def _execute_success_path(
     fp_fields = _parse_fingerprint_fields(form_md)
     issuer_fingerprint = _build_issuer_fingerprint(issuer, fp_fields)
 
+    # OCR 명칭 → 첫 등장 페이지 번호 (dist pending items의 page_number에 사용)
+    _items = phase2_result.get("items", [])
+    customer_page: dict[str, int] = {}
+    for _item in _items:
+        _sp = _item.get("source_pages")
+        _pg = _sp[0] if _sp else _item.get("page")
+        if not _pg:
+            continue
+        _c = _item.get("customer", "")
+        if _c and _c not in customer_page:
+            customer_page[_c] = _pg
+
     # ── Retailer token usage 누적 (batch_result.stats에서) ────────────────────
     # success path에서만 호출됨. fallback 시는 exception.partial_token_stats 경로를 사용.
     if batch_result is not None and _token_acc is not None:
@@ -1140,6 +1155,7 @@ async def _execute_success_path(
             issuer_fingerprint=issuer_fingerprint,
             cached_dist=cached_dist,
             retail_user_rows=retail_user_rows,
+            customer_page=customer_page,
         )
     else:
         retailer_decisions = []
@@ -1174,18 +1190,22 @@ async def _execute_success_path(
         )
 
     # ── Product decisions ────────────────────────────────────────────────────
-    items = phase2_result.get("items", [])
-    unique_products: list[str] = list(dict.fromkeys(
-        i["product"] for i in items if i.get("product")
-    ))
-    product_decisions = await _build_product_decisions_with_tool_use(
-        unique_products, mappings_dir,
-        product_client=product_client,
-        max_product_turns=max_product_turns,
-        model=model,
-        concurrency=concurrency,
-        _token_acc=_token_acc,
-    )
+    if precomputed_product_decisions is not None:
+        # retailer와 병렬로 미리 실행된 결과 사용 (토큰 누적도 이미 완료)
+        product_decisions = precomputed_product_decisions
+    else:
+        items = phase2_result.get("items", [])
+        unique_products: list[str] = list(dict.fromkeys(
+            i["product"] for i in items if i.get("product")
+        ))
+        product_decisions = await _build_product_decisions_with_tool_use(
+            unique_products, mappings_dir,
+            product_client=product_client,
+            max_product_turns=max_product_turns,
+            model=model,
+            concurrency=concurrency,
+            _token_acc=_token_acc,
+        )
 
     # ── phase3 output 조립 ────────────────────────────────────────────────────
     result, pending = convert_tool_use_result_to_phase3_output(
@@ -1207,7 +1227,7 @@ async def _execute_success_path(
 
     # ── confirm_mapping ────────────────────────────────────────────────────────
     for rd in retailer_decisions:
-        if rd.retailer_code and rd.basis in {"bracket_code", "tool_use"}:
+        if rd.retailer_code and rd.basis in {"bracket_code", "exact_match", "tool_use"}:
             await confirm_mapping(
                 mapping_type="retailer", ocr_name=rd.ocr_name,
                 confirmed_code=rd.retailer_code,
@@ -1304,27 +1324,61 @@ async def run_phase3_with_tool_use_or_fallback(
     stats.used_tool_use = True
     tu_start = time.perf_counter()
 
+    import anthropic as _anthropic
+    _product_client = (
+        _anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        if getattr(settings, "anthropic_api_key", "") else None
+    )
+    # product 목록은 phase2_result에서 바로 추출 가능 — retailer 완료 불필요
+    _items_early = phase2_result.get("items", [])
+    _unique_products_early = list(dict.fromkeys(
+        i["product"] for i in _items_early if i.get("product")
+    ))
+
     try:
         async with _get_global_tool_use_sem(_global_conc):
-            batch_result = await _attempt_tool_use_phase(
-                phase2_result=phase2_result,
-                mappings_dir=settings.mappings_dir,
-                form_definitions_dir=settings.form_definitions_dir,
-                form_id=form_id,
-                max_turns=max_turns,
-                stats=stats,
-                model=_model,
-                concurrency=_concurrency,
-                anthropic_api_key=getattr(settings, "anthropic_api_key", "") or "",
-            )
+            # product 조회 선행 시작 — retailer(~20s)와 독립적이므로 동시 실행
+            _product_task: asyncio.Task | None = None
+            if _unique_products_early and _product_client:
+                _product_task = asyncio.create_task(
+                    _build_product_decisions_with_tool_use(
+                        _unique_products_early, settings.mappings_dir,
+                        product_client=_product_client,
+                        model=_model, concurrency=_concurrency,
+                        _token_acc=stats.token_usage,
+                    )
+                )
+                log.info("[%s] product 조회 선행 시작 (%d개)", doc_id, len(_unique_products_early))
+
+            try:
+                batch_result = await _attempt_tool_use_phase(
+                    phase2_result=phase2_result,
+                    mappings_dir=settings.mappings_dir,
+                    form_definitions_dir=settings.form_definitions_dir,
+                    form_id=form_id,
+                    max_turns=max_turns,
+                    stats=stats,
+                    model=_model,
+                    concurrency=_concurrency,
+                    anthropic_api_key=getattr(settings, "anthropic_api_key", "") or "",
+                )
+            except ToolUseFallbackTrigger:
+                # retailer 실패 시 선행 product task 정리 후 fallback
+                if _product_task and not _product_task.done():
+                    _product_task.cancel()
+                    try:
+                        await _product_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                raise
+
             stats.tool_use_elapsed_ms = (time.perf_counter() - tu_start) * 1000
             log.info("[%s] Tool Use 성공 (%.0fms) → success path", doc_id, stats.tool_use_elapsed_ms)
 
-            import anthropic as _anthropic
-            _product_client = (
-                _anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-                if settings.anthropic_api_key else None
-            )
+            # retailer(20s) 완료 시점에 product(15s)는 대부분 끝남
+            _precomputed_products: list | None = None
+            if _product_task is not None:
+                _precomputed_products = await _product_task
 
             result, pending = await _execute_success_path(
                 batch_result=batch_result,
@@ -1336,6 +1390,7 @@ async def run_phase3_with_tool_use_or_fallback(
                 model=_model,
                 concurrency=_concurrency,
                 _token_acc=stats.token_usage,
+                precomputed_product_decisions=_precomputed_products,
             )
 
         # async with 블록 밖 (세마포어 해제 후)

@@ -22,7 +22,7 @@ tools: Read, Bash
 
 1. `mappings/ocr_retailer.csv` 캐시 조회 — 히트 시 즉시 확정
 2. 미스 항목: `form_definitions/form_XX.md`의 거래처명 구조를 읽어 적절한 CSV 조회
-   - 관련 CSV: `domae_retail_1.csv`, `domae_retail_2.csv`, `retail_user.csv`
+   - 관련 CSV: `domae_retail_1.csv`, `retail_user.csv`
 3. 판매처: `retail_user.csv`에서 소매처코드로 후보 조회 + form_XX.md 판매처 결정 규칙으로 1:N tiebreak
 
 ## 출력

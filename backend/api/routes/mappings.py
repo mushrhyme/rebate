@@ -58,6 +58,8 @@ def _upsert_cache(doc_id: str, mapping_type: str, ocr_name: str, confirmed_code:
     """remap 시 캐시에 덮어쓰기 (잘못된 값 교정용)."""
     settings = get_settings()
     md = settings.mappings_dir
+    dist_form_id = dist_issuer_fp = dist_rc = ""
+
     if mapping_type == "retailer":
         _upsert_cache_row(
             md / "ocr_retailer.csv", "ocr_name",
@@ -71,10 +73,25 @@ def _upsert_cache(doc_id: str, mapping_type: str, ocr_name: str, confirmed_code:
             ocr_name, [ocr_name, confirmed_code, confirmed_name],
         )
     elif mapping_type == "dist":
-        form_id, issuer_fp, rc_map = _dist_context(doc_id, settings)
-        rc = rc_map.get(ocr_name, "")
-        if rc:
-            _upsert_dist_cache_row(md / "ocr_dist.csv", form_id, issuer_fp, rc, confirmed_code, confirmed_name)
+        dist_form_id, dist_issuer_fp, rc_map = _dist_context(doc_id, settings)
+        dist_rc = rc_map.get(ocr_name, "")
+        if dist_rc:
+            _upsert_dist_cache_row(md / "ocr_dist.csv", dist_form_id, dist_issuer_fp, dist_rc, confirmed_code, confirmed_name)
+
+    # Sheets write (primary cache for new documents)
+    try:
+        from ...core.sheets_store import get_sheets_store
+        store = get_sheets_store()
+        if store is None:
+            return
+        if mapping_type == "retailer":
+            store.append_row("ocr_retailer.csv", [ocr_name, confirmed_code, confirmed_name])
+        elif mapping_type == "product":
+            store.append_row("ocr_product.csv", [ocr_name, confirmed_code, confirmed_name])
+        elif mapping_type == "dist" and dist_rc and dist_form_id and dist_issuer_fp:
+            store.append_row("ocr_dist.csv", [dist_form_id, dist_issuer_fp, dist_rc, confirmed_code, confirmed_name])
+    except Exception:
+        pass  # Sheets 쓰기 실패는 무시 (캐시는 best-effort)
 
 
 
@@ -87,7 +104,7 @@ async def get_mappings(doc_id: str, user: dict = Depends(get_current_user)):
 @router.post("/confirm")
 async def confirm_one(doc_id: str, body: ConfirmBody, user: dict = Depends(get_current_user)):
     """항목 하나 확정. CSV 캐시는 Phase 4 시작 시(_merge_confirmed_mappings) 일괄 기록."""
-    await confirm_mapping(body.mapping_id, body.confirmed_code, body.confirmed_name, user["user_id"])
+    await confirm_mapping(doc_id, body.mapping_id, body.confirmed_code, body.confirmed_name, user["user_id"])
     return {"ok": True}
 
 

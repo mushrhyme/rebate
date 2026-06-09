@@ -4,7 +4,6 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    database_url: str = ""  # 더 이상 필수 아님 — S3 전환 후 제거 예정
     azure_api_key: str
     azure_api_endpoint: str
     anthropic_api_key: str = ""
@@ -51,8 +50,11 @@ class Settings(BaseSettings):
     # Google Drive — set DRIVE_ROOT_FOLDER_ID in .env to enable
     drive_root_folder_id: str = ""
     drive_credentials_path: Path = Path(__file__).parents[2] / "credentials.json"
-    drive_token_path: Path = Path(__file__).parents[2] / "token.json"
-    drive_service_account_path: Path = Path(__file__).parents[2] / "service_account.json"
+    drive_token_path: Path = Path.home() / ".google-cli" / "token.pickle"
+    # G2: rebate-archive / rebate-inbox folder IDs (setup_g2.py 실행 후 설정)
+    drive_archive_folder_id: str = ""   # DRIVE_ARCHIVE_FOLDER_ID
+    drive_inbox_folder_id: str = ""     # DRIVE_INBOX_FOLDER_ID
+    drive_inbox_poll_interval: int = 300  # DRIVE_INBOX_POLL_INTERVAL (seconds)
 
     model_config = {"env_file": Path(__file__).parents[1] / ".env", "extra": "ignore"}
 
@@ -74,7 +76,7 @@ class Settings(BaseSettings):
 
     @property
     def drive_enabled(self) -> bool:
-        return bool(self.drive_root_folder_id)
+        return bool(self.drive_root_folder_id or self.drive_archive_folder_id)
 
 
 @lru_cache
@@ -96,6 +98,7 @@ def get_drive():
         _drive = DriveStorage(
             settings.drive_credentials_path,
             settings.drive_token_path,
-            service_account_path=settings.drive_service_account_path,
+            archive_folder_id=settings.drive_archive_folder_id,
+            inbox_folder_id=settings.drive_inbox_folder_id,
         )
     return _drive

@@ -1,6 +1,7 @@
 """문서 업로드 + 상태 조회 + SSE 스트리밍."""
 import asyncio
 import json
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -13,6 +14,8 @@ from pydantic import BaseModel
 
 from ...core.auth import get_current_user, get_current_user_sse
 from ...core.config import get_settings, get_drive
+
+log = logging.getLogger(__name__)
 from ...db.queries import (
     create_document,
     clear_mappings,
@@ -21,8 +24,9 @@ from ...db.queries import (
     get_user_password_hash,
     list_documents,
     reset_document_for_retry,
+    update_document_error,
 )
-from ...pipeline.orchestrator import run_pipeline
+from ...pipeline.orchestrator import run_pipeline, resume_phase3_with_cache
 
 router = APIRouter(prefix="/api/v3/documents", tags=["documents"])
 
@@ -33,9 +37,7 @@ async def _get_hatsu_month(doc_id: str) -> str:
 
 
 async def _ensure_pages_local(doc_id: str, pdf_filename: str) -> bool:
-    """Restore {doc_id}_pages/ from Drive if missing locally. Returns True if available."""
-    import logging
-    log = logging.getLogger(__name__)
+    """Restore {doc_id}_pages/ from Drive or S3 if missing locally. Returns True if available."""
     settings = get_settings()
     pages_dir = settings.samples_dir / f"{doc_id}_pages"
     if pages_dir.exists() and any(pages_dir.glob("page_*.png")):
@@ -55,6 +57,18 @@ async def _ensure_pages_local(doc_id: str, pdf_filename: str) -> bool:
         except Exception:
             log.exception("[%s] Drive pages 복원 중 예외", doc_id)
 
+    # S3 fallback
+    try:
+        from ...core.s3_store import download_dir
+        count = await asyncio.to_thread(
+            download_dir, f"documents/{doc_id}/pages", pages_dir
+        )
+        if count > 0 and any(pages_dir.glob("page_*.png")):
+            log.info("[%s] S3에서 pages %d 파일 복원", doc_id, count)
+            return True
+    except Exception:
+        log.warning("[%s] S3 pages 복원 실패", doc_id)
+
     # 폴백: PDF에서 직접 재생성
     if not pdf_filename:
         doc = await get_document(doc_id)
@@ -72,48 +86,102 @@ async def _ensure_pages_local(doc_id: str, pdf_filename: str) -> bool:
             if count > 0:
                 log.info("[%s] PDF에서 PNG %d장 재생성", doc_id, count)
                 return True
-    log.error("[%s] pages 복원 불가 — Drive pull 실패, PDF도 없음", doc_id)
+    log.error("[%s] pages 복원 불가 — Drive/S3 pull 실패, PDF도 없음", doc_id)
     return False
 
 
 async def _ensure_pdf_local(doc_id: str, pdf_filename: str) -> bool:
-    """Restore PDF from Drive if missing locally. Returns True if available."""
+    """Restore PDF from Drive or S3 if missing locally. Returns True if available."""
     settings = get_settings()
-    if (settings.samples_dir / pdf_filename).exists():
+    local_path = settings.samples_dir / pdf_filename
+    if local_path.exists():
         return True
+
     drive = get_drive()
-    if not drive:
-        return False
-    hatsu_month = await _get_hatsu_month(doc_id)
-    ok = await asyncio.to_thread(
-        drive.pull_pdf, settings.drive_root_folder_id, hatsu_month, doc_id, pdf_filename, settings.samples_dir
-    )
-    return ok
+    if drive:
+        hatsu_month = await _get_hatsu_month(doc_id)
+        try:
+            ok = await asyncio.to_thread(
+                drive.pull_pdf, settings.drive_root_folder_id, hatsu_month, doc_id, pdf_filename, settings.samples_dir
+            )
+            if ok and local_path.exists():
+                return True
+        except Exception:
+            log.exception("[%s] Drive PDF 복원 중 예외", doc_id)
+
+    # S3 fallback
+    try:
+        from ...core.s3_store import download_file
+        s3_key = f"documents/{doc_id}/original.pdf"
+        await asyncio.to_thread(download_file, s3_key, local_path)
+        if local_path.exists():
+            log.info("[%s] S3에서 PDF 복원 완료", doc_id)
+            return True
+    except Exception:
+        log.warning("[%s] S3 PDF 복원 실패", doc_id)
+
+    return False
 
 
 async def _ensure_extracted_local(doc_id: str) -> bool:
-    """Restore extracted/{doc_id}/ from Drive if missing locally. Returns True if available."""
+    """Restore extracted/{doc_id}/ from Drive or S3 if missing locally. Returns True if available."""
     settings = get_settings()
     extracted = settings.extracted_dir / doc_id
     if extracted.exists() and any(extracted.iterdir()):
         return True
+
     drive = get_drive()
-    if not drive:
-        return False
-    hatsu_month = await _get_hatsu_month(doc_id)
-    ok = await asyncio.to_thread(
-        drive.pull_extracted, settings.drive_root_folder_id, hatsu_month, doc_id, settings.extracted_dir
-    )
-    return ok
+    if drive:
+        hatsu_month = await _get_hatsu_month(doc_id)
+        ok = await asyncio.to_thread(
+            drive.pull_extracted, settings.drive_root_folder_id, hatsu_month, doc_id, settings.extracted_dir
+        )
+        if ok and extracted.exists() and any(extracted.iterdir()):
+            return True
+
+    # S3 fallback
+    try:
+        from ...core.s3_store import download_dir
+        count = await asyncio.to_thread(
+            download_dir, f"documents/{doc_id}/extracted", extracted
+        )
+        if count > 0:
+            log.info("[%s] S3에서 extracted %d 파일 복원", doc_id, count)
+            return True
+    except Exception:
+        log.warning("[%s] S3 extracted 복원 실패", doc_id)
+
+    return False
 
 
 def _make_doc_id(stem: str) -> str:
     """파일명 stem → 안전한 doc_id. 공백·점·괄호를 정규화하고 [\w\-]만 남긴다."""
+    import unicodedata
+    stem = unicodedata.normalize("NFC", stem)
     s = re.sub(r"\s*\([^)]*\)", "", stem)
     s = re.sub(r"[\s.]+", "_", s)
     s = re.sub(r"[^\w\-]", "", s)
     s = re.sub(r"_+", "_", s).strip("_")
     return s
+
+
+async def _push_pdf_to_drive(doc_id: str, hatsu_month: str, pdf_path: Path) -> None:
+    """업로드 직후 백그라운드 — 원본 PDF를 Drive에 올린다 (Drive 미설정 시 no-op)."""
+    drive = get_drive()
+    if not drive:
+        return
+    try:
+        settings = get_settings()
+        await asyncio.to_thread(
+            drive.push_pdf,
+            settings.drive_root_folder_id,
+            hatsu_month,
+            pdf_path,
+            doc_id,
+        )
+        log.info("[%s] Drive PDF 업로드 완료", doc_id)
+    except Exception:
+        log.exception("[%s] Drive PDF 업로드 실패 (무시)", doc_id)
 
 
 @router.post("")
@@ -142,7 +210,7 @@ async def upload_document(
         status = existing["status"]
         if status in ("queued", "ocr", "analyzing", "phase1", "phase2", "phase3", "phase4"):
             raise HTTPException(status_code=409, detail=f"이미 분석 중입니다 (상태: {status}). 완료 후 재시도하세요.")
-        if status in ("pending", "done"):
+        if status in ("pending", "done", "xv_warning"):
             raise HTTPException(status_code=409, detail=f"이미 분석된 문서입니다 (상태: {status}). 재분석은 문서 상세에서 진행하세요.")
         # status == "error" → 재실행 허용
 
@@ -155,7 +223,21 @@ async def upload_document(
         uploaded_by_name_ja=user.get("display_name_ja", ""),
     )
 
+    # PDF → S3 (S3 기반 저장 구조 유지)
+    try:
+        from ...core.s3_store import upload_file as s3_upload
+        pdf_s3_key = f"documents/{doc_id}/original.pdf"
+        await asyncio.to_thread(s3_upload, pdf_path, pdf_s3_key)
+        log.info("[%s] PDF → S3 업로드 완료", doc_id)
+    except Exception:
+        log.warning("[%s] PDF S3 업로드 실패 (로컬 실행으로 계속)", doc_id)
+
+    # 원본 PDF → Drive (hatsu_month 있을 때만, 실패해도 계속)
+    if hatsu_month:
+        background_tasks.add_task(_push_pdf_to_drive, doc_id, hatsu_month, pdf_path)
+
     background_tasks.add_task(run_pipeline, doc_id, pdf_path, hatsu_month)
+
     return {"doc_id": doc_id, "status": "ocr"}
 
 
@@ -246,7 +328,7 @@ async def stream_status(doc_id: str, user: dict = Depends(get_current_user_sse))
     """SSE — 파이프라인 진행 상태를 실시간으로 스트리밍."""
 
     async def event_gen():
-        terminal = {"done", "error", "pending"}
+        terminal = {"done", "error", "pending", "xv_warning"}
         while True:
             doc = await get_document(doc_id)
             if not doc:
@@ -377,8 +459,44 @@ async def retry_document(
     await clear_mappings(doc_id)
     await reset_document_for_retry(doc_id)
 
-    background_tasks.add_task(run_pipeline, doc_id, pdf_path, doc.get("hatsu_month") or "")
+    hatsu_month = doc.get("hatsu_month") or ""
+    background_tasks.add_task(run_pipeline, doc_id, pdf_path, hatsu_month)
     return {"doc_id": doc_id, "status": "ocr"}
+
+
+@router.post("/{doc_id}/remap-cached")
+async def remap_cached(
+    doc_id: str,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(get_current_user),
+):
+    """pending 문서에 대해 캐시 재조회만으로 Phase 3 재실행. Claude 호출 없음."""
+    doc = await get_document(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="문서 없음")
+    if doc["status"] != "pending":
+        raise HTTPException(
+            status_code=400,
+            detail=f"pending 상태 문서에서만 사용할 수 있습니다 (현재: {doc['status']})",
+        )
+    background_tasks.add_task(resume_phase3_with_cache, doc_id)
+    return {"doc_id": doc_id, "status": "phase3"}
+
+
+_IN_PROGRESS = {"queued", "ocr", "analyzing", "phase1", "phase2", "phase3", "phase4"}
+
+
+@router.post("/{doc_id}/cancel")
+async def cancel_document(doc_id: str, user: dict = Depends(get_current_user)):
+    """진행 중인 분석을 취소하고 error 상태로 전환."""
+    doc = await get_document(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="문서 없음")
+    if doc["status"] not in _IN_PROGRESS:
+        raise HTTPException(status_code=400, detail=f"진행 중 문서가 아닙니다 (현재: {doc['status']})")
+    await update_document_error(doc_id, "cancelled", doc["status"], "사용자가 분석을 취소했습니다")
+    log.info("[%s] 분석 취소 — 요청자: %s", doc_id, user.get("username"))
+    return {"doc_id": doc_id, "status": "error"}
 
 
 class DeleteBody(BaseModel):
@@ -398,9 +516,10 @@ async def delete_document(doc_id: str, body: DeleteBody, user: dict = Depends(ge
     if doc["status"] in ("queued", "ocr", "analyzing", "phase1", "phase2", "phase3", "phase4"):
         raise HTTPException(status_code=400, detail="분석 중인 문서는 삭제할 수 없습니다")
 
-    pw_hash = await get_user_password_hash(user["user_id"])
-    if not pw_hash or not bcrypt.checkpw(body.password.encode()[:72], pw_hash.encode()):
-        raise HTTPException(status_code=400, detail="비밀번호가 올바르지 않습니다")
+    if not user.get("is_admin"):
+        pw_hash = await get_user_password_hash(user["user_id"])
+        if not pw_hash or not bcrypt.checkpw(body.password.encode()[:72], pw_hash.encode()):
+            raise HTTPException(status_code=400, detail="비밀번호가 올바르지 않습니다")
 
     # S3 JSON 삭제
     await delete_document_data(doc_id)
@@ -439,3 +558,5 @@ async def delete_document(doc_id: str, body: DeleteBody, user: dict = Depends(ge
 
 def _sse(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+

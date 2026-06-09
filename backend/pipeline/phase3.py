@@ -125,6 +125,7 @@ def _call_claude(
         max_tokens=8192,
         system=system,
         messages=[{"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}],
+        temperature=0,
         timeout=300.0,
     )
     raw = message.content[0].text if message.content else ""
@@ -273,6 +274,7 @@ async def run_phase3(
     form_id: str,
     hatsu_month: str = "",
     run_id: str = "",
+    cache_only: bool = False,
 ) -> tuple[dict, list[dict]]:
     """
     Returns:
@@ -338,7 +340,11 @@ async def run_phase3(
     issuer_fingerprint = _build_issuer_fingerprint(issuer, fingerprint_fields)
 
     # retail_user.csv — dist 1:1 자동확정 + 캐시 저장 시 이름 조회용
-    retail_user_rows = _read_csv(mappings_dir / "retail_user.csv") if (mappings_dir / "retail_user.csv").exists() else []
+    # _read_csv: Sheets 설정 시 Sheets 우선, 없으면 로컬 파일 (EC2에선 파일이 없으므로 .exists() 조건 제거)
+    try:
+        retail_user_rows = _read_csv(mappings_dir / "retail_user.csv")
+    except FileNotFoundError:
+        retail_user_rows = []
     retailer_name_by_code: dict[str, str] = {r["소매처코드"]: r["소매처명"] for r in retail_user_rows}
     dist_name_by_code: dict[str, str] = {r["판매처코드"]: r["판매처명"] for r in retail_user_rows}
 
@@ -351,7 +357,7 @@ async def run_phase3(
             form_definitions_dir=settings.form_definitions_dir,
         )
 
-        if result.basis in ("cache", "bracket_code"):
+        if result.basis in ("cache", "bracket_code", "exact_match"):
             retailer_code = result.retailer_code
             dist_key = (form_id, issuer_fingerprint, retailer_code)
             dist_code = cache_d.get(dist_key, "")
@@ -360,7 +366,7 @@ async def run_phase3(
                 "dist_code":     dist_code,
                 "basis":         result.basis,
             }
-            if result.basis == "bracket_code":
+            if result.basis in ("bracket_code", "exact_match"):
                 await confirm_mapping(
                     mapping_type="retailer",
                     ocr_name=name,
@@ -463,7 +469,7 @@ async def run_phase3(
     run_retailer = bool(miss_retailers or cached_retailers_needing_dist)
     run_product  = bool(miss_products)
 
-    if run_retailer or run_product:
+    if (run_retailer or run_product) and not cache_only:
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
         retailer_coro = (
@@ -587,6 +593,23 @@ async def run_phase3(
                     "candidates":   m.get("candidates", []),
                     "page_number":  product_page.get(ocr),
                 })
+
+    elif cache_only:
+        # Claude 호출 없이 캐시 미스 항목을 바로 pending으로 등록
+        for n in miss_retailers:
+            pending.append({
+                "mapping_type": "retailer",
+                "ocrName":      n,
+                "candidates":   [],
+                "page_number":  customer_page.get(n),
+            })
+        for mp in miss_products:
+            pending.append({
+                "mapping_type": "product",
+                "ocrName":      mp["product"],
+                "candidates":   [],
+                "page_number":  product_page.get(mp["product"]),
+            })
 
     # ── ②-후처리: Claude 결과 반영 후에도 dist_code 없는 거래처 재조회 ──────────
     # miss_retailers (domae_retail_1 / Claude 경유 확정)는 위 pre-Claude 루프에서 제외되므로

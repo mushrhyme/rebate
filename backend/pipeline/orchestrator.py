@@ -5,23 +5,30 @@ import json
 import logging
 import os
 import re
+import time
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
 import anthropic
 
 from ..core.config import get_settings, get_drive
+from dataclasses import asdict
+
 from ..db.queries import (
     update_document_status,
     update_document_error,
     get_document,
     get_all_mappings,
+    clear_mappings,
     save_pending_mappings,
     has_pending_mappings,
     set_current_run_id,
     get_current_run_id,
     set_form_id,
     set_pages_count,
+    record_phase_timing,
+    save_phase3_tool_use_stats,
 )
 from .ocr import run_ocr
 from .phase1 import run_phase1
@@ -86,8 +93,15 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
         try:
             # ── OCR ──────────────────────────────────────────────
             await update_document_status(doc_id, "ocr")
+            _t0 = time.monotonic()
             await run_ocr(pdf_path, pages_dir)
+            await record_phase_timing(doc_id, "ocr", time.monotonic() - _t0)
             log.info("[%s] OCR 완료", doc_id)
+
+            # pages(PNG + OCR txt/json) → S3 (EC2가 페이지 이미지를 서빙할 수 있도록)
+            # 분석 파이프라인과 무관 — 백그라운드 업로드로 Phase 1 대기 제거
+            asyncio.create_task(_sync_dir_to_s3(doc_id, pages_dir, f"documents/{doc_id}/pages", "pages"))
+            asyncio.create_task(_push_pages_to_drive(doc_id))
 
             # OCR 완료 후 페이지 수 저장 (다중 번들 경고용)
             pages_count = len(list(pages_dir.glob("page_*.ocr.txt")))
@@ -109,7 +123,9 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
 
             # ── Phase 1 ──────────────────────────────────────────
             await update_document_status(doc_id, "phase1")
+            _t0 = time.monotonic()
             await run_phase1(doc_id, pages_dir, extracted_dir, run_id=run_id)
+            await record_phase_timing(doc_id, "phase1", time.monotonic() - _t0)
             log.info("[%s] Phase 1 완료", doc_id)
 
             # ── Phase 2 준비: row anchor 생성 (form_types.json row_anchor 설정 기반) ──
@@ -139,6 +155,7 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
 
             # ── Phase 2 (번들 감지 → 청크 분할 → 단일 호출 순 판단) ──────────
             await update_document_status(doc_id, "phase2")
+            _t0_phase2 = time.monotonic()
             bundles = await asyncio.to_thread(_detect_bundles, extracted_dir, _form_cfg.get("bundle_detection"))
             if bundles:
                 log.warning("[%s] 다중 번들 감지 (%d건): %s", doc_id, len(bundles), bundles)
@@ -206,6 +223,7 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
                         doc_id, form_id, extracted_dir,
                         run_id=run_id, row_anchors=_filter_anchors(None),
                     )
+            await record_phase_timing(doc_id, "phase2", time.monotonic() - _t0_phase2)
             log.info("[%s] Phase 2 완료 — %d 항목", doc_id, len(phase2_result.get("items", [])))
 
             # ── Phase 2 역산 검증 (管理No計 불일치 시 핀포인트 재요청) ──
@@ -218,6 +236,7 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
 
             # ── Phase 3 ──────────────────────────────────────────
             await update_document_status(doc_id, "phase3")
+            _t0 = time.monotonic()
             _, pending = await _call_phase3_by_flag(
                 doc_id=doc_id,
                 phase2_result=phase2_result,
@@ -228,10 +247,14 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
                 settings=settings,
             )
 
+            await record_phase_timing(doc_id, "phase3", time.monotonic() - _t0)
+
             if pending:
                 await save_pending_mappings(doc_id, pending)
                 await update_document_status(doc_id, "pending")
                 log.info("[%s] Phase 3 — 확인 필요 %d건, 대기 상태", doc_id, len(pending))
+                # pending 시 extracted를 S3에 동기화 (서버 재시작 후 resume_phase4가 복원할 수 있도록)
+                await _sync_dir_to_s3(doc_id, extracted_dir, f"documents/{doc_id}/extracted", "extracted(pending)")
                 return  # 사용자 확인 후 resume_phase4()가 호출됨
 
             # 전부 자동 확정된 경우 바로 Phase 4
@@ -275,6 +298,7 @@ async def _call_phase3_by_flag(
                 "[%s] Phase 3 Tool Use fallback 발생: [%s] %s",
                 doc_id, _fb_stats.fallback_class, _fb_stats.fallback_reason,
             )
+        await save_phase3_tool_use_stats(doc_id, asdict(_fb_stats))
         return _, pending
     else:
         # Legacy 경로 (기본값, flag OFF)
@@ -288,9 +312,58 @@ async def resume_phase4(doc_id: str) -> None:
     """Phase 3 매핑 확인 완료 후 사용자가 호출."""
     if await has_pending_mappings(doc_id):
         raise ValueError("아직 확인되지 않은 매핑이 있습니다")
+    await _ensure_extracted_from_s3(doc_id)
     await _merge_confirmed_mappings(doc_id)
     run_id = await get_current_run_id(doc_id)
     await _run_phase4_and_finish(doc_id, run_id=run_id)
+
+
+async def resume_phase3_with_cache(doc_id: str) -> None:
+    """Phase 2 결과를 재사용, Claude 없이 캐시 조회만으로 Phase 3 재실행.
+    해소된 항목은 Phase 4까지 자동 진행, 여전히 미매핑인 항목은 pending으로 남는다."""
+    settings = get_settings()
+    await _ensure_extracted_from_s3(doc_id)
+
+    extracted_dir = settings.extracted_dir / doc_id
+    p2_path = extracted_dir / "phase2_output.json"
+    if not p2_path.exists():
+        await update_document_error(
+            doc_id, error_type="technical", error_phase="phase3",
+            message="phase2_output.json 없음 — Phase 2 결과가 필요합니다",
+        )
+        return
+
+    phase2_result = json.loads(p2_path.read_text(encoding="utf-8"))
+    doc = await get_document(doc_id)
+    if not doc:
+        return
+
+    form_id = doc.get("form_id") or ""
+    hatsu_month = doc.get("hatsu_month") or ""
+    run_id = await get_current_run_id(doc_id)
+
+    await clear_mappings(doc_id)
+    await update_document_status(doc_id, "phase3")
+
+    try:
+        _, pending = await run_phase3(
+            doc_id, phase2_result, extracted_dir,
+            form_id=form_id, hatsu_month=hatsu_month, run_id=run_id,
+            cache_only=True,
+        )
+
+        if pending:
+            await save_pending_mappings(doc_id, pending)
+            await update_document_status(doc_id, "pending")
+            await _sync_dir_to_s3(doc_id, extracted_dir, f"documents/{doc_id}/extracted", "extracted(pending)")
+            log.info("[%s] 캐시 재매핑 — 여전히 미매핑 %d건, 대기 상태", doc_id, len(pending))
+            return
+
+        await _run_phase4_and_finish(doc_id, run_id=run_id)
+
+    except Exception as exc:
+        log.exception("[%s] 캐시 재매핑 오류", doc_id)
+        await update_document_error(doc_id, error_type="technical", error_phase="phase3", message=str(exc))
 
 
 async def resume_phase4_for_remap(doc_id: str) -> None:
@@ -298,6 +371,7 @@ async def resume_phase4_for_remap(doc_id: str) -> None:
     remap은 이미 phase4가 완료된 문서에서 개별 매핑을 수정하는 용도이므로
     다른 미확정 항목이 있어도 재실행을 허용한다.
     교차검증(Claude 호출)은 건너뛰고 NET 재계산만 수행해 응답 속도를 높인다."""
+    await _ensure_extracted_from_s3(doc_id)
     await _merge_confirmed_mappings(doc_id)
     run_id = await get_current_run_id(doc_id)
     await _run_phase4_and_finish(doc_id, run_id=run_id, skip_xv=True)
@@ -405,14 +479,60 @@ async def _merge_confirmed_mappings(doc_id: str) -> None:
 
 async def _run_phase4_and_finish(doc_id: str, run_id: str = "", skip_xv: bool = False) -> None:
     await update_document_status(doc_id, "phase4")
-    await run_phase4(doc_id, run_id=run_id, skip_xv=skip_xv)
-    await update_document_status(doc_id, "done")
-    log.info("[%s] Phase 4 완료 — done", doc_id)
-    await _push_to_drive(doc_id)
+    _t0 = time.monotonic()
+    phase4_data = await run_phase4(doc_id, run_id=run_id, skip_xv=skip_xv)
+    await record_phase_timing(doc_id, "phase4", time.monotonic() - _t0)
+
+    # 교차검증 불일치 또는 파싱 오류 → xv_warning (done이 아님)
+    xv_has_issue = (
+        not skip_xv and (
+            phase4_data.get("xv_error")
+            or any(not item.get("ok", True) for item in phase4_data.get("xv", []))
+        )
+    )
+    final_status = "xv_warning" if xv_has_issue else "done"
+    await update_document_status(doc_id, final_status)
+    log.info("[%s] Phase 4 완료 — %s", doc_id, final_status)
+
+    # S3·Drive·Sheets 동기화는 사용자 응답과 무관 — 백그라운드 처리
+    settings = get_settings()
+    extracted_dir = settings.extracted_dir / doc_id
+    asyncio.create_task(_sync_dir_to_s3(doc_id, extracted_dir, f"documents/{doc_id}/extracted", "extracted(done)"))
+    asyncio.create_task(_push_to_drive(doc_id))
+    asyncio.create_task(_write_results_to_sheets(doc_id))
 
 
-async def _push_to_drive(doc_id: str) -> None:
-    """Upload doc files to Drive and clean up locals (no-op if Drive not configured)."""
+async def _sync_dir_to_s3(doc_id: str, local_dir: Path, prefix: str, label: str) -> None:
+    """local_dir → S3 prefix 업로드. 실패해도 파이프라인 계속 진행."""
+    if not local_dir.exists():
+        return
+    try:
+        from ..core.s3_store import upload_dir
+        count = await asyncio.to_thread(upload_dir, local_dir, prefix)
+        log.info("[%s] %s → S3 %d 파일 업로드", doc_id, label, count)
+    except Exception:
+        log.exception("[%s] %s S3 업로드 실패 (무시)", doc_id, label)
+
+
+async def _ensure_extracted_from_s3(doc_id: str) -> None:
+    """extracted/{doc_id}/ 가 로컬에 없으면 S3에서 복원 (서버 재시작 후 resume 지원)."""
+    settings = get_settings()
+    extracted_dir = settings.extracted_dir / doc_id
+    if extracted_dir.exists() and any(extracted_dir.iterdir()):
+        return
+    log.info("[%s] extracted 로컬 없음 → S3에서 복원 시도", doc_id)
+    try:
+        from ..core.s3_store import download_dir
+        count = await asyncio.to_thread(
+            download_dir, f"documents/{doc_id}/extracted", extracted_dir
+        )
+        log.info("[%s] S3에서 extracted %d 파일 복원", doc_id, count)
+    except Exception:
+        log.exception("[%s] S3 extracted 복원 실패", doc_id)
+
+
+async def _push_pages_to_drive(doc_id: str) -> None:
+    """OCR 완료 후 — pages 디렉토리를 Drive에 업로드 (Drive 미설정 시 no-op)."""
     drive = get_drive()
     if not drive:
         return
@@ -420,19 +540,119 @@ async def _push_to_drive(doc_id: str) -> None:
     doc = await get_document(doc_id)
     if not doc:
         return
+    hatsu_month = doc.get("hatsu_month") or ""
+    if not hatsu_month:
+        return
+    pages_dir = settings.samples_dir / f"{doc_id}_pages"
     try:
         await asyncio.to_thread(
-            drive.push_doc,
+            drive.push_pages,
             settings.drive_root_folder_id,
-            doc.get("hatsu_month") or "",
-            doc.get("pdf_filename", ""),
-            settings.samples_dir,
+            hatsu_month,
+            pages_dir,
+            doc_id,
+        )
+        log.info("[%s] Drive pages 업로드 완료", doc_id)
+    except Exception:
+        log.exception("[%s] Drive pages 업로드 실패 (무시)", doc_id)
+
+
+async def _push_to_drive(doc_id: str) -> None:
+    """Phase 4 완료 후 — extracted/ 결과물을 Drive에 업로드 (Drive 미설정 시 no-op)."""
+    drive = get_drive()
+    if not drive:
+        return
+    settings = get_settings()
+    doc = await get_document(doc_id)
+    if not doc:
+        return
+    hatsu_month = doc.get("hatsu_month") or ""
+    if not hatsu_month:
+        return
+    try:
+        await asyncio.to_thread(
+            drive.push_extracted,
+            settings.drive_root_folder_id,
+            hatsu_month,
             settings.extracted_dir,
             doc_id,
         )
-        log.info("[%s] Drive 동기화 완료", doc_id)
+        log.info("[%s] Drive extracted 업로드 완료", doc_id)
     except Exception:
         log.exception("[%s] Drive 동기화 실패 (로컬 파일 유지)", doc_id)
+
+
+async def _write_results_to_sheets(doc_id: str) -> None:
+    """Phase 4 완료 후 Sheets results 탭에 소매처별 NET 결과를 기록한다."""
+    from ..core.sheets_store import get_sheets_store
+    sheets = get_sheets_store()
+    if not sheets:
+        return
+
+    settings = get_settings()
+    p3_path = settings.extracted_dir / doc_id / "phase3_output.json"
+    p4_path = settings.extracted_dir / doc_id / "phase4_output.json"
+    if not p3_path.exists() or not p4_path.exists():
+        log.warning("[%s] results 기록 건너뜀: phase3/4 출력 파일 없음", doc_id)
+        return
+
+    try:
+        p3 = json.loads(p3_path.read_text(encoding="utf-8"))
+        p4 = json.loads(p4_path.read_text(encoding="utf-8"))
+    except Exception:
+        log.exception("[%s] results 기록: 출력 파일 파싱 실패", doc_id)
+        return
+
+    issuer_name = (p3.get("issuer") or {}).get("name", "")
+    hatsu_month = p3.get("hatsu_month", "")
+
+    # dist_code → NET 합산 (受注先コード 컬럼)
+    dist_net: dict[str, float] = {}
+    for row in p4.get("rows", []):
+        dc = str(row.get("受注先コード", "") or "")
+        try:
+            net = float(row.get("NET") or row.get("net") or 0)
+        except (ValueError, TypeError):
+            net = 0.0
+        if dc:
+            dist_net[dc] = dist_net.get(dc, 0.0) + net
+
+    # retailer_code → 소매처명 (retail_user.csv: 소매처코드, 소매처명)
+    retail_map: dict[str, str] = {}
+    try:
+        for r in sheets.read_csv("retail_user.csv"):
+            rc = str(r.get("소매처코드", "") or "")
+            rn = str(r.get("소매처명", "") or "")
+            if rc:
+                retail_map[rc] = rn
+    except Exception:
+        log.warning("[%s] retail_user.csv 로드 실패 (소매처명 공백으로 기록)", doc_id)
+
+    confirmed = p3.get("confirmed_retailers", {})
+    seen: set[str] = set()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    written = 0
+
+    for mapping in confirmed.values():
+        rc = str(mapping.get("retailer_code", "") or "")
+        dc = str(mapping.get("dist_code", "") or "")
+        if not rc or rc in seen:
+            continue
+        seen.add(rc)
+        rn = retail_map.get(rc, "")
+        net_val = dist_net.get(dc, 0.0)
+        net_str = str(int(net_val)) if net_val == int(net_val) else f"{net_val:.2f}"
+        await asyncio.to_thread(
+            sheets.append_to_tab,
+            "results",
+            [doc_id, issuer_name, hatsu_month, rc, rn, net_str, now_str],
+        )
+        written += 1
+
+    if written:
+        log.info("[%s] Sheets results 기록: %d 소매처", doc_id, written)
+    else:
+        log.warning("[%s] results 기록: confirmed_retailers 없음 — 건너뜀", doc_id)
 
 
 def _extract_table_headers(md_text: str) -> str:
@@ -479,10 +699,24 @@ async def _identify_form(doc_id: str, pages_dir: Path) -> tuple[str, float]:
 
     ocr_files = sorted(pages_dir.glob("page_*.ocr.txt"))[:3]
     if not ocr_files:
-        log.warning("[%s] OCR txt 없음 — 양식 식별 불가", doc_id)
-        return "unknown", 0.0
-
-    ocr_text = "\n".join(f.read_text(encoding="utf-8") for f in ocr_files)
+        # 로컬 파일 없으면 S3에서 fallback
+        log.warning("[%s] 로컬 OCR txt 없음 — S3 fallback 시도", doc_id)
+        try:
+            from ..core.s3_store import list_keys, read_text as s3_read_text
+            s3_prefix = f"documents/{doc_id}/pages/"
+            all_keys = list_keys(s3_prefix)
+            ocr_keys = sorted(k for k in all_keys if k.endswith(".ocr.txt"))[:3]
+            if not ocr_keys:
+                log.warning("[%s] S3 OCR txt 없음 — 양식 식별 불가", doc_id)
+                return "unknown", 0.0
+            texts = [s3_read_text(k) or "" for k in ocr_keys]
+            ocr_text = "\n".join(texts)
+            log.info("[%s] S3 fallback — %d개 OCR txt 로드", doc_id, len(ocr_keys))
+        except Exception:
+            log.exception("[%s] S3 OCR fallback 실패 — 양식 식별 불가", doc_id)
+            return "unknown", 0.0
+    else:
+        ocr_text = "\n".join(f.read_text(encoding="utf-8") for f in ocr_files)
 
     form_dir = settings.form_definitions_dir
     for form_path in sorted(form_dir.glob("form_[0-9]*.md")):
@@ -497,8 +731,11 @@ async def _identify_form(doc_id: str, pages_dir: Path) -> tuple[str, float]:
         if all(p in ocr_text for p in patterns):
             log.info("[%s] 양식 식별: %s (패턴: %s)", doc_id, form_id, patterns)
             return form_id, 1.0
+        missing = [p for p in patterns if p not in ocr_text]
+        log.warning("[%s] %s 불일치 — 없는 패턴: %s", doc_id, form_id, missing)
 
-    log.warning("[%s] 양식 식별 실패 — 매칭되는 form 없음", doc_id)
+    log.warning("[%s] 양식 식별 실패 — 매칭되는 form 없음 (OCR 파일: %d개, 텍스트 앞100자: %s)",
+                doc_id, len(ocr_files), repr(ocr_text[:100]))
     return "unknown", 0.0
 
 

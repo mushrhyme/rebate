@@ -68,7 +68,7 @@ class ToolUseContractError(ValueError):
 
 # ── 입력 타입 정의 ────────────────────────────────────────────────────────────
 
-_RETAILER_MAPPED_BASES  = frozenset({"cache", "bracket_code", "tool_use"})
+_RETAILER_MAPPED_BASES  = frozenset({"cache", "bracket_code", "exact_match", "tool_use"})
 _RETAILER_UNMAPPED_BASES = frozenset({"not_found", "error"})
 _RETAILER_VALID_BASES    = _RETAILER_MAPPED_BASES | _RETAILER_UNMAPPED_BASES
 

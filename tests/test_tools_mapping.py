@@ -157,7 +157,7 @@ class TestBracketCode:
         mappings, form_defs = dirs
         # bracket_code_csv 없는 form_04
         (form_defs / "form_04.md").write_text(
-            "## データソース\n- retail_user.csv\n- domae_retail_2.csv\n",
+            "## データソース\n- retail_user.csv\n",
             encoding="utf-8",
         )
         write_csv(mappings / "domae_retail_1.csv", [
@@ -175,8 +175,8 @@ class TestBracketCode:
 class TestCandidates:
     """캐시·괄호코드 미스 후 유사도 검색으로 후보 반환."""
 
-    async def test_high_similarity_from_retail_user(self, dirs):
-        """retail_user.csv에서 정규화 후 이름이 완전히 일치 → 최고 점수 candidate."""
+    async def test_legal_marker_normalized_to_exact_match(self, dirs):
+        """法人格記号(株)を正規化後に完全一致 → exact_match で自動確定."""
         mappings, form_defs = dirs
         (form_defs / "form_02.md").write_text(
             "## データソース\n- retail_user.csv\n", encoding="utf-8"
@@ -187,14 +187,12 @@ class TestCandidates:
         ])
 
         from backend.tools.mapping import lookup_retailer
-        # 全角括弧 → normalize → "ファミリーマート" → similarity 1.0
+        # 全角括弧 → normalize → "ファミリーマート" → similarity 1.0 → exact_match
         result = await lookup_retailer("（株）ファミリーマート", "form_02", mappings, form_defs)
 
-        assert result.basis == "candidate"
-        assert result.retailer_code is None
-        assert len(result.candidates) >= 1
-        assert result.candidates[0]["retailer_code"] == "6001234"
-        assert result.confidence > 0.5
+        assert result.basis == "exact_match"
+        assert result.retailer_code == "6001234"
+        assert result.confidence == 1.0
 
     async def test_candidates_sorted_by_similarity(self, dirs):
         """후보가 복수일 때 유사도 내림차순 정렬."""
@@ -209,7 +207,8 @@ class TestCandidates:
         ])
 
         from backend.tools.mapping import lookup_retailer
-        result = await lookup_retailer("イオンモール", "form_02", mappings, form_defs)
+        # "イオングループ"はCSV에 없어서 exact_match에 해당しない → candidate
+        result = await lookup_retailer("イオングループ", "form_02", mappings, form_defs)
 
         assert result.basis == "candidate"
         sims = [c["similarity"] for c in result.candidates]
@@ -233,10 +232,11 @@ class TestCandidates:
         assert len(result.candidates) <= 3
 
     async def test_dedup_same_retailer_code(self, dirs):
-        """동일 소매처코드가 여러 행에 있으면 최고 점수 1건만 반환한다.
+        """동일 소매처코드가 여러 행에 있으면 후보에서 1건만 반환한다.
 
         retail_user.csv는 1:N 구조 (같은 소매처코드 + 다른 판매처코드).
         소매처 후보는 코드 단위로 dedup 해야 한다.
+        exact_match 이외의 쿼리로 candidate 경로를 통과시켜서 검증한다.
         """
         mappings, form_defs = dirs
         (form_defs / "form_02.md").write_text(
@@ -248,8 +248,10 @@ class TestCandidates:
         ])
 
         from backend.tools.mapping import lookup_retailer
-        result = await lookup_retailer("ファミリーマート", "form_02", mappings, form_defs)
+        # "ファミリーマート系" → similarity ≈ 0.94 (not exact_match) → candidate 경로
+        result = await lookup_retailer("ファミリーマート系", "form_02", mappings, form_defs)
 
+        assert result.basis == "candidate"
         codes = [c["retailer_code"] for c in result.candidates]
         assert codes.count("6001234") == 1, "동일 소매처코드 중복 제거 실패"
 
@@ -319,11 +321,11 @@ class TestNotFound:
         ])
 
         from backend.tools.mapping import lookup_retailer
-        # form_99.md 없어도 retail_user.csv 기본 검색 → candidate 히트
+        # form_99.md 없어도 retail_user.csv 기본 검색 → exact_match 확정
         result = await lookup_retailer("テスト", "form_99", mappings, form_defs)
 
-        assert result.basis == "candidate"
-        assert result.candidates[0]["retailer_code"] == "1111"
+        assert result.basis == "exact_match"
+        assert result.retailer_code == "1111"
 
 
 # ── 5. phase3.py 회귀 테스트 ─────────────────────────────────────────────────
@@ -364,10 +366,9 @@ class TestPhase3Regression:
             "## データソース\n"
             "(form_04는 이름 기반 검색 방식)\n\n"
             "- retail_user.csv\n"
-            "- domae_retail_2.csv\n"
         )
         result = parse_retailer_csv_sources(form_md)
-        assert result == ["retail_user.csv", "domae_retail_2.csv"]
+        assert result == ["retail_user.csv"]
 
     def test_build_retailer_csv_context_uses_parse_sources(self, dirs):
         """_build_retailer_csv_context가 parse_retailer_csv_sources로 CSV를 로드한다."""
@@ -870,8 +871,8 @@ class TestContractGuarantees:
         assert r1.confidence == 0.0
         assert r2.confidence == 0.0
 
-    async def test_confidence_in_range_on_candidate(self, dirs):
-        """candidate 반환 시 confidence ∈ (0.3, 1.0]."""
+    async def test_confidence_is_1_on_exact_match(self, dirs):
+        """exact_match 반환 시 confidence == 1.0."""
         mappings, form_defs = dirs
         (form_defs / "form_02.md").write_text(
             "## データソース\n- retail_user.csv\n", encoding="utf-8"
@@ -881,10 +882,9 @@ class TestContractGuarantees:
         ])
         from backend.tools.mapping import lookup_retailer
         result = await lookup_retailer("（株）ファミリーマート", "form_02", mappings, form_defs)
-        assert result.basis == "candidate"
-        assert 0.0 <= result.confidence <= 1.0
-        # similarity threshold 0.3 초과이므로 confidence > 0.3
-        assert result.confidence > 0.3
+        assert result.basis == "exact_match"
+        assert result.retailer_code == "R001"
+        assert result.confidence == 1.0
 
     # ── basis 값 검증 ────────────────────────────────────────────────────────
 
@@ -892,7 +892,7 @@ class TestContractGuarantees:
         """lookup_retailer의 basis는 항상 정의된 Literal 범위 안이다."""
         from backend.tools.mapping import lookup_retailer
         mappings, form_defs = dirs
-        valid_bases = {"cache", "bracket_code", "candidate", "not_found"}
+        valid_bases = {"cache", "bracket_code", "exact_match", "candidate", "not_found"}
         result = await lookup_retailer("テスト", "form_01", mappings, form_defs)
         assert result.basis in valid_bases
 
@@ -918,7 +918,8 @@ class TestContractGuarantees:
             {"소매처명": "イオンリテール", "소매처코드": "A003", "판매처코드": "D1", "판매처명": "t"},
         ])
         from backend.tools.mapping import lookup_retailer
-        result = await lookup_retailer("イオンモール", "form_02", mappings, form_defs)
+        # "イオングループ"はCSVに存在しない → exact_match 없음 → candidate
+        result = await lookup_retailer("イオングループ", "form_02", mappings, form_defs)
         assert result.basis == "candidate"
         sims = [c["similarity"] for c in result.candidates]
         assert sims == sorted(sims, reverse=True)

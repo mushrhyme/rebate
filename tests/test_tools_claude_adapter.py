@@ -273,7 +273,7 @@ class TestDispatchToolCall:
             "mappings_dir": mappings,
             "form_definitions_dir": form_defs,
         })
-        assert result.basis in ("cache", "bracket_code", "candidate", "not_found")
+        assert result.basis in ("cache", "bracket_code", "exact_match", "candidate", "not_found")
 
         # search_product
         result = await dispatch_tool_call("search_product", {
@@ -427,7 +427,7 @@ class TestDispatchWithStringPaths:
             "form_definitions_dir": str(form_defs),  # str 경로
         })
         assert isinstance(result, LookupRetailerResult)
-        assert result.basis in ("cache", "bracket_code", "candidate", "not_found")
+        assert result.basis in ("cache", "bracket_code", "exact_match", "candidate", "not_found")
 
     async def test_search_product_with_string_paths_executes(self, dirs):
         """dispatch_tool_call에 str 경로를 넘겨도 search_product가 실행된다."""

@@ -81,6 +81,10 @@ export const api = {
       `/api/v3/documents/${docId}/retry${force ? '?force=true' : ''}`,
       { method: 'POST' },
     ),
+  cancelDocument: (docId: string) =>
+    request<{ doc_id: string; status: string }>(`/api/v3/documents/${docId}/cancel`, { method: 'POST' }),
+  remapCached: (docId: string) =>
+    request<{ doc_id: string; status: string }>(`/api/v3/documents/${docId}/remap-cached`, { method: 'POST' }),
 
   // SSE — 파이프라인 상태 스트리밍 (EventSource 반환, 호출자가 close 책임)
   streamStatus: (docId: string): EventSource => {
@@ -319,7 +323,7 @@ export interface Document {
   doc_id: string
   pdf_filename: string
   form_id: string | null
-  status: 'queued' | 'ocr' | 'analyzing' | 'phase1' | 'phase2' | 'phase3' | 'phase4' | 'pending' | 'done' | 'error'
+  status: 'uploaded' | 'queued' | 'ocr' | 'analyzing' | 'phase1' | 'phase2' | 'phase3' | 'phase4' | 'pending' | 'done' | 'error' | 'xv_warning'
   error_type: string | null
   error_phase: string | null
   error_message: string | null
@@ -331,6 +335,7 @@ export interface Document {
   pages_count: number
   confirmed_at: string | null
   token_usage: Record<string, TokenUsagePhase> | null
+  phase_timings?: Record<string, number>
   uploaded_by_username?: string
   uploaded_by_name?: string
   uploaded_by_name_ja?: string

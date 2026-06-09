@@ -1,6 +1,6 @@
 """CSV 마스터 검색 — 제품 / 소매처."""
 import csv
-from functools import lru_cache
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query
@@ -9,28 +9,37 @@ from ...core.auth import get_current_user
 from ...core.config import get_settings
 
 router = APIRouter(prefix="/api/v3/search", tags=["search"])
+log = logging.getLogger(__name__)
 
 
-# ── CSV 로더 (프로세스 기동 시 1회만 읽음) ─────────────────────
+# ── CSV 로더 — SheetsStore가 내부 캐시를 보유하므로 lru_cache 불필요 ─────
 
-@lru_cache(maxsize=1)
 def _load_products(mappings_dir: Path) -> list[dict]:
     from ...core.sheets_store import get_sheets_store
     store = get_sheets_store()
     if store:
-        return store.read_csv("unit_price.csv")
+        try:
+            return store.read_csv("unit_price.csv")
+        except Exception as e:
+            log.warning("Sheets unit_price.csv 읽기 실패 — 로컬 CSV fallback: %s", e)
     path = mappings_dir / "unit_price.csv"
+    if not path.exists():
+        return []
     with path.open(encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))
 
 
-@lru_cache(maxsize=1)
 def _load_retailers(mappings_dir: Path) -> list[dict]:
     from ...core.sheets_store import get_sheets_store
     store = get_sheets_store()
     if store:
-        return store.read_csv("retail_user.csv")
+        try:
+            return store.read_csv("retail_user.csv")
+        except Exception as e:
+            log.warning("Sheets retail_user.csv 읽기 실패 — 로컬 CSV fallback: %s", e)
     path = mappings_dir / "retail_user.csv"
+    if not path.exists():
+        return []
     with path.open(encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))
 
