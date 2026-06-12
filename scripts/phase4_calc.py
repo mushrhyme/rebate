@@ -44,10 +44,6 @@ def _get_sheets_store():
 with open(BASE / "config" / "form_types.json", encoding="utf-8") as _f:
     FORM_TYPES: dict = json.load(_f)
 
-# Plugin 레지스트리 — formula_type: "plugin" 경로에서 사용
-# 시그니처: fn(cols, shikiri, teiban_joken, cfg) -> float | None
-FORMULA_REGISTRY: dict = {}
-
 # ── 헬퍼 ─────────────────────────────────────────────────────────────────────
 def to_f(v, default=None):
     try:
@@ -242,17 +238,6 @@ def calc_net(form_id, cols, shikiri, teiban_joken=0.0):
     if net_cfg.get("formula_type") == "expr":
         return _eval_expr(net_cfg, cols, shikiri, teiban_joken, _form_id=form_id)
 
-    # ── Layer 2: Plugin 경로 (향후 확장용) ───────────────────────────────────
-    if net_cfg.get("formula_type") == "plugin":
-        plugin_name = net_cfg.get("plugin", "")
-        fn = FORMULA_REGISTRY.get(plugin_name)
-        if fn:
-            return fn(cols, shikiri, teiban_joken, net_cfg)
-        raise ValueError(
-            f"Plugin 미등록 [form={form_id!r}]: plugin={plugin_name!r} — "
-            f"FORMULA_REGISTRY에 등록하거나 formula_type=expr로 변경하세요. "
-            f"등록된 plugin: {sorted(FORMULA_REGISTRY.keys()) or '(없음)'}"
-        )
 
     # ── 하위 호환: named formula 경로 ────────────────────────────────────────
     formula = net_cfg.get("formula")
@@ -814,17 +799,17 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
                       and (r.get("_page_number") or 0) <= p_end]
             b_cover_pages = [cp for cp in cover_pages if cp.get("_page") == cover_pg]
             b_detail_ex = sum(r["_kin_gaku"] for r in b_rows)
-            b_jishos = {r.get("jisho") for r in b_rows if r.get("jisho")}
+            b_jishos = {r.get(_breakdown_field) for r in b_rows if _breakdown_field and r.get(_breakdown_field)}
             b_xv = calc_cross_validation(
                 form_cfg, b_rows, b_cover_pages, {}, b_detail_ex,
                 jisho_filter=b_jishos or None,
             )
-            jisho_label = b_rows[0].get("jisho") if b_rows else f"묶음 {b['bundle_idx']+1}"
+            jisho_label = (b_rows[0].get(_breakdown_field) if (_breakdown_field and b_rows) else None) or f"묶음 {b['bundle_idx']+1}"
             bundle_xv_list.append({
                 "bundle_idx": b["bundle_idx"],
                 "jisho": jisho_label,
                 "cover_page": cover_pg,
-                "xv": [{"label": l, "expected": e, "actual": a, "ok": ok}
+                "xv": [{"label": l, "expected": e, "actual": a, "ok": ok, "xv_type": "simple"}
                        for l, e, a, ok in b_xv],
             })
 
@@ -917,7 +902,7 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
         payload = {
             "doc_id":  doc_id,
             "form_id": form_id,
-            "xv":      [{"label": l, "expected": e, "actual": a, "ok": ok}
+            "xv":      [{"label": l, "expected": e, "actual": a, "ok": ok, "xv_type": "simple"}
                         for l, e, a, ok in xv],
             "rows":    [_export(r) for r in rows_out],
             "summary": summary,

@@ -38,7 +38,6 @@
       "type": "object",
       "oneOf": [
         { "$ref": "#/definitions/NetExpr" },
-        { "$ref": "#/definitions/NetPlugin" },
         { "$ref": "#/definitions/NetLegacy" }
       ]
     },
@@ -106,20 +105,7 @@
       },
       "additionalProperties": false
     },
-    "NetPlugin": {
-      "type": "object",
-      "required": ["formula_type", "plugin"],
-      "properties": {
-        "formula_type": { "type": "string", "enum": ["plugin"] },
-        "plugin": {
-          "type": "string",
-          "minLength": 1,
-          "description": "FORMULA_REGISTRY キー名. 開発者が手動登録が必要."
-        }
-      },
-      "additionalProperties": true
-    },
-    "NetLegacy": {
+"NetLegacy": {
       "type": "object",
       "required": ["formula"],
       "properties": {

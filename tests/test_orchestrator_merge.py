@@ -16,21 +16,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# ── 외부 의존 모듈 mock (asyncpg 등이 test 환경에 없음) ──────────────────────
-# orchestrator → database → asyncpg 체인을 차단
-
-_ASYNCPG_MOCK = MagicMock()
-sys.modules.setdefault("asyncpg", _ASYNCPG_MOCK)
-sys.modules.setdefault("asyncpg.pool", _ASYNCPG_MOCK.pool)
-
-# azure / google drive 의존도 차단
-for _mod in [
-    "azure", "azure.ai", "azure.ai.formrecognizer",
-    "google", "google.oauth2", "google.auth",
-    "google.auth.transport", "google.auth.transport.requests",
-    "googleapiclient", "googleapiclient.discovery",
-]:
-    sys.modules.setdefault(_mod, MagicMock())
+# NOTE: 과거 여기서 asyncpg/azure/google을 sys.modules에 MagicMock으로 심었으나
+# (PostgreSQL 시절 orchestrator import 차단용), AWS 전환 후 불필요해졌고
+# 모듈 수준 sys.modules 오염이 같은 세션의 다른 테스트(phase4_regression의
+# Sheets 읽기)까지 가짜 모듈을 쓰게 만들어 제거함 (2026-06-12).
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -84,16 +73,13 @@ def _mock_settings(tmp_path, mappings, form_defs, extracted):
 
 
 def _make_db_row(mapping_type, ocr_name, confirmed_code, confirmed_name=""):
-    """DB row처럼 동작하는 MagicMock."""
-    data = {
+    """매핑 행 — PostgreSQL 제거 후 get_all_mappings는 S3 JSON dict 목록을 반환한다."""
+    return {
         "mapping_type": mapping_type,
         "ocr_name": ocr_name,
         "confirmed_code": confirmed_code,
         "confirmed_name": confirmed_name,
     }
-    row = MagicMock()
-    row.__getitem__ = lambda self, k: data[k]
-    return row
 
 
 # ── 1. 직접 import 제거 검증 (AST — 실제 import 불필요) ───────────────────────
@@ -171,15 +157,15 @@ class TestMergeConfirmedMappings:
         doc_id = "test_doc_001"
         _make_phase3_json(extracted, doc_id)
 
-        mock_pool = AsyncMock()
-        mock_pool.fetch = AsyncMock(return_value=mock_db_rows)
+        # PostgreSQL 제거 후 데이터 접근은 get_all_mappings(S3 JSON) 경유
         mock_settings = _mock_settings(tmp_path, mappings, form_defs, extracted)
         confirm_calls: list[dict] = []
 
         async def _fake_confirm(**kwargs):
             confirm_calls.append(kwargs)
 
-        with patch("backend.pipeline.orchestrator.get_pool", return_value=mock_pool), \
+        with patch("backend.pipeline.orchestrator.get_all_mappings",
+                   AsyncMock(return_value=mock_db_rows)), \
              patch("backend.pipeline.orchestrator.get_settings", return_value=mock_settings), \
              patch("backend.pipeline.orchestrator.confirm_mapping",
                    side_effect=_fake_confirm):
@@ -280,11 +266,11 @@ class TestMergeWritesToCsv:
         doc_id = "doc_real_test"
         _make_phase3_json(extracted, doc_id)
 
-        mock_pool = AsyncMock()
-        mock_pool.fetch = AsyncMock(return_value=mock_db_rows)
+        # PostgreSQL 제거 후 데이터 접근은 get_all_mappings(S3 JSON) 경유
         mock_settings = _mock_settings(tmp_path, mappings, form_defs, extracted)
 
-        with patch("backend.pipeline.orchestrator.get_pool", return_value=mock_pool), \
+        with patch("backend.pipeline.orchestrator.get_all_mappings",
+                   AsyncMock(return_value=mock_db_rows)), \
              patch("backend.pipeline.orchestrator.get_settings", return_value=mock_settings):
             from backend.pipeline.orchestrator import _merge_confirmed_mappings
             await _merge_confirmed_mappings(doc_id)

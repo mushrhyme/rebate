@@ -158,7 +158,7 @@ def _make_doc_id(stem: str) -> str:
     """파일명 stem → 안전한 doc_id. 공백·점·괄호를 정규화하고 [\w\-]만 남긴다."""
     import unicodedata
     stem = unicodedata.normalize("NFC", stem)
-    s = re.sub(r"\s*\([^)]*\)", "", stem)
+    s = re.sub(r"\s*\(\d+\)", "", stem)  # Windows 복사 번호 " (1)" 만 제거
     s = re.sub(r"[\s.]+", "_", s)
     s = re.sub(r"[^\w\-]", "", s)
     s = re.sub(r"_+", "_", s).strip("_")
@@ -209,7 +209,7 @@ async def upload_document(
     if existing:
         status = existing["status"]
         if status in ("queued", "ocr", "analyzing", "phase1", "phase2", "phase3", "phase4"):
-            raise HTTPException(status_code=409, detail=f"이미 분석 중입니다 (상태: {status}). 완료 후 재시도하세요.")
+            raise HTTPException(status_code=409, detail=f"이미 분석 중입니다 (상태: {status}). 완료 후 재시도하거나, 서버 재시작 등으로 멈춘 경우 문서 상세에서 '강제 재시작'을 사용하세요.")
         if status in ("pending", "done", "xv_warning"):
             raise HTTPException(status_code=409, detail=f"이미 분석된 문서입니다 (상태: {status}). 재분석은 문서 상세에서 진행하세요.")
         # status == "error" → 재실행 허용
@@ -283,7 +283,11 @@ async def get_page_image(
     img_path = _resolve_page_file(pages_dir, page, "page_*.png")
     if not img_path:
         raise HTTPException(status_code=404, detail=f"페이지 {page} 이미지 없음")
-    return FileResponse(str(img_path), media_type="image/png")
+    return FileResponse(
+        str(img_path),
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @router.get("/{doc_id}/page-bbox")
@@ -301,10 +305,15 @@ async def get_page_bbox(
     if not json_path:
         raise HTTPException(status_code=404, detail=f"페이지 {page} bbox 없음")
     import json as _json
+    from fastapi.responses import Response as _Response
     content = json_path.read_text(encoding="utf-8")
     if not content.strip():
         return {"page": page, "width": 0, "height": 0, "lines": []}
-    return _json.loads(content)
+    return _Response(
+        content=content,
+        media_type="application/json",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @router.get("/{doc_id}/pdf")
@@ -423,7 +432,9 @@ async def retry_document(
     if not doc:
         raise HTTPException(status_code=404, detail="문서 없음")
     if doc["status"] in ("queued", "ocr", "analyzing", "phase1", "phase2", "phase3", "phase4"):
-        raise HTTPException(status_code=400, detail="현재 분석 중인 문서입니다. 완료 후 재분석하세요.")
+        if not force:
+            raise HTTPException(status_code=400, detail="현재 분석 중인 문서입니다. 완료 후 재분석하거나 ?force=true 로 강제 재시작하세요.")
+        log.warning("[%s] force retry: 분석 중 상태(%s)를 강제 초기화합니다", doc_id, doc["status"])
 
     settings = get_settings()
     pdf_filename = doc.get("pdf_filename", "")
@@ -456,6 +467,17 @@ async def retry_document(
             for f in extracted_dir.glob("phase2_partial_*.json"):
                 f.unlink()
 
+    # S3 extracted 무효화 — 로컬만 지우면 서버 재시작·resume 시
+    # S3의 이전 실행 산출물이 복원되어 stale 결과가 부활할 수 있다
+    def _purge_s3_extracted() -> None:
+        from ...core.s3_store import delete_key, list_keys
+        for key in list_keys(f"documents/{doc_id}/extracted/"):
+            delete_key(key)
+    try:
+        await asyncio.to_thread(_purge_s3_extracted)
+    except Exception:
+        log.warning("[%s] S3 extracted 무효화 실패 (무시하고 계속)", doc_id, exc_info=True)
+
     await clear_mappings(doc_id)
     await reset_document_for_retry(doc_id)
 
@@ -474,10 +496,10 @@ async def remap_cached(
     doc = await get_document(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="문서 없음")
-    if doc["status"] != "pending":
+    if doc["status"] not in ("pending", "done", "xv_warning"):
         raise HTTPException(
             status_code=400,
-            detail=f"pending 상태 문서에서만 사용할 수 있습니다 (현재: {doc['status']})",
+            detail=f"pending/done 상태 문서에서만 사용할 수 있습니다 (현재: {doc['status']})",
         )
     background_tasks.add_task(resume_phase3_with_cache, doc_id)
     return {"doc_id": doc_id, "status": "phase3"}

@@ -192,6 +192,7 @@ function CandidateCard({
           (res as ProductResult[]).slice(0, 5).map((r): MappingCandidate => ({
             code: r.code, name: r.name,
             volume: r.volume,
+            case_qty: r.spec || undefined,
             shikiri: r.sikiri ?? undefined,
             honbucho: r.honbucho ?? undefined,
           }))
@@ -338,9 +339,10 @@ function CandidateCard({
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px 10px', marginTop: 3 }}>
                   <span style={{ fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>{c.code}</span>
-                  {c.volume    && <span style={{ fontSize: 10, color: 'var(--text-3)' }}><span style={{ opacity: 0.6 }}>용량 </span>{c.volume}</span>}
-                  {c.shikiri   != null && <span style={{ fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}><span style={{ fontFamily: 'inherit', opacity: 0.6 }}>仕切 </span>{c.shikiri.toLocaleString()}</span>}
-                  {c.honbucho != null && <span style={{ fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}><span style={{ fontFamily: 'inherit', opacity: 0.6 }}>本部長 </span>{c.honbucho.toLocaleString()}</span>}
+                  {c.volume    && <span style={{ fontSize: 10, color: 'var(--text-3)' }}><span style={{ opacity: 0.6 }}>용량 </span>{c.volume}g</span>}
+                  {c.case_qty  && <span style={{ fontSize: 10, color: 'var(--text-3)' }}><span style={{ opacity: 0.6 }}>규격 </span>{c.case_qty}</span>}
+                  {c.shikiri   != null && c.shikiri > 0 && <span style={{ fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}><span style={{ fontFamily: 'inherit', opacity: 0.6 }}>仕切 </span>{c.shikiri.toLocaleString()}</span>}
+                  {c.honbucho != null && c.honbucho > 0 && <span style={{ fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}><span style={{ fontFamily: 'inherit', opacity: 0.6 }}>本部長 </span>{c.honbucho.toLocaleString()}</span>}
                 </div>
               </div>
             </label>

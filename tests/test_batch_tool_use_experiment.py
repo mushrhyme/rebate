@@ -46,6 +46,19 @@ def _names(n: int) -> list[str]:
     return [f"テスト店舗{i:04d}" for i in range(n)]
 
 
+def _seed_cache(mappings: Path, names: list[str], code: str = "R001") -> None:
+    """lookup_retailer가 code를 반환하도록 캐시를 시딩.
+
+    후보 외 코드 거부 계약(2026-06-12)상 SUCCESS 시나리오의 confirm(R001)은
+    lookup이 R001을 반환한 경우에만 수락된다."""
+    import csv as _csv
+    with (mappings / "ocr_retailer.csv").open("w", encoding="utf-8-sig", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(["ocr_name", "retailer_code", "retailer_name"])
+        for n in names:
+            w.writerow([n, code, n])
+
+
 # ── 1. 정상 시나리오 ──────────────────────────────────────────────────────────
 
 class TestSuccessScenario:
@@ -95,6 +108,7 @@ class TestSuccessScenario:
         """SUCCESS 시나리오: lookup + confirm = 2 tool calls per retailer."""
         mappings, form_defs = tmp_dirs
         n = 5
+        _seed_cache(mappings, _names(n))
         result = await run_batch_retailer_experiment(
             _names(n), mappings, form_defs, scenario=SCENARIO_SUCCESS
         )
@@ -116,6 +130,7 @@ class TestSuccessScenario:
     async def test_success_confirmed_code(self, tmp_dirs):
         """SUCCESS 시나리오: confirmed_code가 R001로 기록된다."""
         mappings, form_defs = tmp_dirs
+        _seed_cache(mappings, _names(5))
         result = await run_batch_retailer_experiment(
             _names(5), mappings, form_defs, scenario=SCENARIO_SUCCESS
         )
@@ -332,6 +347,7 @@ class TestMetricsAccumulation:
         """SUCCESS: confirm_mapping metrics가 누적된다."""
         mappings, form_defs = tmp_dirs
         n = 10
+        _seed_cache(mappings, _names(n))
         await run_batch_retailer_experiment(
             _names(n), mappings, form_defs, scenario=SCENARIO_SUCCESS
         )

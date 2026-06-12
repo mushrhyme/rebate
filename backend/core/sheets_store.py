@@ -1,12 +1,13 @@
 """Google Sheets 기반 매핑 CSV 저장소."""
 import io
 import csv as _csv
+import os
 import pickle
+import time
 from pathlib import Path
 from typing import Optional
 
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
+from google.auth.transport.requests import AuthorizedSession, Request
 
 _TOKEN_PATH = Path.home() / ".google-cli" / "token.pickle"
 _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -22,45 +23,69 @@ TAB_MAP: dict[str, str] = {
 }
 
 
+_SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets"
+
+
 class SheetsStore:
     """Google Sheets 기반 매핑 데이터 저장소.
 
-    - 읽기: 탭별로 프로세스 내 메모리 캐시 (1회 fetch 후 재사용)
+    - 읽기: 탭별로 프로세스 내 메모리 캐시 (TTL 만료 시 재조회 —
+      현업이 Sheets를 직접 수정해도 백엔드 재시작 없이 반영되도록)
     - 쓰기(캐시): Sheets에 행 추가 후 메모리 캐시 무효화
+    Transport: requests (urllib3) — httplib2 C SSL heap corruption 회피
     """
 
-    def __init__(self, spreadsheet_id: str):
+    def __init__(self, spreadsheet_id: str, ttl_seconds: float | None = None):
         self._id = spreadsheet_id
-        self._cache: dict[str, list[dict]] = {}
-        self._service = self._build_service()
+        if ttl_seconds is None:
+            ttl_seconds = float(os.getenv("SHEETS_CACHE_TTL", "300"))
+        self._ttl = ttl_seconds
+        # tab → (cached_at_monotonic, rows)
+        self._cache: dict[str, tuple[float, list[dict]]] = {}
+        self._session = self._build_session()
 
-    def _build_service(self):
+    def _build_session(self) -> AuthorizedSession:
         with open(_TOKEN_PATH, "rb") as f:
             creds = pickle.load(f)
         if creds.expired and creds.refresh_token:
             creds.refresh(Request())
-        return build("sheets", "v4", credentials=creds)
+        return AuthorizedSession(creds)
+
+    def _get(self, path: str, **params) -> dict:
+        url = f"{_SHEETS_BASE}/{self._id}/{path}"
+        resp = self._session.get(url, params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _put(self, path: str, body: dict, **params) -> dict:
+        url = f"{_SHEETS_BASE}/{self._id}/{path}"
+        resp = self._session.put(url, json=body, params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _post(self, path: str, body: dict, **params) -> dict:
+        url = f"{_SHEETS_BASE}/{self._id}/{path}"
+        resp = self._session.post(url, json=body, params=params)
+        resp.raise_for_status()
+        return resp.json()
 
     def tab_for(self, csv_filename: str) -> Optional[str]:
         return TAB_MAP.get(csv_filename)
 
     def read_csv(self, csv_filename: str) -> list[dict]:
-        """CSV 파일명에 대응하는 Sheets 탭을 list[dict]로 반환 (메모리 캐시)."""
+        """CSV 파일명에 대응하는 Sheets 탭을 list[dict]로 반환 (TTL 메모리 캐시)."""
         tab = self.tab_for(csv_filename)
         if tab is None:
             return []
-        if tab not in self._cache:
-            self._cache[tab] = self._fetch(tab)
-        return self._cache[tab]
+        entry = self._cache.get(tab)
+        now = time.monotonic()
+        if entry is None or (now - entry[0]) >= self._ttl:
+            self._cache[tab] = (now, self._fetch(tab))
+        return self._cache[tab][1]
 
     def _fetch(self, tab: str) -> list[dict]:
         try:
-            result = (
-                self._service.spreadsheets()
-                .values()
-                .get(spreadsheetId=self._id, range=f"{tab}!A1:ZZ")
-                .execute()
-            )
+            result = self._get("values/" + tab + "!A1:ZZ")
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning("Sheets 탭 '%s' 읽기 실패 — 빈 결과 반환: %s", tab, e)
@@ -91,37 +116,30 @@ class SheetsStore:
         tab = self.tab_for(csv_filename)
         if tab is None:
             return
-        result = (
-            self._service.spreadsheets()
-            .values()
-            .get(spreadsheetId=self._id, range=f"{tab}!A1:ZZ")
-            .execute()
-        )
+        result = self._get(f"values/{tab}!A1:ZZ")
         raw = result.get("values", [])
         key_values = [values[i] for i in key_cols]
-        found_sheet_row: int | None = None  # 1-indexed Sheets 행 번호
+        found_sheet_row: int | None = None
         if len(raw) > 1:
             headers = raw[0]
             for i, row in enumerate(raw[1:]):
                 padded = row + [""] * (len(headers) - len(row))
                 if [padded[k] for k in key_cols] == key_values:
-                    found_sheet_row = i + 2  # +1 헤더, +1 1-indexed
+                    found_sheet_row = i + 2
                     break
         if found_sheet_row is not None:
-            self._service.spreadsheets().values().update(
-                spreadsheetId=self._id,
-                range=f"{tab}!A{found_sheet_row}",
-                valueInputOption="RAW",
+            self._put(
+                f"values/{tab}!A{found_sheet_row}",
                 body={"values": [values]},
-            ).execute()
+                valueInputOption="RAW",
+            )
         else:
-            self._service.spreadsheets().values().append(
-                spreadsheetId=self._id,
-                range=f"{tab}!A1",
+            self._post(
+                f"values/{tab}!A1:append",
+                body={"values": [values]},
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
-                body={"values": [values]},
-            ).execute()
+            )
         self._cache.pop(tab, None)
 
     def append_row(self, csv_filename: str, values: list[str]) -> None:
@@ -129,24 +147,22 @@ class SheetsStore:
         tab = self.tab_for(csv_filename)
         if tab is None:
             return
-        self._service.spreadsheets().values().append(
-            spreadsheetId=self._id,
-            range=f"{tab}!A1",
+        self._post(
+            f"values/{tab}!A1:append",
+            body={"values": [values]},
             valueInputOption="RAW",
             insertDataOption="INSERT_ROWS",
-            body={"values": [values]},
-        ).execute()
+        )
         self._cache.pop(tab, None)
 
     def append_to_tab(self, tab_name: str, values: list[str]) -> None:
         """TAB_MAP 등록 없이 임의 탭에 행 추가 (results 탭 등 전용)."""
-        self._service.spreadsheets().values().append(
-            spreadsheetId=self._id,
-            range=f"{tab_name}!A1",
+        self._post(
+            f"values/{tab_name}!A1:append",
+            body={"values": [values]},
             valueInputOption="RAW",
             insertDataOption="INSERT_ROWS",
-            body={"values": [values]},
-        ).execute()
+        )
 
     def write_all(self, csv_filename: str, rows: list[dict], fieldnames: list[str]) -> None:
         """시트 전체를 덮어씀 (헤더 + 모든 행)."""
@@ -154,16 +170,12 @@ class SheetsStore:
         if tab is None:
             return
         values = [fieldnames] + [[row.get(f, "") for f in fieldnames] for row in rows]
-        self._service.spreadsheets().values().clear(
-            spreadsheetId=self._id,
-            range=f"{tab}!A1:ZZ",
-        ).execute()
-        self._service.spreadsheets().values().update(
-            spreadsheetId=self._id,
-            range=f"{tab}!A1",
-            valueInputOption="RAW",
+        self._post(f"values/{tab}!A1:ZZ:clear", body={})
+        self._put(
+            f"values/{tab}!A1",
             body={"values": values},
-        ).execute()
+            valueInputOption="RAW",
+        )
         self._cache.pop(tab, None)
 
     def invalidate(self, csv_filename: str) -> None:
@@ -173,15 +185,20 @@ class SheetsStore:
 
 
 _instance: Optional[SheetsStore] = None
-_init_failed: bool = False
+_init_failed_at: Optional[float] = None
+_INIT_RETRY_COOLDOWN_SECONDS = 60.0
 
 
 def get_sheets_store() -> Optional[SheetsStore]:
-    """설정된 경우 SheetsStore 싱글턴 반환, 미설정이거나 초기화 실패 시 None."""
-    global _instance, _init_failed
+    """설정된 경우 SheetsStore 싱글턴 반환, 미설정이거나 초기화 실패 시 None.
+
+    초기화 실패는 영구 고착하지 않는다 — 쿨다운 후 재시도해서
+    token 갱신 일시 장애가 '프로세스 수명 내내 빈 마스터'로 이어지지 않게 한다."""
+    global _instance, _init_failed_at
     if _instance is not None:
         return _instance
-    if _init_failed:
+    if (_init_failed_at is not None
+            and (time.monotonic() - _init_failed_at) < _INIT_RETRY_COOLDOWN_SECONDS):
         return None
     from .config import get_settings
     sid = get_settings().google_sheets_mappings_id
@@ -189,11 +206,13 @@ def get_sheets_store() -> Optional[SheetsStore]:
         return None
     try:
         _instance = SheetsStore(sid)
+        _init_failed_at = None
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning(
-            "SheetsStore 초기화 실패 — 로컬 CSV로 fallback: %s", e
+            "SheetsStore 초기화 실패 — %d초 후 재시도, 그동안 로컬 CSV fallback: %s",
+            int(_INIT_RETRY_COOLDOWN_SECONDS), e,
         )
-        _init_failed = True
+        _init_failed_at = time.monotonic()
         return None
     return _instance

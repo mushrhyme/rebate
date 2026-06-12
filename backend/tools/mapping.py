@@ -42,6 +42,18 @@ _LEGAL_MARKERS = [
     "(株)", "(有)", "(合)",
 ]
 
+# 제품 OCR명에 붙는 제조사 prefix — 유사도 계산 전 쿼리 측에서만 제거
+# "農心ジャパン"을 "農心"보다 먼저 시도해야 "農心"만 제거하고 "ジャパン"이 남는 오류를 방지한다
+_MANUFACTURER_PREFIXES = ["農心ジャパン", "農心", "Nongshim", "NONGSHIM"]
+
+
+def _strip_manufacturer_prefix(name: str) -> str:
+    """제조사명 prefix 제거 (유사도 계산용 — unit_price.csv 검색 시 쿼리에만 적용)."""
+    for prefix in _MANUFACTURER_PREFIXES:
+        if name.startswith(prefix):
+            return name[len(prefix):].lstrip()
+    return name
+
 
 def normalize_ocr_name(name: str) -> str:
     """OCR 명칭 정규화: 전각→반각(NFKC) + 법인격 제거 + 공백 압축.
@@ -121,12 +133,19 @@ class RetailerCandidate(TypedDict):
 class ProductCandidate(TypedDict):
     """search_product() candidates 리스트의 항목 구조.
 
-    similarity: difflib.SequenceMatcher 기반, 항상 (0.3, 1.0] 범위.
-    candidates는 similarity 내림차순 정렬, product_code 기준 dedup.
+    프런트엔드 MappingCandidate 인터페이스와 필드명을 일치시켜 직접 저장 가능.
+    score: difflib.SequenceMatcher 기반, 항상 (0.3, 1.0] 범위.
+    candidates는 score 내림차순 정렬, code 기준 dedup.
+    volume: unit_price.csv 제품용량 (g 단위 문자열). 없으면 빈 문자열.
+    case_qty: 규격 컬럼 값 (예: "12×2"). 없으면 빈 문자열.
     """
-    product_code: str
-    product_name: str
-    similarity: float  # (0.3, 1.0], 소수점 3자리
+    code: str
+    name: str
+    score: float       # (0.3, 1.0], 소수점 3자리
+    volume: str        # 제품용량 (Claude 용량 대조용, UI 표시용)
+    case_qty: str      # 규격 (UI 표시용 — 개입수 식별)
+    shikiri: float     # 시키리 단가
+    honbucho: float    # 본부장 단가
 
 
 # ── 공개 Result 타입 ──────────────────────────────────────────────────────────
@@ -160,9 +179,9 @@ class SearchProductResult:
       - basis ∈ {"cache", "candidate", "not_found"}
       - basis="cache" → product_code is not None, confidence=1.0, candidates=[]
       - basis="candidate" → product_code is None, len(candidates) >= 1,
-                            confidence = candidates[0]["similarity"]
+                            confidence = candidates[0]["score"]
       - basis="not_found" → product_code is None, candidates=[], confidence=0.0
-      - candidates는 similarity 내림차순 정렬, product_code 기준 dedup
+      - candidates는 score 내림차순 정렬, code 기준 dedup
     """
     product_code: str | None
     basis: Literal["cache", "candidate", "not_found"]
@@ -348,7 +367,7 @@ async def confirm_mapping(
 async def search_product(
     ocr_name: str,
     mappings_dir: Path,
-    top_k: int = 5,
+    top_k: int = 15,
 ) -> SearchProductResult:
     """OCR 제품명 → 제품코드 조회.
 
@@ -392,7 +411,7 @@ async def search_product(
         return SearchProductResult(
             product_code=None,
             basis="candidate",
-            confidence=candidates[0]["similarity"],
+            confidence=candidates[0]["score"],
             candidates=candidates,
         )
 
@@ -465,23 +484,22 @@ async def lookup_retailer(
         bracket_csv_name = _parse_bracket_code_csv(form_md)
         if bracket_csv_name:
             bracket_path = mappings_dir / bracket_csv_name
-            if bracket_path.exists():
-                m = re.search(r'\((\d+)\)', ocr_name)
-                if m:
-                    bracket_code = m.group(1)
-                    domae_map: dict[str, str] = {}
-                    for r in _read_csv(bracket_path):
-                        keys = list(r.keys())
-                        if len(keys) >= 2:
-                            domae_map[r[keys[0]]] = r[keys[1]]
-                    retailer_code = domae_map.get(bracket_code, "")
-                    if retailer_code:
-                        _record_lookup_retailer("bracket_code")
-                        return LookupRetailerResult(
-                            retailer_code=retailer_code,
-                            basis="bracket_code",
-                            confidence=1.0,
-                        )
+            m = re.search(r'\((\d+)\)', ocr_name)
+            if m:
+                bracket_code = m.group(1)
+                domae_map: dict[str, str] = {}
+                for r in _read_csv(bracket_path):
+                    keys = list(r.keys())
+                    if len(keys) >= 2:
+                        domae_map[r[keys[0]]] = r[keys[1]]
+                retailer_code = domae_map.get(bracket_code, "")
+                if retailer_code:
+                    _record_lookup_retailer("bracket_code")
+                    return LookupRetailerResult(
+                        retailer_code=retailer_code,
+                        basis="bracket_code",
+                        confidence=1.0,
+                    )
 
     # ── ③ 유사도 검색 ───────────────────────────────────────────────────────────
     candidates = _search_retailer_candidates(
@@ -517,6 +535,30 @@ async def lookup_retailer(
 
 # ── 내부 검색 헬퍼 ────────────────────────────────────────────────────────────
 
+def _extract_volume_g(text: str) -> float | None:
+    """텍스트에서 용량(g 단위)을 추출. 없으면 None."""
+    m = re.search(r'(\d+(?:\.\d+)?)\s*g\b', text, re.IGNORECASE)
+    return float(m.group(1)) if m else None
+
+
+def _tokenize(text: str) -> set[str]:
+    """문자 종류별 토큰 분리 (히라가나/가타카나/한자/알파벳/숫자 연속 구간).
+
+    단어 순서가 뒤바뀐 경우에도 Jaccard 유사도가 높게 나오도록 한다.
+    """
+    return set(re.findall(r'[ぁ-ん]+|[ァ-ヶー]+|[一-龯々]+|[a-zA-Z]+|\d+', text))
+
+
+# 용량 보정 파라미터
+_VOL_BOOST = 0.15       # OCR 용량과 DB 용량이 ±5% 이내 일치할 때 가산
+_VOL_PENALTY = 0.20     # OCR 용량이 있는데 DB 용량이 명백히 다를 때 감산
+_VOL_RATIO_THRESHOLD = 0.95  # min/max 비율 ≥ 이 값이면 "일치"로 판정
+
+# 점수 혼합 비율
+_SEQ_WEIGHT = 0.6   # SequenceMatcher 비중 (문자열 연속 일치)
+_JAC_WEIGHT = 0.4   # Jaccard 비중 (단어 집합 일치, 순서 무관)
+
+
 def _search_product_candidates(
     ocr_name: str,
     mappings_dir: Path,
@@ -524,11 +566,16 @@ def _search_product_candidates(
 ) -> list[ProductCandidate]:
     """unit_price.csv에서 제품명 유사도 기반 후보 검색.
 
-    unit_price.csv 스키마: 제품코드, 제품명, 시키리, 본부장, 단일상자환산값, 2합환산값
+    점수 = SequenceMatcher * 0.6 + Jaccard(토큰) * 0.4 + 용량 보정
+    용량 보정: OCR에 g 정보가 있을 때만 적용.
+      - DB 용량과 ±5% 이내 → +_VOL_BOOST
+      - DB 용량이 명백히 다름  → -_VOL_PENALTY
     동일 product_code가 여러 행에 있으면 최고 점수 1건만 유지.
     컬럼이 없거나 파일이 없으면 빈 리스트 반환.
     """
-    norm_query = normalize_ocr_name(ocr_name)
+    norm_query = _strip_manufacturer_prefix(normalize_ocr_name(ocr_name))
+    query_vol = _extract_volume_g(norm_query)
+    query_tokens = _tokenize(norm_query)
     scored: list[ProductCandidate] = []
     seen_codes: set[str] = set()
 
@@ -538,8 +585,16 @@ def _search_product_candidates(
         return []
 
     name_col, code_col = "제품명", "제품코드"
+    vol_col = "제품용량"
+    spec_col = "규격"
     if name_col not in rows[0] or code_col not in rows[0]:
         return []
+
+    def _num(v: str) -> float:
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return 0.0
 
     for row in rows:
         name_val = row.get(name_col, "")
@@ -549,18 +604,34 @@ def _search_product_candidates(
         norm_name = normalize_ocr_name(name_val)
         if not norm_name:
             continue
-        score = difflib.SequenceMatcher(None, norm_query, norm_name).ratio()
+
+        seq_score = difflib.SequenceMatcher(None, norm_query, norm_name).ratio()
+        name_tokens = _tokenize(norm_name)
+        union = query_tokens | name_tokens
+        jac_score = len(query_tokens & name_tokens) / len(union) if union else 0.0
+        score = _SEQ_WEIGHT * seq_score + _JAC_WEIGHT * jac_score
+
+        if query_vol is not None:
+            db_vol = _num(row.get(vol_col, ""))
+            if db_vol > 0:
+                vol_ratio = min(query_vol, db_vol) / max(query_vol, db_vol)
+                score += _VOL_BOOST if vol_ratio >= _VOL_RATIO_THRESHOLD else -_VOL_PENALTY
+
         if score > 0.3:
             scored.append(ProductCandidate(
-                product_code=code_val,
-                product_name=name_val,
-                similarity=round(score, 3),
+                code=code_val,
+                name=name_val.strip(),
+                score=round(score, 3),
+                volume=row.get(vol_col, ""),
+                case_qty=row.get(spec_col, ""),
+                shikiri=_num(row.get("시키리", "")),
+                honbucho=_num(row.get("본부장", "")),
             ))
 
-    scored.sort(key=lambda x: x["similarity"], reverse=True)
+    scored.sort(key=lambda x: x["score"], reverse=True)
     deduped: list[ProductCandidate] = []
     for item in scored:
-        code = item["product_code"]
+        code = item["code"]
         if code not in seen_codes:
             seen_codes.add(code)
             deduped.append(item)

@@ -90,11 +90,17 @@ _APPLY_PROMPT = """\
 """
 
 
+class ImageData(BaseModel):
+    b64: str
+    mime: str = "image/png"
+
+
 class ChatMessage(BaseModel):
     role: str  # "user" | "assistant"
     content: str
-    image_b64: str | None = None
-    image_mime: str | None = None
+    image_b64: str | None = None   # legacy 단일 이미지
+    image_mime: str | None = None  # legacy 단일 이미지
+    images: list[ImageData] | None = None  # 다중 이미지
 
 
 class ChatRequest(BaseModel):
@@ -106,16 +112,20 @@ class ChatRequest(BaseModel):
 def _to_claude_messages(messages: list[ChatMessage]) -> list[dict]:
     result = []
     for msg in messages:
-        if msg.role == "user" and msg.image_b64:
+        img_blocks: list[dict] = []
+        if msg.images:
+            img_blocks = [
+                {"type": "image", "source": {"type": "base64", "media_type": img.mime, "data": img.b64}}
+                for img in msg.images
+            ]
+        elif msg.image_b64:
+            img_blocks = [
+                {"type": "image", "source": {"type": "base64", "media_type": msg.image_mime or "image/png", "data": msg.image_b64}}
+            ]
+
+        if img_blocks:
             content: list[dict] | str = [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": msg.image_mime or "image/png",
-                        "data": msg.image_b64,
-                    },
-                },
+                *img_blocks,
                 {"type": "text", "text": msg.content or "(이미지 첨부)"},
             ]
         else:
@@ -225,8 +235,12 @@ async def apply(body: ChatRequest, user: dict = Depends(get_current_user)):
                 "saved_at": datetime.now(timezone.utc).isoformat(),
             })
 
+            # MD 저장 → form_types.json 자동 동기화 (백그라운드, 실패해도 저장은 유효)
+            from .forms import schedule_auto_sync
+            schedule_auto_sync(body.form_id)
+
             tbd_count = len(re.findall(r"\bTBD\b", updated))
-            yield f"data: {json.dumps({'type': 'done', 'tbd_count': tbd_count, 'content_hash': new_hash})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'tbd_count': tbd_count, 'content_hash': new_hash, 'auto_sync': 'started'})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 

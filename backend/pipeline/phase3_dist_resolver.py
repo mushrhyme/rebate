@@ -113,17 +113,17 @@ def resolve_dist_code_for_retailer(
         )
 
     # ── ① ocr_dist.csv 캐시 조회 ─────────────────────────────────────────────
+    # path.exists() 선차단 금지 — _read_csv가 Sheets 우선 조회 (로컬 파일 없는 운영 모드 지원)
     dist_cache_path = mappings_dir / "ocr_dist.csv"
-    if dist_cache_path.exists():
-        for row in _read_csv(dist_cache_path):
-            if (row.get("form_id", "") == form_id
-                    and row.get("issuer_fingerprint", "") == issuer_fingerprint
-                    and row.get("retailer_code", "") == retailer_code):
-                return DistResolution(
-                    dist_code=row.get("dist_code", ""),
-                    basis=_BASIS_CACHE,
-                    needs_confirmation=False,
-                )
+    for row in _read_csv(dist_cache_path):
+        if (row.get("form_id", "") == form_id
+                and row.get("issuer_fingerprint", "") == issuer_fingerprint
+                and row.get("retailer_code", "") == retailer_code):
+            return DistResolution(
+                dist_code=row.get("dist_code", ""),
+                basis=_BASIS_CACHE,
+                needs_confirmation=False,
+            )
 
     # ── ② retail_user.csv에서 소매처코드 기준 후보 수집 ──────────────────────
     retail_path = mappings_dir / "retail_user.csv"

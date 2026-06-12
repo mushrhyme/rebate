@@ -491,10 +491,12 @@ def _build_product_decision_from_json(
     candidates: list | None = None,
 ) -> ProductMappingDecision:
     """파싱된 JSON에서 ProductMappingDecision을 생성한다."""
+    _cands = list(candidates or [])
     decision = data.get("decision", "not_found")
     if decision != "confirmed":
         return ProductMappingDecision(ocr_name=ocr_name, product_code=None,
-                                      product_name="", basis="not_found", confidence=0.0)
+                                      product_name="", basis="not_found", confidence=0.0,
+                                      candidates=_cands)
 
     product_code = (data.get("product_code") or "").strip()
     master_name  = (data.get("master_name")  or "").strip()
@@ -503,18 +505,20 @@ def _build_product_decision_from_json(
     if not product_code:
         log.warning("[product_tool_use] '%s': product_code 비어 있음 → pending", ocr_name)
         return ProductMappingDecision(ocr_name=ocr_name, product_code=None,
-                                      product_name="", basis="not_found", confidence=0.0)
+                                      product_name="", basis="not_found", confidence=0.0,
+                                      candidates=_cands)
 
     if valid_codes and product_code not in valid_codes:
         log.warning("[product_tool_use] '%s': product_code '%s' 후보 밖 → pending",
                     ocr_name, product_code)
         return ProductMappingDecision(ocr_name=ocr_name, product_code=None,
-                                      product_name="", basis="not_found", confidence=0.0)
+                                      product_name="", basis="not_found", confidence=0.0,
+                                      candidates=_cands)
 
     if not master_name:
         for c in (candidates or []):
-            if isinstance(c, dict) and c.get("product_code") == product_code:
-                name = (c.get("product_name") or "").strip()
+            if isinstance(c, dict) and c.get("code") == product_code:
+                name = (c.get("name") or "").strip()
                 if name:
                     log.info("[product_tool_use] '%s': master_name 보완 '%s'", ocr_name, name)
                     master_name = name
@@ -522,7 +526,8 @@ def _build_product_decision_from_json(
         if not master_name:
             log.warning("[product_tool_use] '%s': master_name 없음 → pending", ocr_name)
             return ProductMappingDecision(ocr_name=ocr_name, product_code=None,
-                                          product_name="", basis="not_found", confidence=0.0)
+                                          product_name="", basis="not_found", confidence=0.0,
+                                          candidates=_cands)
 
     return ProductMappingDecision(ocr_name=ocr_name, product_code=product_code,
                                   product_name=master_name, basis="tool_use",
@@ -547,16 +552,34 @@ async def _run_single_product_mapping(
     product_tools = _build_product_tools()
     ctx           = {"mappings_dir": mappings_dir}
     valid_codes: set[str] = {
-        c["product_code"] for c in candidates
-        if isinstance(c, dict) and c.get("product_code")
+        c["code"] for c in candidates
+        if isinstance(c, dict) and c.get("code")
     }
+    _system_prompt = (
+        "당신은 일본 식품 유통 리베이트 시스템의 제품 매핑 전문가입니다.\n"
+        "OCR로 읽은 제품명을 마스터 데이터의 제품코드에 매핑합니다.\n"
+        "최종 응답은 JSON 객체 하나만 출력한다. 분석·설명·마크다운 금지.\n\n"
+        "## 매핑 판단 규칙\n"
+        "1. 제조사명(農心, Nongshim 등)은 무시한다 — OCR명에 붙어 있어도 제품 식별에 쓰지 않는다.\n"
+        "2. 플레이버·한정어(激辛, キムチ, ブラック, トゥーンバ, スパイシーチキン 등)는 반드시 확인한다.\n"
+        "   - OCR명에 한정어가 있으면 → 동일 한정어가 있는 제품을 선택한다.\n"
+        "   - OCR명에 한정어가 없으면 → 한정어 없는 기본 제품을 선택한다.\n"
+        "3. 용량(68g, 114g, 120g 등)이 OCR명에 명시되어 있으면 후보의 volume 필드와 대조해야 한다.\n"
+        "   - 용량이 일치하는 후보가 있으면 그것을 우선한다.\n"
+        "   - 제품명에서 용량을 추측하지 말 것 — volume 필드 값만 신뢰한다.\n"
+        "4. 형태 한정어(カップ, 袋, バケツ 등)가 마스터명에만 있고 OCR명에 없어도,\n"
+        "   플레이버와 용량이 모두 일치하면 그 제품을 선택한다.\n"
+        "5. 유사도 점수는 참고용일 뿐, 위 규칙이 우선한다.\n"
+        "6. 플레이버·용량 두 조건 중 하나라도 불일치하면 not_found로 반환한다."
+    )
     messages: list[dict] = [{
         "role": "user",
         "content": (
             f"제품명 '{ocr_name}'의 제품코드를 찾아라.\n\n"
             f"처리 순서:\n"
             f"1. search_product 도구로 후보를 조회한다.\n"
-            f"2. 조회 완료 후 최종 응답을 출력한다.\n\n"
+            f"2. 매핑 판단 규칙에 따라 가장 적합한 후보를 고른다.\n"
+            f"3. 최종 응답을 출력한다.\n\n"
             f"최종 응답 형식 (순수 JSON 객체만 — 설명/markdown/code fence 금지):\n\n"
             f"후보가 있으면:\n"
             f'{{"decision": "confirmed", "product_code": "<코드>", "master_name": "<이름>"}}\n\n'
@@ -570,8 +593,9 @@ async def _run_single_product_mapping(
         response = await async_call_with_retry(
             client.messages.create,
             model=model,
-            max_tokens=256,
+            max_tokens=512,
             temperature=0,
+            system=_system_prompt,
             tools=product_tools,
             messages=messages,
         )
@@ -621,8 +645,8 @@ async def _run_single_product_mapping(
                 coerced      = coerce_tool_arguments(spec, full_args)
                 sr           = await dispatch_tool_call(spec, coerced)
                 for c in getattr(sr, "candidates", []):
-                    if isinstance(c, dict) and c.get("product_code"):
-                        valid_codes.add(c["product_code"])
+                    if isinstance(c, dict) and c.get("code"):
+                        valid_codes.add(c["code"])
                 content = json.dumps(asdict(sr), ensure_ascii=False, default=str)
                 tool_results.append({
                     "type": "tool_result", "tool_use_id": block.id, "content": content,
@@ -637,7 +661,8 @@ async def _run_single_product_mapping(
 
     log.warning("[product_tool_use] '%s': end_turn 없이 루프 종료 → pending", ocr_name)
     return ProductMappingDecision(ocr_name=ocr_name, product_code=None,
-                                  product_name="", basis="not_found", confidence=0.0)
+                                  product_name="", basis="not_found", confidence=0.0,
+                                  candidates=list(candidates))
 
 
 async def _build_product_decisions_with_tool_use(
@@ -649,6 +674,7 @@ async def _build_product_decisions_with_tool_use(
     model: str = _TOOL_USE_MODEL,
     concurrency: int = 1,
     _token_acc: ToolUseTokenStats | None = None,
+    product_page: dict[str, int] | None = None,
 ) -> list[ProductMappingDecision]:
     """search_product 캐시 + Tool Use로 ProductMappingDecision 목록 생성.
 
@@ -713,6 +739,8 @@ async def _build_product_decisions_with_tool_use(
                     f"Product Tool Use 실행 오류 ('{ocr_name}'): {exc}"
                 ) from exc
             _merge()
+            if decision.basis == "not_found" and decision.page_number is None:
+                decision.page_number = (product_page or {}).get(ocr_name)
             return decision
 
         if sp.basis == "candidate" and product_client is None:
@@ -723,12 +751,14 @@ async def _build_product_decisions_with_tool_use(
             return ProductMappingDecision(
                 ocr_name=ocr_name, product_code=None, product_name="",
                 basis="not_found", confidence=0.0, error=_reason,
+                page_number=(product_page or {}).get(ocr_name),
             )
 
         _merge()
         return ProductMappingDecision(
             ocr_name=ocr_name, product_code=None, product_name="",
             basis="not_found", confidence=0.0,
+            page_number=(product_page or {}).get(ocr_name),
         )
 
     # 입력 순서 보장: asyncio.gather는 입력 순서대로 결과 반환
@@ -777,6 +807,7 @@ def _batch_result_to_retailer_decisions(
             decisions.append(RetailerMappingDecision(
                 ocr_name=r.ocr_name, retailer_code=None, dist_code="",
                 basis=basis, confidence=0.0,
+                page_number=(customer_page or {}).get(r.ocr_name),
             ))
             continue
 
@@ -1106,12 +1137,12 @@ async def _execute_success_path(
     retailer_name_by_code = {r["소매처코드"]: r["소매처명"] for r in retail_user_rows if r.get("소매처코드")}
     dist_name_by_code     = {r["판매처코드"]: r["판매처명"] for r in retail_user_rows if r.get("판매처코드")}
 
+    # path.exists() 선차단 금지 — _read_csv가 Sheets 우선 조회 (로컬 파일 없는 운영 모드 지원)
     ocr_dist_path = mappings_dir / "ocr_dist.csv"
     cached_dist: dict = {}
-    if ocr_dist_path.exists():
-        for _row in _read_csv(ocr_dist_path):
-            _k = (_row.get("form_id", ""), _row.get("issuer_fingerprint", ""), _row.get("retailer_code", ""))
-            cached_dist[_k] = _row.get("dist_code", "")
+    for _row in _read_csv(ocr_dist_path):
+        _k = (_row.get("form_id", ""), _row.get("issuer_fingerprint", ""), _row.get("retailer_code", ""))
+        cached_dist[_k] = _row.get("dist_code", "")
 
     # ── issuer 추출 ──────────────────────────────────────────────────────────
     issuer: dict = {}
@@ -1125,9 +1156,10 @@ async def _execute_success_path(
     fp_fields = _parse_fingerprint_fields(form_md)
     issuer_fingerprint = _build_issuer_fingerprint(issuer, fp_fields)
 
-    # OCR 명칭 → 첫 등장 페이지 번호 (dist pending items의 page_number에 사용)
+    # OCR 명칭 → 첫 등장 페이지 번호 (pending items의 page_number에 사용)
     _items = phase2_result.get("items", [])
     customer_page: dict[str, int] = {}
+    product_page: dict[str, int] = {}
     for _item in _items:
         _sp = _item.get("source_pages")
         _pg = _sp[0] if _sp else _item.get("page")
@@ -1136,6 +1168,9 @@ async def _execute_success_path(
         _c = _item.get("customer", "")
         if _c and _c not in customer_page:
             customer_page[_c] = _pg
+        _p = _item.get("product", "")
+        if _p and _p not in product_page:
+            product_page[_p] = _pg
 
     # ── Retailer token usage 누적 (batch_result.stats에서) ────────────────────
     # success path에서만 호출됨. fallback 시는 exception.partial_token_stats 경로를 사용.
@@ -1205,6 +1240,7 @@ async def _execute_success_path(
             model=model,
             concurrency=concurrency,
             _token_acc=_token_acc,
+            product_page=product_page,
         )
 
     # ── phase3 output 조립 ────────────────────────────────────────────────────
@@ -1334,6 +1370,14 @@ async def run_phase3_with_tool_use_or_fallback(
     _unique_products_early = list(dict.fromkeys(
         i["product"] for i in _items_early if i.get("product")
     ))
+    _product_page_early: dict[str, int] = {}
+    for _it in _items_early:
+        _sp = _it.get("source_pages")
+        _pg = _sp[0] if _sp else _it.get("page")
+        if _pg:
+            _p = _it.get("product", "")
+            if _p and _p not in _product_page_early:
+                _product_page_early[_p] = _pg
 
     try:
         async with _get_global_tool_use_sem(_global_conc):
@@ -1346,6 +1390,7 @@ async def run_phase3_with_tool_use_or_fallback(
                         product_client=_product_client,
                         model=_model, concurrency=_concurrency,
                         _token_acc=stats.token_usage,
+                        product_page=_product_page_early,
                     )
                 )
                 log.info("[%s] product 조회 선행 시작 (%d개)", doc_id, len(_unique_products_early))

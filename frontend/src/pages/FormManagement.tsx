@@ -40,7 +40,7 @@ async function fileToBase64(file: File): Promise<string> {
 type ChatMsg = {
   role: 'user' | 'assistant'
   text: string
-  imageUrl?: string
+  imageUrls?: string[]
   streaming?: boolean
 }
 
@@ -50,7 +50,7 @@ export function FormManagement() {
   const [selectedId, setSelectedId] = useState<string>('form_01')
   const [chatInput, setChatInput] = useState('')
   const [chatHistory, setChatHistory] = useState<ChatMsg[]>([])
-  const [attachedImage, setAttachedImage] = useState<{ file: File; previewUrl: string } | null>(null)
+  const [attachedImages, setAttachedImages] = useState<{ file: File; previewUrl: string }[]>([])
   const [isSending, setIsSending] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [isSaved, setIsSaved] = useState(false)
@@ -72,8 +72,28 @@ export function FormManagement() {
   const [deletePw, setDeletePw] = useState('')
   const [isDeleting, setIsDeleting] = useState(false)
   const [deleteErr, setDeleteErr] = useState<string | null>(null)
+  const [panelWidth, setPanelWidth] = useState(340)
   const chatEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const chatTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const panelResizeRef = useRef<{ startX: number; startWidth: number } | null>(null)
+
+  function startPanelResize(e: React.MouseEvent) {
+    e.preventDefault()
+    panelResizeRef.current = { startX: e.clientX, startWidth: panelWidth }
+    const onMove = (ev: MouseEvent) => {
+      if (!panelResizeRef.current) return
+      const delta = panelResizeRef.current.startX - ev.clientX
+      setPanelWidth(Math.max(280, Math.min(700, panelResizeRef.current.startWidth + delta)))
+    }
+    const onUp = () => {
+      panelResizeRef.current = null
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
 
   const displayMd = contentByForm[selectedId] ?? ''
   const tbdCount = countTbd(displayMd)
@@ -97,19 +117,18 @@ export function FormManagement() {
   }, [selectedId])
 
   function handleImageSelect(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    if (!file) return
-    setAttachedImage({ file, previewUrl: URL.createObjectURL(file) })
+    const files = Array.from(e.target.files || [])
+    if (!files.length) return
+    setAttachedImages(prev => [...prev, ...files.map(f => ({ file: f, previewUrl: URL.createObjectURL(f) }))])
     e.target.value = ''
   }
 
   async function handleSend() {
     const text = chatInput.trim()
-    if ((!text && !attachedImage) || isSending) return
+    if ((!text && !attachedImages.length) || isSending) return
 
     const userText = text || '(이미지 첨부)'
-    const imageFile = attachedImage?.file
-    const imageUrl = attachedImage?.previewUrl
+    const imageUrls = attachedImages.map(img => img.previewUrl)
 
     setIsSaved(false)
     setIsChatOpen(true)
@@ -121,21 +140,24 @@ export function FormManagement() {
 
     setChatHistory(h => [
       ...h,
-      { role: 'user', text: userText, imageUrl },
+      { role: 'user', text: userText, imageUrls },
       { role: 'assistant', text: '', streaming: true },
     ])
     setChatInput('')
-    setAttachedImage(null)
+    setAttachedImages([])
     setIsSending(true)
+    if (chatTextareaRef.current) chatTextareaRef.current.style.height = 'auto'
 
     try {
-      const imageB64 = imageFile ? await fileToBase64(imageFile) : undefined
+      const imagesB64 = await Promise.all(
+        attachedImages.map(async img => ({ b64: await fileToBase64(img.file), mime: img.file.type }))
+      )
       const apiMessages = [
         ...prevMessages,
         {
           role: 'user',
           content: userText,
-          ...(imageB64 ? { image_b64: imageB64, image_mime: imageFile?.type } : {}),
+          ...(imagesB64.length ? { images: imagesB64 } : {}),
         },
       ]
 
@@ -561,16 +583,31 @@ export function FormManagement() {
 
         {/* 채팅 슬라이드 패널 */}
         <div style={{
-          width: isChatOpen ? 340 : 0,
+          width: isChatOpen ? panelWidth : 0,
           flexShrink: 0,
           overflow: 'hidden',
-          borderLeft: isChatOpen ? '1px solid var(--border)' : 'none',
-          transition: 'width 0.22s ease',
+          borderLeft: 'none',
+          transition: panelResizeRef.current ? 'none' : 'width 0.22s ease',
           background: 'var(--card)',
           display: 'flex',
-          flexDirection: 'column',
+          flexDirection: 'row',
+          position: 'relative',
         }}>
-          <div style={{ width: 340, height: '100%', display: 'flex', flexDirection: 'column' }}>
+          {/* 드래그 핸들 */}
+          {isChatOpen && (
+            <div
+              onMouseDown={startPanelResize}
+              style={{
+                width: 5, flexShrink: 0, cursor: 'col-resize',
+                background: 'transparent',
+                borderLeft: '1px solid var(--border)',
+                transition: 'background 0.15s',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--primary-light)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            />
+          )}
+          <div style={{ flex: 1, minWidth: 0, height: '100%', display: 'flex', flexDirection: 'column' }}>
 
             {/* 패널 헤더 */}
             <div style={{
@@ -628,12 +665,15 @@ export function FormManagement() {
                         alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
                         maxWidth: '90%',
                       }}>
-                        {msg.imageUrl && (
-                          <img src={msg.imageUrl} alt="첨부 이미지" style={{
-                            maxWidth: 160, maxHeight: 110, borderRadius: 7,
-                            border: '1px solid var(--border)', objectFit: 'cover',
-                            alignSelf: 'flex-end',
-                          }} />
+                        {msg.imageUrls && msg.imageUrls.length > 0 && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, justifyContent: 'flex-end' }}>
+                            {msg.imageUrls.map((url, ii) => (
+                              <img key={ii} src={url} alt="첨부 이미지" style={{
+                                width: 72, height: 52, borderRadius: 5,
+                                border: '1px solid var(--border)', objectFit: 'cover',
+                              }} />
+                            ))}
+                          </div>
                         )}
                         <div style={{
                           padding: '7px 11px', borderRadius: 8, fontSize: 12,
@@ -758,31 +798,32 @@ export function FormManagement() {
             )}
 
             {/* 이미지 미리보기 (대화 탭 전용) */}
-            {panelTab === 'chat' && attachedImage && (
+            {panelTab === 'chat' && attachedImages.length > 0 && (
               <div style={{
-                display: 'flex', alignItems: 'center', gap: 8,
+                display: 'flex', flexWrap: 'wrap', gap: 6,
                 padding: '8px 12px', background: 'var(--bg)',
                 borderTop: '1px solid var(--border)', flexShrink: 0,
               }}>
-                <img
-                  src={attachedImage.previewUrl}
-                  alt="preview"
-                  style={{ width: 40, height: 30, objectFit: 'cover', borderRadius: 4, border: '1px solid var(--border)' }}
-                />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <p style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-1)', marginBottom: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {attachedImage.file.name}
-                  </p>
-                  <p style={{ fontSize: 10, color: 'var(--text-3)' }}>
-                    {(attachedImage.file.size / 1024).toFixed(0)} KB
-                  </p>
-                </div>
-                <button
-                  onClick={() => setAttachedImage(null)}
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: 2 }}
-                >
-                  <X size={13} />
-                </button>
+                {attachedImages.map((img, idx) => (
+                  <div key={idx} style={{ position: 'relative' }}>
+                    <img
+                      src={img.previewUrl}
+                      alt="preview"
+                      style={{ width: 48, height: 36, objectFit: 'cover', borderRadius: 4, border: '1px solid var(--border)', display: 'block' }}
+                    />
+                    <button
+                      onClick={() => setAttachedImages(prev => prev.filter((_, i) => i !== idx))}
+                      style={{
+                        position: 'absolute', top: -5, right: -5,
+                        width: 16, height: 16, borderRadius: '50%',
+                        background: 'var(--text-2)', border: 'none', cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0,
+                      }}
+                    >
+                      <X size={9} color="#fff" />
+                    </button>
+                  </div>
+                ))}
               </div>
             )}
 
@@ -812,52 +853,77 @@ export function FormManagement() {
             )}
 
             {/* 입력창 (대화 탭 전용) */}
-            {panelTab === 'chat' && <div style={{ padding: '8px 12px 12px', flexShrink: 0, borderTop: attachedImage ? 'none' : '1px solid var(--border)' }}>
+            {panelTab === 'chat' && <div style={{ padding: '8px 12px 12px', flexShrink: 0, borderTop: attachedImages.length ? 'none' : '1px solid var(--border)' }}>
               <input
                 ref={fileInputRef}
                 type="file"
                 accept="image/*"
+                multiple
                 style={{ display: 'none' }}
                 onChange={handleImageSelect}
               />
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'flex-end' }}>
                 <button
                   onClick={() => fileInputRef.current?.click()}
                   title="이미지 첨부"
                   style={{
                     width: 34, height: 34, borderRadius: 8, flexShrink: 0,
-                    border: `1.5px solid ${attachedImage ? 'var(--primary)' : 'var(--border)'}`,
-                    background: attachedImage ? 'var(--primary-light)' : 'transparent',
-                    color: attachedImage ? 'var(--primary)' : 'var(--text-3)',
+                    border: `1.5px solid ${attachedImages.length ? 'var(--primary)' : 'var(--border)'}`,
+                    background: attachedImages.length ? 'var(--primary-light)' : 'transparent',
+                    color: attachedImages.length ? 'var(--primary)' : 'var(--text-3)',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     cursor: 'pointer',
                   }}
                 >
-                  {attachedImage ? <Image size={14} /> : <Paperclip size={13} />}
+                  {attachedImages.length ? <Image size={14} /> : <Paperclip size={13} />}
                 </button>
-                <input
+                <textarea
+                  ref={chatTextareaRef}
                   value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSend()}
+                  onChange={e => {
+                    setChatInput(e.target.value)
+                    e.target.style.height = 'auto'
+                    const h = Math.min(e.target.scrollHeight, 160)
+                    e.target.style.height = h + 'px'
+                    e.target.style.overflow = e.target.scrollHeight > 160 ? 'auto' : 'hidden'
+                  }}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && e.shiftKey) {
+                      e.preventDefault()
+                      handleSend()
+                    }
+                  }}
+                  onPaste={e => {
+                    const file = Array.from(e.clipboardData.items)
+                      .find(item => item.type.startsWith('image/'))
+                      ?.getAsFile()
+                    if (file) {
+                      e.preventDefault()
+                      setAttachedImages(prev => [...prev, { file, previewUrl: URL.createObjectURL(file) }])
+                    }
+                  }}
                   disabled={isSending}
-                  placeholder={attachedImage ? '이미지 설명 추가 (선택)' : '수정 요청 입력...'}
+                  placeholder={attachedImages.length ? '이미지 설명 추가 (선택)' : '수정 요청 입력... (줄바꿈: Enter, 전송: Shift+Enter)'}
+                  rows={1}
                   style={{
                     flex: 1, border: '1.5px solid var(--border)', borderRadius: 8,
                     padding: '8px 12px', fontSize: 12, outline: 'none',
                     background: isSending ? '#f5f5f5' : 'var(--bg)',
                     color: 'var(--text-1)', fontFamily: 'inherit',
+                    resize: 'none', overflow: 'auto', lineHeight: '1.5',
+                    minHeight: 36, maxHeight: 160,
                   }}
                 />
                 <button
                   onClick={handleSend}
-                  disabled={(!chatInput.trim() && !attachedImage) || isSending}
+                  disabled={(!chatInput.trim() && !attachedImages.length) || isSending}
                   style={{
                     width: 34, height: 34, borderRadius: 8, border: 'none', flexShrink: 0,
-                    background: (!chatInput.trim() && !attachedImage) || isSending ? '#ede9e1' : 'var(--primary)',
-                    color: (!chatInput.trim() && !attachedImage) || isSending ? 'var(--text-3)' : '#fff',
+                    background: (!chatInput.trim() && !attachedImages.length) || isSending ? '#ede9e1' : 'var(--primary)',
+                    color: (!chatInput.trim() && !attachedImages.length) || isSending ? 'var(--text-3)' : '#fff',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    cursor: (!chatInput.trim() && !attachedImage) || isSending ? 'not-allowed' : 'pointer',
-                    boxShadow: (!chatInput.trim() && !attachedImage) || isSending ? 'none' : '0 2px 8px rgba(10,110,110,0.28)',
+                    cursor: (!chatInput.trim() && !attachedImages.length) || isSending ? 'not-allowed' : 'pointer',
+                    boxShadow: (!chatInput.trim() && !attachedImages.length) || isSending ? 'none' : '0 2px 8px rgba(10,110,110,0.28)',
                   }}
                 >
                   <Send size={13} />

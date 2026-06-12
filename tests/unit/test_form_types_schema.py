@@ -121,21 +121,6 @@ class TestSchemaRejectsInvalidStructures:
                    for e in errors), \
             "expr 누락인데 schema가 통과함"
 
-    def test_plugin_missing_plugin_name(self, schema):
-        """formula_type=plugin인데 plugin 없으면 schema 실패."""
-        invalid = {
-            "form_x": {
-                "net": {
-                    "formula_type": "plugin"
-                    # plugin 키 누락
-                }
-            }
-        }
-        errors = list(Draft7Validator(schema).iter_errors(invalid))
-        assert any(e.validator == "required" or "plugin" in str(e.message)
-                   for e in errors), \
-            "plugin 누락인데 schema가 통과함"
-
     def test_invalid_legacy_formula_name(self, schema):
         """지원되지 않는 legacy formula 이름은 schema 실패."""
         invalid = {
@@ -266,19 +251,6 @@ class TestSchemaAcceptsValidStructures:
         }
         errors = list(Draft7Validator(schema).iter_errors(valid))
         assert not errors, f"유효한 computed_vars 구조인데 실패: {[e.message for e in errors]}"
-
-    def test_valid_plugin(self, schema):
-        """plugin 구조는 통과."""
-        valid = {
-            "form_x": {
-                "net": {
-                    "formula_type": "plugin",
-                    "plugin": "my_plugin_fn"
-                }
-            }
-        }
-        errors = list(Draft7Validator(schema).iter_errors(valid))
-        assert not errors, f"유효한 plugin인데 실패: {[e.message for e in errors]}"
 
     def test_valid_legacy_subtract_conditions(self, schema):
         """하위 호환 legacy formula는 통과."""

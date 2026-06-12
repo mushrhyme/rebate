@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, useRef } from 'react'
 import { FileText, ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react'
 
 const BASE = import.meta.env.VITE_API_URL ?? ''
@@ -45,6 +45,8 @@ export function PdfViewer({ docId, page, totalPages, highlightText, mappingType,
   const [zoomIdx, setZoomIdx] = useState(2) // 100%
   const zoom = ZOOM_STEPS[zoomIdx]
   const [pageInput, setPageInput] = useState(String(page))
+  const [loadedUrl, setLoadedUrl] = useState<string | null>(null)
+  const prefetchRef = useRef<Set<string>>(new Set())
 
   useEffect(() => { setPageInput(String(page)) }, [page])
 
@@ -54,9 +56,26 @@ export function PdfViewer({ docId, page, totalPages, highlightText, mappingType,
     setPageInput(String(page))
   }
 
-  const pageImageUrl = docId && page
-    ? `${BASE}/api/v3/documents/${docId}/page-image?page=${page}${sid ? `&sid=${encodeURIComponent(sid)}` : ''}`
-    : null
+  const makeImageUrl = (p: number) =>
+    docId && p >= 1
+      ? `${BASE}/api/v3/documents/${docId}/page-image?page=${p}${sid ? `&sid=${encodeURIComponent(sid)}` : ''}`
+      : null
+
+  const pageImageUrl = makeImageUrl(page)
+
+  // 인접 페이지 프리페치
+  useEffect(() => {
+    if (!docId || !totalPages) return
+    const prefetch = prefetchRef.current
+    ;[page - 1, page + 1].forEach(p => {
+      if (p < 1 || p > totalPages) return
+      const url = makeImageUrl(p)
+      if (!url || prefetch.has(url)) return
+      prefetch.add(url)
+      const img = new Image()
+      img.src = url
+    })
+  }, [docId, page, totalPages])
 
   // bbox JSON 로드 (page 또는 docId 변경 시)
   useEffect(() => {
@@ -95,6 +114,25 @@ export function PdfViewer({ docId, page, totalPages, highlightText, mappingType,
       line = pickByColumn(containsMatches)
     }
     if (!line) {
+      // 2.5순위: 공통 prefix 매칭 — OCR명이 PDF 텍스트 중간에서 잘린 경우 대응
+      // (예: OCR명 "《集 (313645)" vs PDF "《集約口座》 (313645)")
+      const PREFIX_MIN = 10
+      if (target.length >= PREFIX_MIN) {
+        const prefix = target.slice(0, PREFIX_MIN)
+        const prefixCandidates = bboxData.lines.filter(l => normText(l.text).startsWith(prefix))
+        if (prefixCandidates.length > 0) {
+          const scored = prefixCandidates.map(l => {
+            const t = normText(l.text)
+            let i = 0
+            while (i < t.length && i < target.length && t[i] === target[i]) i++
+            return { line: l, score: i }
+          })
+          const maxScore = Math.max(...scored.map(s => s.score))
+          line = pickByColumn(scored.filter(s => s.score === maxScore).map(s => s.line))
+        }
+      }
+    }
+    if (!line) {
       // 3순위: target이 bbox 텍스트를 포함 — 가장 긴 것 우선, 동률이면 컬럼으로 구분
       // CJK 포함 후보를 우선 풀로 사용 — 숫자코드(13369041 등)가 글자 수로 이기는 오류 방지
       const allPartials = bboxData.lines.filter(l => {
@@ -103,8 +141,12 @@ export function PdfViewer({ docId, page, totalPages, highlightText, mappingType,
       })
       const pool = allPartials.filter(l => hasCJK(l.text))
       const finalPool = pool.length > 0 ? pool : allPartials
-      const maxLen = Math.max(0, ...finalPool.map(l => normText(l.text).length))
-      const partials = finalPool.filter(l => normText(l.text).length === maxLen)
+      // target의 앞머리(prefix)인 후보보다 중간·끝 후보를 우선 선택
+      // — "(株)7-11" 같은 공통 접두사보다 "加食愛知《集" 같은 특이적 부분 선호
+      const nonPrefixPool = finalPool.filter(l => !target.startsWith(normText(l.text)))
+      const activePool = nonPrefixPool.length > 0 ? nonPrefixPool : finalPool
+      const maxLen = Math.max(0, ...activePool.map(l => normText(l.text).length))
+      const partials = activePool.filter(l => normText(l.text).length === maxLen)
       line = pickByColumn(partials)
     }
 
@@ -227,9 +269,9 @@ export function PdfViewer({ docId, page, totalPages, highlightText, mappingType,
           <div style={{ position: 'relative', width: `${zoom}%`, minWidth: zoom <= 100 ? '100%' : undefined, margin: '0 auto' }}>
             <img
               src={pageImageUrl}
-              key={pageImageUrl}
               alt={`page ${page}`}
-              style={{ width: '100%', display: 'block' }}
+              onLoad={e => setLoadedUrl((e.target as HTMLImageElement).src)}
+              style={{ width: '100%', display: 'block', opacity: loadedUrl === pageImageUrl ? 1 : 0.4, transition: 'opacity 0.15s' }}
             />
             {highlight && (
               <div style={{

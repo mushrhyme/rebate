@@ -385,10 +385,19 @@ class TestToolResultInMessages:
 
 # ── 6. confirm_mapping 호출 검증 (allow_side_effects=True) ────────────────────
 
+def _seed_cache(mappings: Path, ocr_name: str, code: str) -> None:
+    """lookup_retailer가 code를 반환하도록 캐시 시딩.
+    후보 외 코드 거부 계약(2026-06-12)상 confirm은 lookup이 반환한 코드만 수락된다."""
+    write_csv(mappings / "ocr_retailer.csv", [
+        {"ocr_name": ocr_name, "retailer_code": code, "retailer_name": ocr_name},
+    ])
+
+
 class TestConfirmMappingExecution:
     async def test_confirm_mapping_executed_when_allowed(self, dirs):
         """allow_side_effects=True일 때 confirm_mapping tool이 실제로 실행된다."""
         mappings, form_defs = dirs
+        _seed_cache(mappings, "テスト", "R001")
         client = _make_client(
             _tool_use_response(
                 _tool_use_block("tu_1", "lookup_retailer", {"ocr_name": "テスト"}),
@@ -417,9 +426,17 @@ class TestConfirmMappingExecution:
     async def test_confirm_mapping_writes_csv(self, dirs):
         """confirm_mapping 실행 시 실제 ocr_retailer.csv에 기록된다."""
         mappings, form_defs = dirs
+        # 마스터(retail_user)에 시딩 — lookup이 exact_match로 R999를 반환,
+        # confirm이 ocr_retailer.csv에 기록하는지를 검증 (캐시 사전 시딩 금지)
+        write_csv(mappings / "retail_user.csv", [
+            {"소매처코드": "R999", "소매처명": "テスト店", "판매처코드": "D1", "판매처명": "東"},
+        ])
         client = _make_client(
             _tool_use_response(
-                _tool_use_block("tu_1", "confirm_mapping", {
+                _tool_use_block("tu_1", "lookup_retailer", {"ocr_name": "テスト店"}),
+            ),
+            _tool_use_response(
+                _tool_use_block("tu_2", "confirm_mapping", {
                     "mapping_type": "retailer",
                     "ocr_name": "テスト店",
                     "confirmed_code": "R999",
@@ -442,9 +459,13 @@ class TestConfirmMappingExecution:
     async def test_confirm_mapping_blocked_by_default(self, dirs):
         """allow_side_effects=False(기본값)일 때 confirm_mapping은 차단된다."""
         mappings, form_defs = dirs
+        _seed_cache(mappings, "テスト", "R001")
         client = _make_client(
             _tool_use_response(
-                _tool_use_block("tu_1", "confirm_mapping", {
+                _tool_use_block("tu_1", "lookup_retailer", {"ocr_name": "テスト"}),
+            ),
+            _tool_use_response(
+                _tool_use_block("tu_2", "confirm_mapping", {
                     "mapping_type": "retailer",
                     "ocr_name": "テスト",
                     "confirmed_code": "R001",
@@ -464,9 +485,9 @@ class TestConfirmMappingExecution:
         assert len(confirm_calls) == 0
 
         # Claude에게 success 응답 반환 (is_error 아님) — 정상 end_turn 유도
-        second_messages = client.messages.create.call_args_list[1].kwargs["messages"]
+        third_messages = client.messages.create.call_args_list[2].kwargs["messages"]
         tool_results = [
-            r for r in second_messages[-1]["content"]
+            r for r in third_messages[-1]["content"]
             if r.get("type") == "tool_result"
         ]
         # error가 아닌 성공 응답 → Claude가 정상 종료 가능
@@ -664,7 +685,8 @@ class TestProductionPhase3NotModified:
         from backend.pipeline.phase3 import run_phase3
         sig = inspect.signature(run_phase3)
         params = list(sig.parameters.keys())
-        expected = ["doc_id", "phase2_result", "output_dir", "form_id", "hatsu_month", "run_id"]
+        # cache_only: remap-cached(캐시 재조회 전용 Phase 3) 기능으로 추가됨
+        expected = ["doc_id", "phase2_result", "output_dir", "form_id", "hatsu_month", "run_id", "cache_only"]
         assert params == expected, (
             f"run_phase3 시그니처 변경 감지: {params} (expected: {expected})"
         )
@@ -724,6 +746,7 @@ class TestToolNotCalled:
     async def test_end_turn_after_lookup_and_confirm_is_valid(self, dirs):
         """lookup → confirm → end_turn은 정상 성공 케이스다."""
         mappings, form_defs = dirs
+        _seed_cache(mappings, "テスト", "R001")
         client = _make_client(
             _tool_use_response(_tool_use_block("tu_1", "lookup_retailer", {"ocr_name": "テスト"})),
             _tool_use_response(_tool_use_block("tu_2", "confirm_mapping", {
@@ -770,13 +793,20 @@ class TestToolNotCalled:
         assert result.stats.failure_count == 1
 
     async def test_decided_code_prevents_tool_not_called_error(self, dirs):
-        """decided_code가 있으면 turn 0 end_turn도 허용된다 (캐시 결정 케이스)."""
+        """turn 0에서 lookup+confirm 동시 호출 → decided_code 캡처 (캐시 결정 케이스).
+
+        후보 외 코드 거부 계약상 confirm은 같은 응답이라도 lookup 블록이
+        먼저 처리되어 후보가 등록된 뒤에만 수락된다."""
         mappings, form_defs = dirs
-        # 첫 응답: confirm_mapping 호출 (decided_code 캡처) → end_turn
+        _seed_cache(mappings, "テスト", "R001")
+        # 첫 응답: lookup + confirm 동시 블록 (decided_code 캡처) → end_turn
         client = _make_client(
-            _tool_use_response(_tool_use_block("tu_1", "confirm_mapping", {
-                "mapping_type": "retailer", "ocr_name": "テスト", "confirmed_code": "R001",
-            })),
+            _tool_use_response(
+                _tool_use_block("tu_1", "lookup_retailer", {"ocr_name": "テスト"}),
+                _tool_use_block("tu_2", "confirm_mapping", {
+                    "mapping_type": "retailer", "ocr_name": "テスト", "confirmed_code": "R001",
+                }),
+            ),
             _end_turn_response("완료"),
         )
 

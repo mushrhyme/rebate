@@ -1,8 +1,26 @@
 {
   "form_01": {
     "label": "FINET 買掛金特別値引請求明細書",
+    "bundle_detection": {
+      "cover_required": [
+        "今回請求金額合計"
+      ],
+      "cover_required_any": [
+        "入金予定日",
+        "振込先銀行",
+        "対象期間",
+        "決済方法"
+      ],
+      "cover_excluded": [
+        "請求伝票番号",
+        "商品名"
+      ]
+    },
     "bara_source": "by_unit",
-    "qty_field": ["数量", "請求計上数量"],
+    "qty_field": [
+      "数量",
+      "請求計上数量"
+    ],
     "preprocess": [],
     "row_anchor": {
       "block_pattern": "^\\|\\s*(\\d+[-][A-Z0-9]\\d+)\\s*\\|",
@@ -10,24 +28,34 @@
       "product_cell": 2,
       "row_id_cell": 2,
       "total_pattern": "小計|合計",
-      "header_keywords": ["計上No"]
+      "header_keywords": [
+        "計上No"
+      ]
     },
     "net": {
       "formula_type": "expr",
       "expr": "shikiri - discount",
-      "vars": { "c1": "条件", "c2": null },
+      "vars": {
+        "c1": "条件",
+        "c2": null
+      },
       "computed_vars": {
         "discount": {
           "expr": "c1 + c2",
           "divide_by": {
             "field": "ケース入数",
-            "when": { "field": "数量単位", "equals": "CS" },
+            "when": {
+              "field": "数量単位",
+              "equals": "CS"
+            },
             "default": 1,
             "zero_policy": "skip_divide"
           }
         }
       },
-      "no_net_kubun": ["円"]
+      "no_net_kubun": [
+        "円"
+      ]
     },
     "condition_display": {
       "mode": "by_kubun",
@@ -50,15 +78,17 @@
         "label": "得意先 {key}"
       }
     ],
-    "show_sections": ["xv"],
+    "show_sections": [
+      "xv"
+    ],
     "aggregate_label": "소매처별 집계",
     "summary": "rate_then_customer",
     "summary_cover_keys": {
-      "hasso":    "販促金請求 今回請求金額合計",
-      "yakumu":   "役務提供 今回請求金額合計",
-      "tax_8":    "販促金請求 8%対象 消費税",
-      "tax_10":   "販促金請求 10%対象 消費税",
-      "taxex_8":  "販促金請求 8%対象 税抜",
+      "hasso": "販促金請求 今回請求金額合計",
+      "yakumu": "役務提供 今回請求金額合計",
+      "tax_8": "販促金請求 8%対象 消費税",
+      "tax_10": "販促金請求 10%対象 消費税",
+      "taxex_8": "販促金請求 8%対象 税抜",
       "taxex_10": "販促金請求 10%対象 税抜"
     }
   },
@@ -69,7 +99,9 @@
     "net": {
       "formula_type": "expr",
       "expr": "shikiri - teiban - c1",
-      "vars": { "c1": "未収条件" },
+      "vars": {
+        "c1": "未収条件"
+      },
       "needs_teiban": true,
       "teiban_type": "定番条件"
     },
@@ -95,13 +127,15 @@
         "detail_amount_field": "未収金額合計"
       }
     ],
-    "show_sections": ["xv"],
+    "show_sections": [
+      "xv"
+    ],
     "aggregate_label": "거래처별 집계",
     "summary": "invoice_totals",
     "summary_cover_keys": {
       "honbai": "本体合計金額",
-      "tax":    "消費税金額",
-      "total":  "合計ご請求金額"
+      "tax": "消費税金額",
+      "total": "合計ご請求金額"
     },
     "row_anchor": {
       "block_pattern": "管理No\\s*[：:]\\s*(\\d{5,8})",
@@ -109,16 +143,41 @@
       "condition_pattern": "(定番条件|原価引き条件|導入条件)",
       "total_pattern": "計[：:]",
       "header_keywords": [
-        "計上場所", "入出荷支店", "入出荷センター",
-        "得意先", "管理No", "得意先又は商品", "整数部", "小数部",
-        "請求書", "作成日", "ご請求期", "お支払予定", "未収取扱", "発行元", "販売促進", "項目"
+        "計上場所",
+        "入出荷支店",
+        "入出荷センター",
+        "得意先",
+        "管理No",
+        "得意先又は商品",
+        "整数部",
+        "小数部",
+        "請求書",
+        "作成日",
+        "ご請求期",
+        "お支払予定",
+        "未収取扱",
+        "発行元",
+        "販売促進",
+        "項目"
       ]
     },
     "bundle_detection": {
-      "cover_required": ["請求書No", "本体合計金額"],
-      "cover_excluded": ["管理No"],
-      "skip_markers": ["振込先銀行", "決済方法", "お支払明細書", "口座種別"],
-      "skip_excluded": ["本体合計金額"]
+      "cover_required": [
+        "請求書No",
+        "本体合計金額"
+      ],
+      "cover_excluded": [
+        "管理No"
+      ],
+      "skip_markers": [
+        "振込先銀行",
+        "決済方法",
+        "お支払明細書",
+        "口座種別"
+      ],
+      "skip_excluded": [
+        "本体合計金額"
+      ]
     }
   }
 }

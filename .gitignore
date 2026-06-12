@@ -73,3 +73,6 @@ extracted/
 mappings/ocr_dist.csv
 mappings/ocr_product.csv
 mappings/ocr_retailer.csv
+
+# form_manage 자동 백업 산출물
+*.md.bak

@@ -483,8 +483,9 @@ class TestSearchProduct:
         assert result.basis == "candidate"
         assert result.product_code is None
         assert len(result.candidates) >= 1
-        assert result.candidates[0]["product_code"] == "101000491"
-        assert result.confidence > 0.9
+        assert result.candidates[0]["code"] == "101000491"
+        # 계약: basis="candidate" → confidence = candidates[0]["score"] (> 0.3)
+        assert result.confidence == result.candidates[0]["score"] > 0.3
 
     async def test_candidates_sorted_by_similarity(self, dirs):
         """후보가 복수일 때 유사도 내림차순 정렬."""
@@ -499,7 +500,7 @@ class TestSearchProduct:
         result = await search_product("テスト商品AB", mappings)
 
         assert result.basis == "candidate"
-        sims = [c["similarity"] for c in result.candidates]
+        sims = [c["score"] for c in result.candidates]
         assert sims == sorted(sims, reverse=True), "유사도 내림차순 정렬 실패"
 
     async def test_top_k_limit(self, dirs):
@@ -527,7 +528,7 @@ class TestSearchProduct:
         from backend.tools.mapping import search_product
         result = await search_product("辛ラーメン 袋", mappings)
 
-        codes = [c["product_code"] for c in result.candidates]
+        codes = [c["code"] for c in result.candidates]
         assert codes.count("P001") == 1, "동일 product_code 중복 제거 실패"
 
     # ── 6-C. not_found ──────────────────────────────────────────────────────
@@ -935,7 +936,7 @@ class TestContractGuarantees:
         from backend.tools.mapping import search_product
         result = await search_product("テスト商品AB", mappings)
         assert result.basis == "candidate"
-        sims = [c["similarity"] for c in result.candidates]
+        sims = [c["score"] for c in result.candidates]
         assert sims == sorted(sims, reverse=True)
 
     # ── CSV 없음 → 예외 없음 ─────────────────────────────────────────────────

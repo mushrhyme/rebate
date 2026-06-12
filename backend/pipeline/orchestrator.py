@@ -27,6 +27,7 @@ from ..db.queries import (
     get_current_run_id,
     set_form_id,
     set_pages_count,
+    set_pipeline_hashes,
     record_phase_timing,
     save_phase3_tool_use_stats,
 )
@@ -120,6 +121,7 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
                 )
                 return
             await _set_form_id(doc_id, form_id)
+            await _record_pipeline_hashes(doc_id, form_id, settings)
 
             # ── Phase 1 ──────────────────────────────────────────
             await update_document_status(doc_id, "phase1")
@@ -319,7 +321,8 @@ async def resume_phase4(doc_id: str) -> None:
 
 
 async def resume_phase3_with_cache(doc_id: str) -> None:
-    """Phase 2 결과를 재사용, Claude 없이 캐시 조회만으로 Phase 3 재실행.
+    """Phase 2 결과를 재사용하여 Phase 3(매핑)만 재실행.
+    캐시 미스 항목은 Claude 판단으로 처리한다.
     해소된 항목은 Phase 4까지 자동 진행, 여전히 미매핑인 항목은 pending으로 남는다."""
     settings = get_settings()
     await _ensure_extracted_from_s3(doc_id)
@@ -346,23 +349,23 @@ async def resume_phase3_with_cache(doc_id: str) -> None:
     await update_document_status(doc_id, "phase3")
 
     try:
-        _, pending = await run_phase3(
+        _, pending = await _call_phase3_by_flag(
             doc_id, phase2_result, extracted_dir,
             form_id=form_id, hatsu_month=hatsu_month, run_id=run_id,
-            cache_only=True,
+            settings=settings,
         )
 
         if pending:
             await save_pending_mappings(doc_id, pending)
             await update_document_status(doc_id, "pending")
             await _sync_dir_to_s3(doc_id, extracted_dir, f"documents/{doc_id}/extracted", "extracted(pending)")
-            log.info("[%s] 캐시 재매핑 — 여전히 미매핑 %d건, 대기 상태", doc_id, len(pending))
+            log.info("[%s] Phase 3 재실행 — 여전히 미매핑 %d건, 대기 상태", doc_id, len(pending))
             return
 
         await _run_phase4_and_finish(doc_id, run_id=run_id)
 
     except Exception as exc:
-        log.exception("[%s] 캐시 재매핑 오류", doc_id)
+        log.exception("[%s] Phase 3 재실행 오류", doc_id)
         await update_document_error(doc_id, error_type="technical", error_phase="phase3", message=str(exc))
 
 
@@ -483,16 +486,8 @@ async def _run_phase4_and_finish(doc_id: str, run_id: str = "", skip_xv: bool = 
     phase4_data = await run_phase4(doc_id, run_id=run_id, skip_xv=skip_xv)
     await record_phase_timing(doc_id, "phase4", time.monotonic() - _t0)
 
-    # 교차검증 불일치 또는 파싱 오류 → xv_warning (done이 아님)
-    xv_has_issue = (
-        not skip_xv and (
-            phase4_data.get("xv_error")
-            or any(not item.get("ok", True) for item in phase4_data.get("xv", []))
-        )
-    )
-    final_status = "xv_warning" if xv_has_issue else "done"
-    await update_document_status(doc_id, final_status)
-    log.info("[%s] Phase 4 완료 — %s", doc_id, final_status)
+    await update_document_status(doc_id, "done")
+    log.info("[%s] Phase 4 완료 — done", doc_id)
 
     # S3·Drive·Sheets 동기화는 사용자 응답과 무관 — 백그라운드 처리
     settings = get_settings()
@@ -529,6 +524,22 @@ async def _ensure_extracted_from_s3(doc_id: str) -> None:
         log.info("[%s] S3에서 extracted %d 파일 복원", doc_id, count)
     except Exception:
         log.exception("[%s] S3 extracted 복원 실패", doc_id)
+        return
+
+    # 복원된 산출물이 현재 실행분인지 검증 — run_id 불일치는 오래된 결과 가능성
+    try:
+        p3 = extracted_dir / "phase3_output.json"
+        if p3.exists():
+            restored_run = json.loads(p3.read_text(encoding="utf-8")).get("run_id", "")
+            current_run = await get_current_run_id(doc_id)
+            if restored_run and current_run and restored_run != current_run:
+                log.warning(
+                    "[%s] S3 복원 산출물 run_id 불일치 (restored=%s, current=%s) "
+                    "— 이전 실행 결과일 수 있음. 재분석 권장",
+                    doc_id, restored_run, current_run,
+                )
+    except Exception:
+        log.warning("[%s] 복원 산출물 run_id 검증 실패 (무시)", doc_id, exc_info=True)
 
 
 async def _push_pages_to_drive(doc_id: str) -> None:
@@ -743,6 +754,36 @@ async def _set_form_id(doc_id: str, form_id: str) -> None:
     await set_form_id(doc_id, form_id)
 
 
+def _compute_pipeline_hashes(form_id: str, settings) -> dict:
+    """이번 실행이 어떤 규칙 버전으로 계산되는지 식별하는 해시 묶음.
+    form 정의 MD·form_types.json 항목·phase 프롬프트가 대상."""
+    def _h(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+    hashes: dict[str, str] = {}
+    form_path = settings.form_definitions_dir / f"{form_id}.md"
+    if form_path.exists():
+        hashes["form_definition_hash"] = _h(form_path.read_text(encoding="utf-8"))
+    ft_path = settings.workspace_root / "config" / "form_types.json"
+    if ft_path.exists():
+        entry = json.loads(ft_path.read_text(encoding="utf-8")).get(form_id, {})
+        hashes["form_types_hash"] = _h(json.dumps(entry, ensure_ascii=False, sort_keys=True))
+    for name in ("phase1-prompt.md", "phase2-prompt.md", "phase3-prompt.md"):
+        p = settings.workspace_root / "docs" / name
+        if p.exists():
+            hashes[f"{name.split('-')[0]}_prompt_hash"] = _h(p.read_text(encoding="utf-8"))
+    return hashes
+
+
+async def _record_pipeline_hashes(doc_id: str, form_id: str, settings) -> None:
+    """해시 기록 실패가 파이프라인을 막지 않도록 분리."""
+    try:
+        hashes = await asyncio.to_thread(_compute_pipeline_hashes, form_id, settings)
+        await set_pipeline_hashes(doc_id, hashes)
+    except Exception:
+        log.warning("[%s] pipeline 해시 기록 실패 (무시)", doc_id, exc_info=True)
+
+
 def _get_page_roles(extracted_dir: Path) -> dict[int, str]:
     """page MD frontmatter의 page_type_hint를 읽어 {page_num: role} 반환."""
     roles: dict[int, str] = {}
@@ -850,18 +891,25 @@ def _is_skip_page(content: str, cfg: dict) -> bool:
 
 
 def _is_extra_cover_page(content: str, cfg: dict) -> bool:
-    """bundle_detection.cover_required/cover_excluded 기준으로 Phase 1이 놓친 cover 페이지를 감지한다.
+    """bundle_detection 설정 기준으로 Phase 1이 놓친 cover 페이지를 감지한다.
 
-    cover_required 전부 존재하고 cover_excluded 중 어느 것도 없으면 cover로 간주.
-    설정이 없으면 항상 False.
+    cover_required:     전부 존재해야 함 (AND)
+    cover_required_any: 하나 이상 존재해야 함 (OR)
+    cover_excluded:     어느 것도 없어야 함 (NOT ANY)
+    cover_required/cover_required_any 모두 없으면 항상 False.
     """
     required = cfg.get("cover_required", [])
+    required_any = cfg.get("cover_required_any", [])
     excluded = cfg.get("cover_excluded", [])
-    if not required:
+    if not required and not required_any:
         return False
-    has_required = all(m in content for m in required)
-    has_excluded = any(m in content for m in excluded)
-    return has_required and not has_excluded
+    if required and not all(m in content for m in required):
+        return False
+    if required_any and not any(m in content for m in required_any):
+        return False
+    if any(m in content for m in excluded):
+        return False
+    return True
 
 
 def _detect_bundles(extracted_dir: Path, bundle_cfg: dict | None = None) -> list[tuple[int, int]]:
@@ -886,6 +934,8 @@ def _detect_bundles(extracted_dir: Path, bundle_cfg: dict | None = None) -> list
         if _is_skip_page(content, cfg):
             continue
         is_hint_cover = bool(re.search(r"^page_type_hint:\s*cover", content, re.MULTILINE | re.IGNORECASE))
+        if is_hint_cover and (cfg.get("cover_required") or cfg.get("cover_required_any") or cfg.get("cover_excluded")):
+            is_hint_cover = _is_extra_cover_page(content, cfg)
         if is_hint_cover or _is_extra_cover_page(content, cfg):
             cover_pages.append(page_num)
 

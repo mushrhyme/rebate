@@ -202,7 +202,7 @@ class TestBuildProductDecisionFromJson:
     def test_empty_master_name_supplemented_from_candidates(self):
         """master_name 비어 있어도 후보에 이름이 있으면 보완해서 저장한다."""
         data       = {"decision": "confirmed", "product_code": "P001", "master_name": ""}
-        candidates = [{"product_code": "P001", "product_name": "辛ラーメン 120g", "similarity": 0.9}]
+        candidates = [{"code": "P001", "name": "辛ラーメン 120g", "score": 0.9}]
         d          = _build_product_decision_from_json("OCR名", data, {"P001"}, candidates)
         assert d.basis        == "tool_use"
         assert d.product_name == "辛ラーメン 120g"
@@ -704,7 +704,7 @@ class TestMasterNameFallback:
     def test_empty_master_name_with_candidate_name_supplemented(self):
         """master_name 비어 있어도 후보에 이름이 있으면 자동 보완된다."""
         data       = {"decision": "confirmed", "product_code": "P001", "master_name": ""}
-        candidates = [{"product_code": "P001", "product_name": "辛ラーメン 120g", "similarity": 0.9}]
+        candidates = [{"code": "P001", "name": "辛ラーメン 120g", "score": 0.9}]
         d          = _build_product_decision_from_json("OCR名", data, {"P001"}, candidates)
         assert d.basis        == "tool_use"
         assert d.product_name == "辛ラーメン 120g"

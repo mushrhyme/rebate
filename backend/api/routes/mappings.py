@@ -1,5 +1,6 @@
 """Phase 3 매핑 확인 — 저신뢰도 항목 조회 및 확정."""
 import json as _json
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -24,6 +25,8 @@ from ...tools.mapping import (
 )
 
 _LOCKED_MSG = "확정된 문서입니다. 영업추진부에 확정 해제를 요청하세요"
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v3/documents/{doc_id}/mappings", tags=["mappings"])
 
@@ -84,14 +87,20 @@ def _upsert_cache(doc_id: str, mapping_type: str, ocr_name: str, confirmed_code:
         store = get_sheets_store()
         if store is None:
             return
+        # upsert: 같은 키를 재수정할 때 append로 모순 행이 누적되지 않도록
         if mapping_type == "retailer":
-            store.append_row("ocr_retailer.csv", [ocr_name, confirmed_code, confirmed_name])
+            store.upsert_row("ocr_retailer.csv", [0], [ocr_name, confirmed_code, confirmed_name])
         elif mapping_type == "product":
-            store.append_row("ocr_product.csv", [ocr_name, confirmed_code, confirmed_name])
+            store.upsert_row("ocr_product.csv", [0], [ocr_name, confirmed_code, confirmed_name])
         elif mapping_type == "dist" and dist_rc and dist_form_id and dist_issuer_fp:
-            store.append_row("ocr_dist.csv", [dist_form_id, dist_issuer_fp, dist_rc, confirmed_code, confirmed_name])
+            store.upsert_row("ocr_dist.csv", [0, 1, 2], [dist_form_id, dist_issuer_fp, dist_rc, confirmed_code, confirmed_name])
     except Exception:
-        pass  # Sheets 쓰기 실패는 무시 (캐시는 best-effort)
+        # Sheets는 신규 문서의 1차 캐시 — 기록 실패가 묻히면 다음 분석부터 같은
+        # 매핑을 다시 묻게 되므로 반드시 로그를 남긴다 (파이프라인은 계속 진행)
+        log.warning(
+            "[%s] Sheets 캐시 기록 실패 — %s '%s' → '%s' (로컬 캐시만 갱신됨)",
+            doc_id, mapping_type, ocr_name, confirmed_code, exc_info=True,
+        )
 
 
 

@@ -4,7 +4,10 @@ function sessionId(): string | null {
   return localStorage.getItem('session_id')
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 30_000): Promise<T> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+
   const sid = sessionId()
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -14,23 +17,32 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   if (init.body instanceof FormData) delete headers['Content-Type']
 
-  const res = await fetch(`${BASE}${path}`, { ...init, headers })
+  try {
+    const res = await fetch(`${BASE}${path}`, { ...init, headers, signal: controller.signal })
 
-  if (res.status === 401) {
-    localStorage.removeItem('session_id')
-    const body = await res.json().catch(() => ({} as { detail?: string }))
-    if (path !== '/api/auth/login') {
-      window.location.href = '/login'
+    if (res.status === 401) {
+      localStorage.removeItem('session_id')
+      const body = await res.json().catch(() => ({} as { detail?: string }))
+      if (path !== '/api/auth/login') {
+        window.location.href = '/login'
+      }
+      throw new Error(body.detail ?? '로그인이 필요합니다.')
     }
-    throw new Error(body.detail ?? '로그인이 필요합니다.')
-  }
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail ?? '서버 오류')
-  }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }))
+      throw new Error(err.detail ?? '서버 오류')
+    }
 
-  return res.json()
+    return res.json()
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      throw new Error('요청 시간 초과 (30초). 잠시 후 다시 시도하세요.')
+    }
+    throw e
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 export const api = {
@@ -358,7 +370,7 @@ export interface MappingCandidate {
   score?: number
   // 제품 전용
   volume?: string
-  case_qty?: number
+  case_qty?: string   // 규격 (예: "12×2")
   shikiri?: number
   honbucho?: number
 }
@@ -414,12 +426,42 @@ export interface Phase4Result {
   aggregate_label?: string
 }
 
+export interface XvAmounts {
+  ex_tax: number
+  tax: number
+  inc_tax: number
+}
+
+export interface XvRow {
+  label: string
+  ex_tax: number
+  tax: number
+  inc_tax: number
+}
+
+export interface XvCustomer {
+  name: string
+  rows: XvRow[]
+  total: XvAmounts
+  summary_ex_tax: number | null
+  ok: boolean
+}
+
+export interface XvGrandTotal {
+  rows: XvRow[]
+  total: XvAmounts
+}
+
 export interface CrossValidation {
   label: string
   expected: number | null
   actual: number | null
   ok: boolean
   diff?: number | null
+  xv_type?: 'simple' | 'customer_breakdown'
+  status?: 'OK' | 'MISMATCH' | 'NEEDS_CONFIRMATION'
+  customers?: XvCustomer[]
+  grand_total?: XvGrandTotal
 }
 
 export interface Phase4Row {

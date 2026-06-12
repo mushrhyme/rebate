@@ -38,6 +38,19 @@ function PhaseIndicator({ doc }: { doc: Document }) {
     if (s === 'queued' || s === 'ocr') return 'waiting'
     // pending = phase3까지 완료, phase4 미시작
     if (s === 'pending') return key === 'phase4_xv' ? 'waiting' : 'done'
+    // status가 특정 phase를 직접 가리키면 token_usage 대신 status 기준으로 판단
+    // (재실행 시 이전 phase token_usage가 남아 있어도 올바른 단계를 표시)
+    const PHASE_STATUS_MAP: Partial<Record<string, string>> = {
+      phase1: 'phase1', phase2: 'phase2', phase3: 'phase3', phase4: 'phase4_xv',
+    }
+    const activePhaseKey = PHASE_STATUS_MAP[s]
+    if (activePhaseKey) {
+      const thisIdx = PHASE_ORDER.indexOf(key as typeof PHASE_ORDER[number])
+      const activeIdx = PHASE_ORDER.indexOf(activePhaseKey as typeof PHASE_ORDER[number])
+      if (thisIdx < activeIdx) return 'done'
+      if (thisIdx === activeIdx) return 'active'
+      return 'waiting'
+    }
     if (hasPhase(key)) return 'done'
     const active = PHASE_ORDER.find(p => !hasPhase(p)) ?? 'phase1'
     return key === active ? 'active' : 'waiting'
@@ -98,7 +111,7 @@ const statusConfig: Record<Status, { label: string; bg: string; color: string; d
   pending:   { label: '확인 대기', bg: '#fdf0e8', color: '#c4622c', dot: '#e07840' },
   done:      { label: '완료',     bg: '#eaf4ee', color: '#2d7d4a', dot: '#3a9960' },
   error:      { label: '오류',     bg: '#fae8e8', color: '#b03030', dot: '#cc4040' },
-  xv_warning: { label: '검증 경고', bg: '#fdf6e0', color: '#a07020', dot: '#c49030' },
+  xv_warning: { label: '완료', bg: '#e8f0ef', color: 'var(--primary)', dot: 'var(--primary)' },
 }
 
 const card = {
@@ -150,7 +163,7 @@ function RetryModal({ doc, onClose, onConfirm }: {
   onClose: () => void
   onConfirm: (mode: RetryMode) => Promise<void>
 }) {
-  const isPending = doc.status === 'pending'
+  const isPending = doc.status === 'pending' || doc.status === 'xv_warning' || doc.status === 'done'
   const [step, setStep] = useState<1 | 2>(isPending ? 1 : 2)
   const [mode, setMode] = useState<RetryMode>('cache_remap')
   const [loading, setLoading] = useState(false)
@@ -225,7 +238,7 @@ function RetryModal({ doc, onClose, onConfirm }: {
                       {selected && <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#fff' }} />}
                     </span>
                     <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-1)' }}>
-                      {isCR ? '캐시 재매핑' : '전체 재분석'}
+                      {isCR ? 'Phase 3 재실행' : '전체 재분석'}
                     </span>
                     {isCR && (
                       <span style={{
@@ -237,7 +250,7 @@ function RetryModal({ doc, onClose, onConfirm }: {
                   </div>
                   <p style={{ fontSize: 11, color: 'var(--text-2)', lineHeight: 1.6, paddingLeft: 22 }}>
                     {isCR
-                      ? 'Phase 2 추출 결과를 유지하고, 최신 매핑 캐시로만 재시도합니다. Azure·Claude 비용 없음.'
+                      ? 'Phase 2 추출 결과를 유지하고, 매핑(Phase 3)만 재실행합니다. 미매핑 항목은 Claude가 재판단합니다.'
                       : 'OCR을 제외한 Phase 2~4 전체를 재실행합니다. 기존 매핑 확인 내역이 초기화됩니다.'}
                   </p>
                 </div>
@@ -279,7 +292,7 @@ function RetryModal({ doc, onClose, onConfirm }: {
         }}>
           <div>
             <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-1)' }}>
-              {isCacheRemap ? '캐시 재매핑' : '재분석'}
+              {isCacheRemap ? 'Phase 3 재실행' : '재분석'}
             </p>
             <p style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)', marginTop: 2 }}>{doc.doc_id}</p>
           </div>
@@ -355,7 +368,7 @@ function RetryModal({ doc, onClose, onConfirm }: {
             }}
           >
             <RotateCcw size={13} style={loading ? { animation: 'spin 0.8s linear infinite' } : undefined} />
-            {loading ? '실행 중...' : isCacheRemap ? '재매핑 시작' : '재분석'}
+            {loading ? '실행 중...' : isCacheRemap ? 'Phase 3 재실행' : '재분석'}
           </button>
         </div>
       </div>
@@ -734,6 +747,7 @@ export function Dashboard() {
   const [unconfirmDoc, setUnconfirmDoc] = useState<Document | null>(null)
   const [deleteDoc, setDeleteDoc] = useState<Document | null>(null)
   const [cancelingIds, setCancelingIds] = useState<Set<string>>(new Set())
+  const [forceRetryingIds, setForceRetryingIds] = useState<Set<string>>(new Set())
   const [filterYM, setFilterYM] = useState<string>('')
   const [filterStatus, setFilterStatus] = useState<StatusFilter>('all')
   const [filterUploader, setFilterUploader] = useState<string>('')
@@ -748,6 +762,19 @@ export function Dashboard() {
   }, [])
 
   useEffect(() => { fetchDocs() }, [fetchDocs])
+
+  async function handleForceRetry(docId: string) {
+    if (!window.confirm('서버 재시작 등으로 멈춘 문서를 강제로 재시작합니다. 계속하시겠습니까?')) return
+    setForceRetryingIds(prev => new Set(prev).add(docId))
+    try {
+      await api.retryDocument(docId, true)
+      await fetchDocs()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : '강제 재시작 실패')
+    } finally {
+      setForceRetryingIds(prev => { const s = new Set(prev); s.delete(docId); return s })
+    }
+  }
 
   async function handleCancel(docId: string) {
     if (!window.confirm('분석을 취소하시겠습니까?')) return
@@ -1129,7 +1156,7 @@ export function Dashboard() {
                       확인하기
                     </button>
                   )}
-                  {doc.status === 'done' && (
+                  {(doc.status === 'done' || doc.status === 'xv_warning') && (
                     <button
                       onClick={() => navigate(`/results/${doc.doc_id}`)}
                       style={{
@@ -1155,7 +1182,7 @@ export function Dashboard() {
                       오류 확인
                     </button>
                   )}
-                  {(doc.status === 'done' || doc.status === 'pending') && (
+                  {(doc.status === 'done' || doc.status === 'pending' || doc.status === 'xv_warning') && (
                     <button
                       onClick={() => setRetryDoc(doc)}
                       title="재분석"
@@ -1170,22 +1197,40 @@ export function Dashboard() {
                     </button>
                   )}
                   {isInProgress(doc.status) && (
-                    <button
-                      onClick={() => handleCancel(doc.doc_id)}
-                      disabled={cancelingIds.has(doc.doc_id)}
-                      title="분석 취소"
-                      style={{
-                        width: 30, height: 30, borderRadius: 7, flexShrink: 0,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        border: '1px solid #dbb590',
-                        background: '#fdf0e8',
-                        color: '#c4622c',
-                        cursor: cancelingIds.has(doc.doc_id) ? 'not-allowed' : 'pointer',
-                        opacity: cancelingIds.has(doc.doc_id) ? 0.5 : 1,
-                      }}
-                    >
-                      <StopCircle size={13} />
-                    </button>
+                    <>
+                      <button
+                        onClick={() => handleForceRetry(doc.doc_id)}
+                        disabled={forceRetryingIds.has(doc.doc_id) || cancelingIds.has(doc.doc_id)}
+                        title="멈춘 경우 강제 재시작"
+                        style={{
+                          width: 30, height: 30, borderRadius: 7, flexShrink: 0,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          border: '1px solid #b0c8e8',
+                          background: '#e8f0fa',
+                          color: '#2a5a9a',
+                          cursor: (forceRetryingIds.has(doc.doc_id) || cancelingIds.has(doc.doc_id)) ? 'not-allowed' : 'pointer',
+                          opacity: (forceRetryingIds.has(doc.doc_id) || cancelingIds.has(doc.doc_id)) ? 0.5 : 1,
+                        }}
+                      >
+                        <RotateCcw size={13} style={forceRetryingIds.has(doc.doc_id) ? { animation: 'spin 0.8s linear infinite' } : undefined} />
+                      </button>
+                      <button
+                        onClick={() => handleCancel(doc.doc_id)}
+                        disabled={cancelingIds.has(doc.doc_id) || forceRetryingIds.has(doc.doc_id)}
+                        title="분석 취소"
+                        style={{
+                          width: 30, height: 30, borderRadius: 7, flexShrink: 0,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          border: '1px solid #dbb590',
+                          background: '#fdf0e8',
+                          color: '#c4622c',
+                          cursor: (cancelingIds.has(doc.doc_id) || forceRetryingIds.has(doc.doc_id)) ? 'not-allowed' : 'pointer',
+                          opacity: (cancelingIds.has(doc.doc_id) || forceRetryingIds.has(doc.doc_id)) ? 0.5 : 1,
+                        }}
+                      >
+                        <StopCircle size={13} />
+                      </button>
+                    </>
                   )}
                   {!isInProgress(doc.status) && (
                     <button

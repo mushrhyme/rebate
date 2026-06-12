@@ -35,14 +35,32 @@ _SYSTEM_PROMPT_CACHE: str | None = None
 # ── 캐시 로더 ─────────────────────────────────────────────────────────────────
 
 def _load_dist_cache(path: Path) -> dict[tuple, str]:
-    """(form_id, issuer_fingerprint, retailer_code) → dist_code"""
-    if not path.exists():
-        return {}
+    """(form_id, issuer_fingerprint, retailer_code) → dist_code
+
+    path.exists() 선차단 금지 — _read_csv가 Sheets 우선 조회하므로
+    로컬 파일이 없어도(Sheets 운영 모드) 캐시를 읽어야 한다."""
     result = {}
     for r in _read_csv(path):
         key = (r.get("form_id", ""), r.get("issuer_fingerprint", ""), r.get("retailer_code", ""))
-        result[key] = r["dist_code"]
+        result[key] = r.get("dist_code", "")
     return result
+
+
+def _code_in_master(code: str, master_codes: set[str], *, kind: str, ocr_name: str) -> bool:
+    """Claude가 확정 제안한 코드가 마스터에 실재하는지 검증.
+
+    마스터가 비어 있으면(Sheets·CSV 로드 실패) 검증을 강제하지 않는다 —
+    이 경우 전건 pending화가 더 위험하므로 경고만 남기고 통과시킨다."""
+    if not master_codes:
+        log.warning("[phase3] %s 마스터가 비어 있어 '%s' 코드 검증 생략", kind, ocr_name)
+        return True
+    if code in master_codes:
+        return True
+    log.warning(
+        "[phase3] %s '%s': Claude 제안 코드 '%s'가 마스터에 없음 → pending",
+        kind, ocr_name, code,
+    )
+    return False
 
 
 # ── fingerprint 헬퍼 ──────────────────────────────────────────────────────────
@@ -348,6 +366,13 @@ async def run_phase3(
     retailer_name_by_code: dict[str, str] = {r["소매처코드"]: r["소매처명"] for r in retail_user_rows}
     dist_name_by_code: dict[str, str] = {r["판매처코드"]: r["판매처명"] for r in retail_user_rows}
 
+    # Claude 확정 답변 검증용 마스터 코드 집합 (마스터 밖 코드는 자동확정·캐시기록 금지)
+    valid_retailer_codes = set(retailer_name_by_code)
+    valid_dist_codes = set(dist_name_by_code)
+    valid_product_codes = {
+        r.get("제품코드", "") for r in _read_csv(mappings_dir / "unit_price.csv") if r.get("제품코드")
+    }
+
     confirmed_retailers: dict[str, dict] = {}
     for name in unique_retailers:
         result = await lookup_retailer(
@@ -499,13 +524,20 @@ async def run_phase3(
         )
 
         # retailers 처리
+        responded_retailers: set[str] = set()
         for m in r_result.get("retailers", []):
             ocr = m.get("ocr_name", "")
             if not ocr:
                 continue
-            if m.get("confidence") == "high" and m.get("retailer_code"):
+            responded_retailers.add(ocr)
+            if (m.get("confidence") == "high" and m.get("retailer_code")
+                    and _code_in_master(m["retailer_code"], valid_retailer_codes,
+                                        kind="retailer", ocr_name=ocr)):
                 retailer_code = m["retailer_code"]
                 dist_code     = m.get("dist_code", "")
+                if dist_code and not _code_in_master(dist_code, valid_dist_codes,
+                                                     kind="dist", ocr_name=ocr):
+                    dist_code = ""
                 confirmed_retailers[ocr] = {
                     "retailer_code": retailer_code,
                     "dist_code":     dist_code,
@@ -538,13 +570,24 @@ async def run_phase3(
                     "candidates":   m.get("candidates", []),
                     "page_number":  customer_page.get(ocr),
                 })
+        # Claude 출력에 누락된 miss_retailers → pending으로 안전하게 처리
+        for n in miss_retailers:
+            if n not in responded_retailers and n not in confirmed_retailers:
+                pending.append({
+                    "mapping_type": "retailer",
+                    "ocrName":      n,
+                    "candidates":   [],
+                    "page_number":  customer_page.get(n),
+                })
 
         # dist_only 처리 (소매처는 캐시됐고 dist만 결정)
         for m in r_result.get("dist_only", []):
             ocr = m.get("ocr_name", "")
             if not ocr or ocr not in confirmed_retailers:
                 continue
-            if m.get("confidence") == "high" and m.get("dist_code"):
+            if (m.get("confidence") == "high" and m.get("dist_code")
+                    and _code_in_master(m["dist_code"], valid_dist_codes,
+                                        kind="dist", ocr_name=ocr)):
                 dist_code     = m["dist_code"]
                 retailer_code = m["retailer_code"]
                 confirmed_retailers[ocr]["dist_code"] = dist_code
@@ -569,11 +612,15 @@ async def run_phase3(
                 })
 
         # products 처리
+        responded_products: set[str] = set()
         for m in p_result.get("products", []):
             ocr = m.get("ocr_name", "")
             if not ocr:
                 continue
-            if m.get("confidence") == "high" and m.get("product_code"):
+            responded_products.add(ocr)
+            if (m.get("confidence") == "high" and m.get("product_code")
+                    and _code_in_master(m["product_code"], valid_product_codes,
+                                        kind="product", ocr_name=ocr)):
                 confirmed_products[ocr] = {
                     "code":        m["product_code"],
                     "master_name": m.get("master_name", ""),
@@ -592,6 +639,16 @@ async def run_phase3(
                     "ocrName":      ocr,
                     "candidates":   m.get("candidates", []),
                     "page_number":  product_page.get(ocr),
+                })
+        # Claude 출력에 누락된 miss_products → pending으로 안전하게 처리
+        for mp in miss_products:
+            n = mp["product"]
+            if n not in responded_products and n not in confirmed_products:
+                pending.append({
+                    "mapping_type": "product",
+                    "ocrName":      n,
+                    "candidates":   [],
+                    "page_number":  product_page.get(n),
                 })
 
     elif cache_only:

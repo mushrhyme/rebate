@@ -115,6 +115,7 @@ class ProductMappingDecision:
     confidence:   float
     page_number:  int | None = None
     error:        str | None = None
+    candidates:   list = field(default_factory=list)
 
 
 # ── Contract 검증 ─────────────────────────────────────────────────────────────
@@ -227,7 +228,7 @@ def product_decision_from_search_result(
     product_name = ""
     candidates = getattr(search_result, "candidates", [])
     if candidates:
-        product_name = candidates[0].get("product_name", "") if isinstance(candidates[0], dict) else ""
+        product_name = candidates[0].get("name", "") if isinstance(candidates[0], dict) else ""
 
     return ProductMappingDecision(
         ocr_name=ocr_name,
@@ -315,7 +316,7 @@ def convert_tool_use_result_to_phase3_output(
             pending.append({
                 "mapping_type": "product",
                 "ocrName":      p.ocr_name,
-                "candidates":   [],
+                "candidates":   p.candidates,
                 "page_number":  p.page_number,
             })
 

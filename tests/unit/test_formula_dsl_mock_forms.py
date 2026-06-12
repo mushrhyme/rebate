@@ -26,7 +26,6 @@ from scripts.phase4_calc import (
     _eval_expr,
     _safe_eval,
     calc_net,
-    FORMULA_REGISTRY,
 )
 
 
@@ -235,55 +234,9 @@ class TestUnknownVariable:
             _safe_eval("shikiri > 0", {"shikiri": 100}, _form_id="mock_test")
 
 
-# ── 케이스 6: Plugin 미등록 → 명확한 오류 ────────────────────────────────────
+# ── 케이스 6: 수식 미정의 → 명확한 오류 ─────────────────────────────────────
 
 class TestPluginNotRegistered:
-    def test_unregistered_plugin_raises_with_name(self):
-        """plugin 미등록 → plugin 이름과 등록 방법이 오류에 포함됨."""
-        mock_form_types = {
-            "mock_form_plugin": {
-                "net": {
-                    "formula_type": "plugin",
-                    "plugin": "my_custom_plugin",
-                }
-            }
-        }
-
-        with patch.dict("scripts.phase4_calc.FORM_TYPES", mock_form_types):
-            with pytest.raises(ValueError) as exc_info:
-                calc_net(
-                    "mock_form_plugin",
-                    cols={},
-                    shikiri=1000,
-                )
-
-        msg = str(exc_info.value)
-        assert "my_custom_plugin" in msg, f"plugin 이름이 오류에 없음: {msg}"
-        assert "FORMULA_REGISTRY" in msg or "등록" in msg, \
-            f"등록 방법이 오류에 없음: {msg}"
-        assert "mock_form_plugin" in msg or "form=" in msg, \
-            f"form_id가 오류에 없음: {msg}"
-
-    def test_registered_plugin_works(self):
-        """등록된 plugin은 정상 호출됨."""
-        def my_plugin(cols, shikiri, teiban, cfg):
-            return shikiri * 0.9
-
-        mock_form_types = {
-            "mock_form_plugin2": {
-                "net": {
-                    "formula_type": "plugin",
-                    "plugin": "test_plugin",
-                }
-            }
-        }
-
-        with patch.dict("scripts.phase4_calc.FORM_TYPES", mock_form_types), \
-             patch.dict("scripts.phase4_calc.FORMULA_REGISTRY", {"test_plugin": my_plugin}):
-            result = calc_net("mock_form_plugin2", cols={}, shikiri=1000)
-
-        assert result == pytest.approx(900.0)
-
     def test_undefined_formula_raises_with_guidance(self):
         """net 수식이 전혀 없는 form → 명확한 안내 오류."""
         mock_form_types = {

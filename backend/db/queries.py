@@ -82,18 +82,19 @@ async def update_document_status(doc_id: str, status: str) -> None:
 async def update_document_error(
     doc_id: str, error_type: str, error_phase: str, message: str
 ) -> None:
+    _et, _ep, _em = error_type, error_phase, message
     async with get_doc_lock(doc_id):
-        meta = _read_meta(doc_id)
-        meta["status"] = "error"
-        meta["error_type"] = error_type
-        meta["error_phase"] = error_phase
-        meta["error_message"] = message
-        meta["updated_at"] = _now_iso()
-        write_json(meta_key(doc_id), meta)
+        await _arw_meta(doc_id, lambda m: m.update({
+            "status": "error",
+            "error_type": _et,
+            "error_phase": _ep,
+            "error_message": _em,
+            "updated_at": _now_iso(),
+        }))
 
 
 async def get_document(doc_id: str) -> dict | None:
-    meta = read_json(meta_key(doc_id))
+    meta = await asyncio.to_thread(read_json, meta_key(doc_id))
     if meta is None:
         return None
     meta.setdefault("token_usage", {})
@@ -124,7 +125,7 @@ async def list_documents() -> list[dict]:
 
 async def save_pending_mappings(doc_id: str, pending: list[dict]) -> None:
     async with get_doc_lock(doc_id):
-        existing = _read_mappings(doc_id)
+        existing = await asyncio.to_thread(_read_mappings, doc_id)
         # 확정된 매핑(confirmed_code 있음)만 보존
         confirmed = [m for m in existing if m.get("confirmed_code")]
         next_id = max((m["id"] for m in confirmed), default=0) + 1
@@ -144,17 +145,13 @@ async def save_pending_mappings(doc_id: str, pending: list[dict]) -> None:
             })
             next_id += 1
 
-        all_mappings = confirmed + new_items
-        write_json(mappings_key(doc_id), all_mappings)
-
-        # meta.pending_count 갱신
-        meta = _read_meta(doc_id)
-        meta["pending_count"] = sum(1 for m in all_mappings if not m.get("confirmed_code"))
-        write_json(meta_key(doc_id), meta)
+        _count = sum(1 for m in confirmed + new_items if not m.get("confirmed_code"))
+        await asyncio.to_thread(write_json, mappings_key(doc_id), confirmed + new_items)
+        await _arw_meta(doc_id, lambda m: m.update({"pending_count": _count}))
 
 
 async def has_pending_mappings(doc_id: str) -> bool:
-    mappings = _read_mappings(doc_id)
+    mappings = await asyncio.to_thread(_read_mappings, doc_id)
     return any(not m.get("confirmed_code") for m in mappings)
 
 
@@ -181,7 +178,7 @@ def _normalize_candidate(c: dict, mapping_type: str) -> dict:
 
 
 async def get_pending_mappings(doc_id: str) -> list[dict]:
-    mappings = _read_mappings(doc_id)
+    mappings = await asyncio.to_thread(_read_mappings, doc_id)
     result = []
     for m in mappings:
         if m.get("confirmed_code"):
@@ -193,7 +190,7 @@ async def get_pending_mappings(doc_id: str) -> list[dict]:
 
 
 async def get_all_mappings(doc_id: str) -> list[dict]:
-    mappings = _read_mappings(doc_id)
+    mappings = await asyncio.to_thread(_read_mappings, doc_id)
     result = []
     for m in mappings:
         m = dict(m)
@@ -204,18 +201,17 @@ async def get_all_mappings(doc_id: str) -> list[dict]:
 
 async def confirm_mapping(doc_id: str, mapping_id: int, confirmed_code: str, confirmed_name: str, user_id: int) -> dict | None:
     async with get_doc_lock(doc_id):
-        mappings = _read_mappings(doc_id)
+        mappings = await asyncio.to_thread(_read_mappings, doc_id)
         for m in mappings:
             if m["id"] == mapping_id:
                 m["confirmed_code"] = confirmed_code
                 m["confirmed_name"] = confirmed_name
                 m["confirmed_by"] = user_id
                 m["confirmed_at"] = _now_iso()
-                write_json(mappings_key(doc_id), mappings)
+                await asyncio.to_thread(write_json, mappings_key(doc_id), mappings)
                 # meta.pending_count 갱신
-                meta = _read_meta(doc_id)
-                meta["pending_count"] = sum(1 for x in mappings if not x.get("confirmed_code"))
-                write_json(meta_key(doc_id), meta)
+                _count = sum(1 for x in mappings if not x.get("confirmed_code"))
+                await _arw_meta(doc_id, lambda meta: meta.update({"pending_count": _count}))
                 # Sheets 캐시 업데이트 (다음 문서에서 자동 매핑에 활용)
                 _write_mapping_cache(m["mapping_type"], m["ocr_name"], confirmed_code, confirmed_name, doc_id)
                 return {"mapping_type": m["mapping_type"], "ocr_name": m["ocr_name"]}
@@ -265,18 +261,17 @@ async def upsert_remap_mapping(
     confirmed_code: str, confirmed_name: str, user_id: int,
 ) -> None:
     async with get_doc_lock(doc_id):
-        mappings = _read_mappings(doc_id)
+        mappings = await asyncio.to_thread(_read_mappings, doc_id)
         for m in mappings:
             if m["mapping_type"] == mapping_type and m["ocr_name"] == ocr_name:
                 m["confirmed_code"] = confirmed_code
                 m["confirmed_name"] = confirmed_name
                 m["confirmed_by"] = user_id
                 m["confirmed_at"] = _now_iso()
-                write_json(mappings_key(doc_id), mappings)
+                await asyncio.to_thread(write_json, mappings_key(doc_id), mappings)
                 # meta.pending_count 갱신
-                meta = _read_meta(doc_id)
-                meta["pending_count"] = sum(1 for x in mappings if not x.get("confirmed_code"))
-                write_json(meta_key(doc_id), meta)
+                _count = sum(1 for x in mappings if not x.get("confirmed_code"))
+                await _arw_meta(doc_id, lambda meta: meta.update({"pending_count": _count}))
                 return
         # 없으면 새로 추가
         next_id = max((m["id"] for m in mappings), default=0) + 1
@@ -291,7 +286,7 @@ async def upsert_remap_mapping(
             "confirmed_by": user_id,
             "confirmed_at": _now_iso(),
         })
-        write_json(mappings_key(doc_id), mappings)
+        await asyncio.to_thread(write_json, mappings_key(doc_id), mappings)
 
 
 # ── 토큰 사용량 ────────────────────────────────────────────────────────────────
@@ -349,34 +344,29 @@ async def get_current_run_id(doc_id: str) -> str:
 # ── 확정 ───────────────────────────────────────────────────────────────────────
 
 async def get_document_confirmed(doc_id: str) -> bool:
-    meta = _read_meta(doc_id)
+    meta = await asyncio.to_thread(_read_meta, doc_id)
     return bool(meta.get("confirmed_at"))
 
 
 async def set_confirmed(doc_id: str) -> None:
+    _now = _now_iso()
     async with get_doc_lock(doc_id):
-        meta = _read_meta(doc_id)
-        meta["confirmed_at"] = _now_iso()
-        meta["updated_at"] = _now_iso()
-        write_json(meta_key(doc_id), meta)
+        await _arw_meta(doc_id, lambda m: m.update({"confirmed_at": _now, "updated_at": _now}))
 
 
 async def unset_confirmed(doc_id: str) -> None:
     async with get_doc_lock(doc_id):
-        meta = _read_meta(doc_id)
-        meta["confirmed_at"] = None
-        meta["updated_at"] = _now_iso()
-        write_json(meta_key(doc_id), meta)
+        await _arw_meta(doc_id, lambda m: m.update({"confirmed_at": None, "updated_at": _now_iso()}))
 
 
 # ── 리뷰 ───────────────────────────────────────────────────────────────────────
 
 async def upsert_review(doc_id: str, retailer_code: str, review_type: str, reviewer_id: int) -> dict:
-    users = _read_users()
+    users = await asyncio.to_thread(_read_users)
     reviewer = _find_user(users, user_id=reviewer_id) or {}
 
     async with get_doc_lock(doc_id):
-        reviews = _read_reviews(doc_id)
+        reviews = await asyncio.to_thread(_read_reviews, doc_id)
         existing = next(
             (r for r in reviews if r["retailer_code"] == retailer_code and r["review_type"] == review_type),
             None,
@@ -388,7 +378,7 @@ async def upsert_review(doc_id: str, retailer_code: str, review_type: str, revie
             existing["reviewer_name_ja"] = reviewer.get("display_name_ja")
             existing["reviewer_username"] = reviewer.get("username")
             existing["reviewed_at"] = now
-            write_json(reviews_key(doc_id), reviews)
+            await asyncio.to_thread(write_json, reviews_key(doc_id), reviews)
             return dict(existing)
         else:
             new_review = {
@@ -403,14 +393,14 @@ async def upsert_review(doc_id: str, retailer_code: str, review_type: str, revie
                 "reviewed_at": now,
             }
             reviews.append(new_review)
-            write_json(reviews_key(doc_id), reviews)
+            await asyncio.to_thread(write_json, reviews_key(doc_id), reviews)
             return dict(new_review)
 
 
 async def delete_review(doc_id: str, retailer_code: str, review_type: str, reviewer_id: int) -> str:
     """'ok' | 'not_found' | 'not_owner'"""
     async with get_doc_lock(doc_id):
-        reviews = _read_reviews(doc_id)
+        reviews = await asyncio.to_thread(_read_reviews, doc_id)
         idx = next(
             (i for i, r in enumerate(reviews) if r["retailer_code"] == retailer_code and r["review_type"] == review_type),
             None,
@@ -420,12 +410,12 @@ async def delete_review(doc_id: str, retailer_code: str, review_type: str, revie
         if reviews[idx]["reviewer_id"] != reviewer_id:
             return "not_owner"
         reviews.pop(idx)
-        write_json(reviews_key(doc_id), reviews)
+        await asyncio.to_thread(write_json, reviews_key(doc_id), reviews)
         return "ok"
 
 
 async def get_reviews(doc_id: str) -> list[dict]:
-    reviews = _read_reviews(doc_id)
+    reviews = await asyncio.to_thread(_read_reviews, doc_id)
     reviews.sort(key=lambda r: (r.get("review_type", ""), r.get("retailer_code", "")))
     return reviews
 
@@ -443,7 +433,7 @@ async def create_document(
     """문서 신규 등록 (upsert — error 상태에서 재시도 허용)."""
     async with get_doc_lock(doc_id):
         now = _now_iso()
-        existing = _read_meta(doc_id)
+        existing = await asyncio.to_thread(_read_meta, doc_id)
         meta = {
             **existing,  # 기존 값이 있으면 보존 (재시도 시)
             "doc_id": doc_id,
@@ -466,37 +456,38 @@ async def create_document(
         }
         if not existing:
             meta["created_at"] = now
-        write_json(meta_key(doc_id), meta)
+        await asyncio.to_thread(write_json, meta_key(doc_id), meta)
 
 
 async def reset_document_for_retry(doc_id: str) -> None:
     """재분석 시 상태·에러·토큰 초기화."""
     async with get_doc_lock(doc_id):
-        meta = _read_meta(doc_id)
-        meta["status"] = "ocr"
-        meta["error_type"] = None
-        meta["error_phase"] = None
-        meta["error_message"] = None
-        meta["token_usage"] = {}
-        meta["phase_timings"] = {}
-        meta["analysis_started_at"] = _now_iso()
-        meta["updated_at"] = _now_iso()
-        write_json(meta_key(doc_id), meta)
+        await _arw_meta(doc_id, lambda m: m.update({
+            "status": "ocr", "error_type": None, "error_phase": None,
+            "error_message": None, "token_usage": {}, "phase_timings": {},
+            "analysis_started_at": _now_iso(), "updated_at": _now_iso(),
+        }))
 
 
 async def clear_mappings(doc_id: str) -> None:
     """매핑 전체 삭제 (재분석 시)."""
     async with get_doc_lock(doc_id):
-        write_json(mappings_key(doc_id), [])
-        meta = _read_meta(doc_id)
-        meta["pending_count"] = 0
-        write_json(meta_key(doc_id), meta)
+        await asyncio.to_thread(write_json, mappings_key(doc_id), [])
+        await _arw_meta(doc_id, lambda m: m.update({"pending_count": 0}))
 
 
 async def set_form_id(doc_id: str, form_id: str) -> None:
     _fid = form_id
     async with get_doc_lock(doc_id):
         await _arw_meta(doc_id, lambda m: m.update({"form_id": _fid, "updated_at": _now_iso()}))
+
+
+async def set_pipeline_hashes(doc_id: str, hashes: dict) -> None:
+    """파이프라인 실행 시점의 form 정의·form_types·프롬프트 해시 묶음을 meta에 기록.
+    재분석 시 어떤 규칙 버전으로 계산됐는지 추적·비교하는 용도."""
+    _h = {**hashes, "recorded_at": _now_iso()}
+    async with get_doc_lock(doc_id):
+        await _arw_meta(doc_id, lambda m: m.update({"pipeline_hashes": _h}))
 
 
 async def set_pages_count(doc_id: str, pages_count: int) -> None:

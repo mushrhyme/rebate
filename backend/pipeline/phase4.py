@@ -20,6 +20,16 @@ log = logging.getLogger(__name__)
 _XV_MODEL = "claude-haiku-4-5-20251001"
 
 
+def _type_tax_rate(type_name: str) -> float:
+    """タイプ名から消費税率を返す。タイプ名に '10%' を含む → 10%、非課税/ロットアウト → 0%、それ以外 → 8%."""
+    t = (type_name or "").strip()
+    if not t or t in ("非課税", "ロットアウト"):
+        return 0.0
+    if "10%" in t:
+        return 0.10
+    return 0.08
+
+
 async def run_phase4(doc_id: str, run_id: str = "", skip_xv: bool = False) -> dict:
     """phase4_calc.py 실행 → Claude 교차검증 → phase4_output.json 반환.
 
@@ -59,12 +69,23 @@ async def run_phase4(doc_id: str, run_id: str = "", skip_xv: bool = False) -> di
         return phase4_data
 
     # ── 교차검증 (Claude) ─────────────────────────────────────────────────────
-    # Python calc xv가 있으면 그걸 그대로 사용.
-    # Python 결과가 비어있을 때만 Claude를 시도한다 (레이블이 더 깔끔하고 결정적이기 때문).
+    # per_customer_vs_summary 타입이 있으면 MD-driven customer_breakdown 포맷이 필요하므로
+    # Python xv가 있더라도 Claude를 호출한다.
     python_xv = phase4_data.get("xv", [])
     if python_xv:
-        log.info("[%s] Python calc xv 사용 (%d개) — Claude 교차검증 건너뜀", doc_id, len(python_xv))
-        return phase4_data
+        form_id_check = phase4_data.get("form_id", "")
+        form_types_path = settings.workspace_root / "config" / "form_types.json"
+        needs_claude_xv = False
+        if form_types_path.exists() and form_id_check:
+            form_cfg_check = json.loads(form_types_path.read_text(encoding="utf-8")).get(form_id_check, {})
+            needs_claude_xv = any(
+                xv_cfg.get("type") == "per_customer_vs_summary"
+                for xv_cfg in form_cfg_check.get("cross_validation", [])
+            )
+        if not needs_claude_xv:
+            log.info("[%s] Python calc xv 사용 (%d개) — Claude 교차검증 건너뜀", doc_id, len(python_xv))
+            return phase4_data
+        log.info("[%s] per_customer_vs_summary 감지 — Claude 교차검증으로 진행 (customer_breakdown 포맷)", doc_id)
 
     xv_flags: dict = {}
     xv_results = await _run_cross_validation(doc_id, phase4_data, settings, run_id=run_id, error_flags=xv_flags)
@@ -116,16 +137,27 @@ async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id
             summary_totals.update(page.get("totals") or {})
             customer_summaries.update(page.get("customer_summaries") or {})
 
-    # Phase 3 items에서 得意先별 金額 합산 (税抜)
+    # Phase 3 items에서 得意先별 金額 집계 (税抜) + タイプ × 得意先 breakdown (消費税 Python 결정적 계산)
     p3_path = settings.extracted_dir / doc_id / "phase3_output.json"
     by_customer_detail: dict[str, int] = {}
+    by_customer_type: dict[str, dict[str, dict]] = {}
     if p3_path.exists():
         p3_data = json.loads(p3_path.read_text(encoding="utf-8"))
         for item in p3_data.get("items", []):
             cust = item.get("customer_ocr", "") or item.get("customer", "")
             kin_gaku = int(item.get("columns", {}).get("金額", 0) or 0)
-            if cust and kin_gaku:
-                by_customer_detail[cust] = by_customer_detail.get(cust, 0) + kin_gaku
+            if not cust or not kin_gaku:
+                continue
+            by_customer_detail[cust] = by_customer_detail.get(cust, 0) + kin_gaku
+            item_type = item.get("item_type", "") or item.get("type", "")
+            tax_rate = _type_tax_rate(item_type)
+            sign = 1 if kin_gaku >= 0 else -1
+            tax = sign * round(abs(kin_gaku) * tax_rate)
+            cust_map = by_customer_type.setdefault(cust, {})
+            entry = cust_map.setdefault(item_type, {"ex_tax": 0, "tax": 0, "inc_tax": 0})
+            entry["ex_tax"] += kin_gaku
+            entry["tax"] += tax
+            entry["inc_tax"] += kin_gaku + tax
 
     # Phase 4 rows에서 집계 값 계산
     rows = phase4_data.get("rows", [])
@@ -157,6 +189,7 @@ async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id
         "by_tax_rate": summary.get("by_rate", {}),
         "by_jisho": by_jisho,
         "by_customer_detail": by_customer_detail,
+        "by_customer_type": by_customer_type,
     }
 
     # Claude 호출
@@ -164,30 +197,46 @@ async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id
         "あなたは日本語請求書データの교차검증 담당입니다.\n\n"
         "## 양식 정의\n\n"
         f"{form_md}\n\n"
-        "위 양식 정의의 '[Phase 4] NET 계산식 > 교차검증' 섹션에 정의된 규칙에 따라 "
+        "위 양식 정의의 '[Phase 4] NET 계산식 > 교차검증' 섹션에 정의된 규칙과 출력 형식에 따라 "
         "사용자 메시지의 숫자 데이터를 검증하세요.\n\n"
         "사용자 메시지 구조:\n"
         "- computed.total_kin_gaku_ex_tax: Phase 4에서 집계한 전체 金額 합계 (消費税 行 제외, 税抜)\n"
         "- computed.by_tax_rate: 세율별 金額 합계 (税抜)\n"
         "- computed.by_jisho: 지소(事業所)별 金額 합계\n"
         "- computed.by_customer_detail: 得意先名별 detail 金額 합산 (税抜)\n"
+        "- computed.by_customer_type: 得意先名 → タイプ名 → {ex_tax, tax, inc_tax} "
+        "(消費税는 Python이 결정적으로 계산 완료. 이 값을 그대로 사용할 것)\n"
         "- cover_totals: 청구서 표지 합계 (일본어 키 그대로)\n"
         "- summary_totals: summary 페이지 집계 합계 (일본어 키 그대로)\n"
         "- customer_summaries: summary 페이지 得意先別 소계 dict (得意先名 → 金額, 税抜)\n\n"
         "JSON만 출력합니다. 다른 설명은 불필요합니다.\n\n"
-        "출력 형식:\n"
-        '{"cross_validation": [\n'
-        '  {\n'
-        '    "rule": "①",\n'
-        '    "description": "검증 내용 한 줄",\n'
-        '    "computed": 12345678,\n'
-        '    "expected_key": "cover_totals의 키명 (해당 없으면 null)",\n'
-        '    "expected": 12345678,\n'
-        '    "match": true,\n'
-        '    "diff": 0\n'
-        '  }\n'
-        ']}\n\n'
-        "교차검증 섹션이 없거나 검증 불가 시: {\"cross_validation\": []}"
+        "## 출력 JSON 스키마\n\n"
+        '{"cross_validation": [ <rule_item>, ... ]}\n\n'
+        "rule_item은 아래 두 타입 중 하나:\n\n"
+        "### 타입 A — simple (단순 수치 비교)\n"
+        '{"rule":"①","description":"한 줄 설명","type":"simple",'
+        '"computed":N,"expected":N,"match":true,"diff":0}\n\n'
+        "### 타입 B — customer_breakdown (得意先별 タイプ별 내역)\n"
+        '{"rule":"②","description":"한 줄 설명","type":"customer_breakdown",\n'
+        ' "match":true,"status":"OK",\n'
+        ' "customers":[\n'
+        '   {"name":"得意先名",\n'
+        '    "rows":[{"label":"表示名","ex_tax":N,"tax":N,"inc_tax":N}],\n'
+        '    "total":{"ex_tax":N,"tax":N,"inc_tax":N},\n'
+        '    "summary_ex_tax":N,"ok":true}\n'
+        ' ],\n'
+        ' "grand_total":{\n'
+        '   "rows":[{"label":"表示名","ex_tax":N,"tax":N,"inc_tax":N}],\n'
+        '   "total":{"ex_tax":N,"tax":N,"inc_tax":N}\n'
+        ' }\n'
+        '}\n\n'
+        "규칙:\n"
+        "- 양식 정의의 교차검증 섹션에 出力形式가 기술돼 있으면 그대로 따른다.\n"
+        "- by_customer_type의 숫자(ex_tax/tax/inc_tax)를 그대로 사용한다. 재계산 금지.\n"
+        "- 0원 타입 행은 rows에서 생략.\n"
+        "- status: 'OK' | 'MISMATCH' | 'NEEDS_CONFIRMATION'\n"
+        "- TBD / 기본값 미분류 item이 존재하면 rows에 '미분류' 행으로 추가, status='NEEDS_CONFIRMATION'.\n"
+        "- 교차검증 섹션 없거나 검증 불가 시: {\"cross_validation\": []}"
     )
 
     user_content = json.dumps(
@@ -204,7 +253,7 @@ async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
     message = await client.messages.create(
         model=_XV_MODEL,
-        max_tokens=1024,
+        max_tokens=4096,
         system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": user_content}],
         temperature=0,
@@ -230,16 +279,33 @@ async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id
     try:
         result = json.loads(raw)
         items = result.get("cross_validation", [])
-        return [
-            {
-                "label": f"{item.get('rule', '')} {item.get('description', '')}".strip(),
-                "actual": item.get("computed"),
-                "ok": bool(item.get("match", False)),
-                "expected": item.get("expected"),
-                "diff": item.get("diff"),
-            }
-            for item in items
-        ]
+        mapped = []
+        for item in items:
+            xv_type = item.get("type", "simple")
+            label = f"{item.get('rule', '')} {item.get('description', '')}".strip()
+            ok = bool(item.get("match", False))
+            if xv_type == "customer_breakdown":
+                mapped.append({
+                    "label": label,
+                    "ok": ok,
+                    "actual": None,
+                    "expected": None,
+                    "diff": item.get("diff"),
+                    "xv_type": "customer_breakdown",
+                    "status": item.get("status", "OK"),
+                    "customers": item.get("customers", []),
+                    "grand_total": item.get("grand_total", {}),
+                })
+            else:
+                mapped.append({
+                    "label": label,
+                    "actual": item.get("computed"),
+                    "ok": ok,
+                    "expected": item.get("expected"),
+                    "diff": item.get("diff"),
+                    "xv_type": "simple",
+                })
+        return mapped
     except (json.JSONDecodeError, AttributeError) as e:
         log.error("[%s] 교차검증 JSON 파싱 실패: %s — raw: %r", doc_id, e, raw[:200])
         if error_flags is not None:

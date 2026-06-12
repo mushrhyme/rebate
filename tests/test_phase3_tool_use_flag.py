@@ -117,16 +117,23 @@ class TestEnvVarControl:
 
 # ── 3. orchestrator에서 flag에 따른 분기 ──────────────────────────────────────
 
-# asyncpg mock — orchestrator import에 필요
-import sys as _sys
-from unittest.mock import MagicMock as _MagicMock
-_sys.modules.setdefault("asyncpg", _MagicMock())
-_sys.modules.setdefault("asyncpg.pool", _MagicMock())
-for _m in ["azure", "azure.ai", "azure.ai.formrecognizer",
-           "google", "google.oauth2", "google.auth",
-           "google.auth.transport", "google.auth.transport.requests",
-           "googleapiclient", "googleapiclient.discovery"]:
-    _sys.modules.setdefault(_m, _MagicMock())
+# NOTE: 과거 여기서 asyncpg/azure/google을 sys.modules에 MagicMock으로 심었으나
+# (PostgreSQL 시절 orchestrator import 차단용), AWS 전환 후 불필요해졌고
+# 모듈 수준 sys.modules 오염이 같은 세션의 다른 테스트까지 가짜 모듈을
+# 쓰게 만들어 제거함 (2026-06-12).
+
+
+def _make_real_stats(**overrides):
+    """orchestrator가 asdict()로 직렬화·저장하는 실제 Phase3FallbackStats 생성."""
+    from backend.pipeline.phase3_fallback import Phase3FallbackStats
+    defaults = dict(
+        enable_tool_use=True, used_tool_use=True, fallback_triggered=False,
+        fallback_reason=None, fallback_class=None,
+        tool_use_elapsed_ms=0.0, legacy_elapsed_ms=0.0, total_elapsed_ms=0.0,
+        max_turns_hit=False, api_retry_failed=False,
+        batch_size=0, batch_failure_count=0,
+    )
+    return Phase3FallbackStats(**{**defaults, **overrides})
 
 
 class TestOrchestratorFlagBranch:
@@ -161,11 +168,12 @@ class TestOrchestratorFlagBranch:
 
         async def mock_wrapper(*args, **kwargs):
             wrapper_calls.append(args)
-            return {}, [], MagicMock(fallback_triggered=False)
+            return {}, [], _make_real_stats()
 
         with patch.object(orchestrator, "get_settings", return_value=mock_settings), \
              patch.object(orchestrator, "run_phase3", mock_run_phase3), \
-             patch.object(orchestrator, "run_phase3_with_tool_use_or_fallback", mock_wrapper):
+             patch.object(orchestrator, "run_phase3_with_tool_use_or_fallback", mock_wrapper), \
+             patch.object(orchestrator, "save_phase3_tool_use_stats", AsyncMock()):
             # flag OFF → legacy 직접 호출
             result = await orchestrator._call_phase3_by_flag(
                 doc_id="doc1",
@@ -188,9 +196,7 @@ class TestOrchestratorFlagBranch:
 
         legacy_calls: list = []
         wrapper_calls: list = []
-        mock_stats = MagicMock(
-            fallback_triggered=False, fallback_class=None, fallback_reason=None
-        )
+        mock_stats = _make_real_stats()
 
         async def mock_run_phase3(*args, **kwargs):
             legacy_calls.append(args)
@@ -202,7 +208,8 @@ class TestOrchestratorFlagBranch:
 
         with patch.object(orchestrator, "get_settings", return_value=mock_settings), \
              patch.object(orchestrator, "run_phase3", mock_run_phase3), \
-             patch.object(orchestrator, "run_phase3_with_tool_use_or_fallback", mock_wrapper):
+             patch.object(orchestrator, "run_phase3_with_tool_use_or_fallback", mock_wrapper), \
+             patch.object(orchestrator, "save_phase3_tool_use_stats", AsyncMock()):
             await orchestrator._call_phase3_by_flag(
                 doc_id="doc1",
                 phase2_result={"pages": [], "items": []},
@@ -225,16 +232,17 @@ class TestOrchestratorFlagBranch:
         from backend.pipeline import orchestrator
 
         mock_settings = _make_mock_settings(tool_use_enabled=True)
-        mock_stats = MagicMock(
-            fallback_triggered=True, fallback_class="ToolUseMaxTurnsError",
-            fallback_reason="max_turns 초과"
+        mock_stats = _make_real_stats(
+            used_tool_use=False, fallback_triggered=True,
+            fallback_class="ToolUseMaxTurnsError", fallback_reason="max_turns 초과",
         )
 
         async def mock_wrapper(*args, **kwargs):
             return {}, [{"mapping_type": "retailer", "ocrName": "テスト", "candidates": []}], mock_stats
 
         with patch.object(orchestrator, "get_settings", return_value=mock_settings), \
-             patch.object(orchestrator, "run_phase3_with_tool_use_or_fallback", mock_wrapper):
+             patch.object(orchestrator, "run_phase3_with_tool_use_or_fallback", mock_wrapper), \
+             patch.object(orchestrator, "save_phase3_tool_use_stats", AsyncMock()):
             _, pending = await orchestrator._call_phase3_by_flag(
                 doc_id="doc1",
                 phase2_result={"pages": [], "items": []},
@@ -287,14 +295,15 @@ class TestWrapperCallArguments:
 
         mock_settings = _make_mock_settings(tool_use_enabled=True)
         call_kwargs: list = []
-        mock_stats = MagicMock(fallback_triggered=False)
+        mock_stats = _make_real_stats()
 
         async def capture_wrapper(*args, **kwargs):
             call_kwargs.append(kwargs)
             return {}, [], mock_stats
 
         with patch.object(orchestrator, "get_settings", return_value=mock_settings), \
-             patch.object(orchestrator, "run_phase3_with_tool_use_or_fallback", capture_wrapper):
+             patch.object(orchestrator, "run_phase3_with_tool_use_or_fallback", capture_wrapper), \
+             patch.object(orchestrator, "save_phase3_tool_use_stats", AsyncMock()):
             await orchestrator._call_phase3_by_flag(
                 doc_id="doc1",
                 phase2_result={"pages": [], "items": []},
@@ -399,14 +408,15 @@ class TestSettingsInjection:
 
         mock_settings = _make_mock_settings(tool_use_enabled=True)
         received_settings: list = []
-        mock_stats = MagicMock(fallback_triggered=False)
+        mock_stats = _make_real_stats()
 
         async def capture_wrapper(*args, **kwargs):
             received_settings.append(kwargs.get("settings"))
             return {}, [], mock_stats
 
         with patch.object(orchestrator, "run_phase3_with_tool_use_or_fallback",
-                          capture_wrapper):
+                          capture_wrapper), \
+             patch.object(orchestrator, "save_phase3_tool_use_stats", AsyncMock()):
             await orchestrator._call_phase3_by_flag(
                 doc_id="doc1",
                 phase2_result={"pages": [], "items": []},

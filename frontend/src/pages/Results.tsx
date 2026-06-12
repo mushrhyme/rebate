@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams } from 'react-router-dom'
-import { CheckCircle2, AlertTriangle, Download, Loader2, ArrowLeft, ArrowRight, Pencil, Search, X } from 'lucide-react'
+import { CheckCircle2, AlertTriangle, Download, Loader2, ArrowLeft, ArrowRight, Pencil, Search, X, ChevronDown } from 'lucide-react'
 import { PdfViewer } from '../components/PdfViewer'
-import { api, type Phase4Result, type Phase4Row, type RateSummary, type User, type ReviewRecord, type RetailerResult, type DistResult, type ProductResult, type BundleInfo, type BundleXv } from '../api/client'
+import { api, type Phase4Result, type Phase4Row, type RateSummary, type User, type ReviewRecord, type RetailerResult, type DistResult, type ProductResult, type BundleInfo, type BundleXv, type CrossValidation, type XvCustomer, type XvRow } from '../api/client'
 
 function fmt(v: number | null | undefined): string {
   if (v == null) return '—'
@@ -556,6 +556,159 @@ function groupByJishoThenCustomerThenProduct(rows: Phase4Row[]) {
 }
 
 // customer_ocr(OCR 소매처명) 기준 그룹핑 — 同一 得意先코드라도 OCR명 단위로 분리
+function fmtNum(v: number | null | undefined) {
+  if (v == null) return '—'
+  return v.toLocaleString()
+}
+
+function XvAmountCells({ row }: { row: XvRow }) {
+  return (
+    <>
+      <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, paddingRight: 6, color: 'var(--text-2)' }}>
+        {fmtNum(row.ex_tax)}
+      </td>
+      <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, paddingRight: 6, color: 'var(--text-3)' }}>
+        +{fmtNum(row.tax)}
+      </td>
+      <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600 }}>
+        {fmtNum(row.inc_tax)}
+      </td>
+    </>
+  )
+}
+
+function CustomerBreakdownXv({ v, isLast }: { v: CrossValidation; isLast: boolean }) {
+  const [open, setOpen] = useState(false)
+  const needsConf = v.status === 'NEEDS_CONFIRMATION'
+  const isMismatch = !v.ok
+
+  return (
+    <div style={{ borderBottom: !isLast ? '1px solid var(--border)' : 'none' }}>
+      {/* 헤더 행 — 클릭으로 펼치기 */}
+      <div
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+          padding: '7px 12px', cursor: 'pointer',
+          background: isMismatch ? '#fdf0e8' : '#f6fbf7',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {isMismatch
+            ? <AlertTriangle size={12} color="#c4622c" style={{ flexShrink: 0 }} />
+            : <CheckCircle2 size={12} color="#2d7d4a" style={{ flexShrink: 0 }} />}
+          <span style={{ fontSize: 11, fontWeight: 600, color: isMismatch ? '#c4622c' : '#2d7d4a' }}>
+            {v.label}
+          </span>
+          {needsConf && (
+            <span style={{
+              fontSize: 10, color: '#c4622c',
+              background: '#fde8d8', borderRadius: 4, padding: '1px 6px',
+            }}>
+              미분류 포함
+            </span>
+          )}
+        </div>
+        <ChevronDown
+          size={12}
+          color="var(--text-3)"
+          style={{ flexShrink: 0, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}
+        />
+      </div>
+
+      {/* 펼쳐진 내역 */}
+      {open && (
+        <div style={{ background: 'var(--bg)', padding: '8px 12px 12px' }}>
+          {(v.customers ?? []).map((cust: XvCustomer, ci: number) => (
+            <div key={ci} style={{ marginBottom: 12 }}>
+              {/* 得意先名 헤더 */}
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 4,
+                fontSize: 11, fontWeight: 700, marginBottom: 4,
+                color: cust.ok ? 'var(--text-1)' : '#c4622c',
+              }}>
+                {!cust.ok && <AlertTriangle size={11} color="#c4622c" style={{ flexShrink: 0 }} />}
+                {cust.name}
+              </div>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    <th style={{ fontSize: 10, color: 'var(--text-3)', textAlign: 'left', paddingLeft: 8, paddingBottom: 2, fontWeight: 400 }}>タイプ</th>
+                    <th style={{ fontSize: 10, color: 'var(--text-3)', textAlign: 'right', paddingRight: 6, fontWeight: 400 }}>税抜</th>
+                    <th style={{ fontSize: 10, color: 'var(--text-3)', textAlign: 'right', paddingRight: 6, fontWeight: 400 }}>消費税</th>
+                    <th style={{ fontSize: 10, color: 'var(--text-3)', textAlign: 'right', fontWeight: 400 }}>税込</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cust.rows.map((row: XvRow, ri: number) => (
+                    <tr key={ri}>
+                      <td style={{ fontSize: 11, paddingLeft: 8, paddingTop: 2, paddingBottom: 2, color: 'var(--text-2)' }}>{row.label}</td>
+                      <XvAmountCells row={row} />
+                    </tr>
+                  ))}
+                  {/* 合計行 */}
+                  <tr style={{ borderTop: '1px solid var(--border)' }}>
+                    <td style={{ fontSize: 11, fontWeight: 700, paddingLeft: 8, paddingTop: 3 }}>合計</td>
+                    <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, paddingRight: 6, paddingTop: 3 }}>
+                      {fmtNum(cust.total.ex_tax)}
+                    </td>
+                    <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, paddingRight: 6, paddingTop: 3 }}>
+                      +{fmtNum(cust.total.tax)}
+                    </td>
+                    <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, paddingTop: 3, color: cust.ok ? 'var(--text-1)' : '#c4622c' }}>
+                      {fmtNum(cust.total.inc_tax)}
+                    </td>
+                  </tr>
+                  {/* summary 기준 税抜 비교 */}
+                  {cust.summary_ex_tax != null && (
+                    <tr>
+                      <td colSpan={3} style={{ fontSize: 10, paddingLeft: 8, paddingTop: 2, color: 'var(--text-3)' }}>
+                        summary 기준 税抜
+                      </td>
+                      <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 10, paddingTop: 2, color: cust.ok ? 'var(--text-3)' : '#c4622c', fontWeight: cust.ok ? 400 : 700 }}>
+                        {fmtNum(cust.summary_ex_tax)}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          ))}
+
+          {/* 전체 총합계 */}
+          {v.grand_total && v.grand_total.rows && v.grand_total.rows.length > 0 && (
+            <div style={{ borderTop: '2px solid var(--border)', paddingTop: 8, marginTop: 4 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 4, color: 'var(--text-1)' }}>■ 총합계</div>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <tbody>
+                  {v.grand_total.rows.map((row: XvRow, ri: number) => (
+                    <tr key={ri}>
+                      <td style={{ fontSize: 11, paddingLeft: 8, paddingTop: 2, paddingBottom: 2, color: 'var(--text-2)' }}>{row.label}</td>
+                      <XvAmountCells row={row} />
+                    </tr>
+                  ))}
+                  <tr style={{ borderTop: '1px solid var(--border)' }}>
+                    <td style={{ fontSize: 11, fontWeight: 700, paddingLeft: 8, paddingTop: 3 }}>合計</td>
+                    <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, paddingRight: 6, paddingTop: 3 }}>
+                      {fmtNum(v.grand_total.total.ex_tax)}
+                    </td>
+                    <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, paddingRight: 6, paddingTop: 3 }}>
+                      +{fmtNum(v.grand_total.total.tax)}
+                    </td>
+                    <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, paddingTop: 3 }}>
+                      {fmtNum(v.grand_total.total.inc_tax)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function groupRows(rows: Phase4Row[]): Map<string, Phase4Row[]> {
   const map = new Map<string, Phase4Row[]>()
   for (const r of rows) {
@@ -604,6 +757,14 @@ export function Results() {
       window.removeEventListener('mouseup', onMouseUp)
     }
   }, [])
+
+  useEffect(() => {
+    if (!remapping) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setRemapping(false) }
+    const timer = setTimeout(() => setRemapping(false), 60_000)
+    window.addEventListener('keydown', onKey)
+    return () => { window.removeEventListener('keydown', onKey); clearTimeout(timer) }
+  }, [remapping])
 
   useEffect(() => {
     if (!docId) return
@@ -934,6 +1095,9 @@ export function Results() {
               ) : (
                 <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
                   {activeXv.map((v, i) => (
+                    v.xv_type === 'customer_breakdown' ? (
+                      <CustomerBreakdownXv key={i} v={v} isLast={i === activeXv.length - 1} />
+                    ) : (
                     <div key={i} style={{
                       display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
                       padding: '7px 12px',
@@ -965,6 +1129,7 @@ export function Results() {
                         )}
                       </div>
                     </div>
+                    )
                   ))}
                 </div>
               )}
