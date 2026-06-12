@@ -87,6 +87,8 @@ CMD_ID=$(aws ssm send-command \
   --document-name "AWS-RunShellScript" \
   --parameters '{"commands":[
     "aws s3 sync s3://rebate-prod-590183751473/app-code/ /app/ --region ap-northeast-2 --exclude \".venv/*\" --exclude \"samples/*\" --exclude \"extracted/*\" --delete --only-show-errors",
+    "printf \"[Service]\\nEnvironment=EXTRA_CORS_ORIGINS=https://dceaaeg5w4k3w.cloudfront.net\\n\" > /etc/systemd/system/rebate.service.d/cors.conf",
+    "systemctl daemon-reload",
     "systemctl restart rebate",
     "sleep 6",
     "systemctl is-active rebate",
