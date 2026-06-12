@@ -165,7 +165,7 @@ def _generate_page_images(pdf_path: Path, pages_dir: Path) -> int:
         png_path = pages_dir / f"page_{page.number + 1:03d}.png"
         # 기존 파일을 서빙 중일 수 있으므로 tmp에 쓰고 원자적으로 교체
         tmp_path = png_path.with_name(png_path.name + ".tmp")
-        pix.save(str(tmp_path))
+        pix.save(str(tmp_path), output="png")  # 확장자가 .tmp라 포맷 명시 필요
         import os as _os
         _os.replace(tmp_path, png_path)
         count += 1
