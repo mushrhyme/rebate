@@ -105,10 +105,22 @@ async def _process_inbox_file(
     drive, file_id: str, filename: str, hatsu_month: str, settings
 ) -> None:
     """단일 inbox 파일을 다운로드하고 파이프라인을 트리거한다."""
-    from ..db.queries import create_document
-    from .s3_store import upload_file
+    from ..api.routes.documents import _make_doc_id
+    from ..db.queries import create_document, get_document
 
-    doc_id = str(uuid4())
+    # 파일명 기반 doc_id — processed.json이 유실·손상돼도 같은 PDF가
+    # 새 UUID 문서로 전량 재분석되지 않도록 1차 dedup을 doc_id 자체로 보장
+    doc_id = _make_doc_id(Path(filename).stem) or str(uuid4())
+
+    existing = await get_document(doc_id)
+    if existing:
+        log.info(
+            "[%s] inbox/%s/%s — 이미 존재하는 문서 (상태: %s), 재처리 생략",
+            doc_id, hatsu_month, filename, existing.get("status"),
+        )
+        return  # 호출부에서 processed 마킹됨
+
+    from .s3_store import upload_file
 
     settings.samples_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = settings.samples_dir / filename

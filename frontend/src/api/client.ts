@@ -351,6 +351,8 @@ export interface Document {
   uploaded_by_username?: string
   uploaded_by_name?: string
   uploaded_by_name_ja?: string
+  // 분석 시점 이후 form 정의·form_types가 변경됨 — 재분석 권장 (null: 판단 불가)
+  stale_rules?: boolean | null
 }
 
 export interface Mapping {
@@ -547,9 +549,18 @@ export interface PatchAssignmentPayload {
   new_system_id: string
 }
 
+export interface FormSyncStatus {
+  ok: boolean
+  changes?: string[]
+  formula_changed?: boolean
+  synced_at: string
+  error?: string | null
+}
+
 export interface FormEntry {
   form_id: string
   name: string
   short_name: string
   tbd_count: number
+  sync_status?: FormSyncStatus | null
 }

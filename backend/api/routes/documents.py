@@ -241,9 +241,44 @@ async def upload_document(
     return {"doc_id": doc_id, "status": "ocr"}
 
 
+def _is_rules_stale(stored: dict, current: dict) -> bool | None:
+    """분석 시점 규칙 해시 vs 현재 해시 비교.
+
+    비교 가능한 키가 없으면 None (구버전 분석 — 판단 불가)."""
+    keys = ("form_definition_hash", "form_types_hash")
+    comparable = [k for k in keys if stored.get(k) and current.get(k)]
+    if not comparable:
+        return None
+    return any(stored[k] != current[k] for k in comparable)
+
+
+def _annotate_stale_rules(docs: list[dict]) -> None:
+    """MD·form_types가 바뀌었는데 재분석되지 않은 문서에 stale_rules=True.
+
+    현업이 '규칙 변경 후 어떤 문서를 다시 돌려야 하는지'를 시스템이 알려주는 고리."""
+    from ...pipeline.orchestrator import _compute_pipeline_hashes
+    settings = get_settings()
+    cache: dict[str, dict] = {}
+    for d in docs:
+        stored = d.get("pipeline_hashes") or {}
+        form_id = d.get("form_id") or ""
+        if not form_id or not stored:
+            d["stale_rules"] = None
+            continue
+        if form_id not in cache:
+            try:
+                cache[form_id] = _compute_pipeline_hashes(form_id, settings)
+            except Exception:
+                log.warning("현재 규칙 해시 계산 실패: %s", form_id, exc_info=True)
+                cache[form_id] = {}
+        d["stale_rules"] = _is_rules_stale(stored, cache[form_id])
+
+
 @router.get("")
 async def list_docs(user: dict = Depends(get_current_user)):
-    return await list_documents()
+    docs = await list_documents()
+    _annotate_stale_rules(docs)
+    return docs
 
 
 @router.get("/{doc_id}")
@@ -251,6 +286,7 @@ async def get_doc(doc_id: str, user: dict = Depends(get_current_user)):
     doc = await get_document(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="문서 없음")
+    _annotate_stale_rules([doc])
     settings = get_settings()
     pages_dir = settings.samples_dir / f"{doc_id}_pages"
     local_png_count = len(list(pages_dir.glob("page_*.png"))) if pages_dir.exists() else 0

@@ -80,6 +80,16 @@ def read_text(key: str) -> str | None:
         raise
 
 
+def write_text(key: str, text: str) -> None:
+    """S3에 텍스트 쓰기 (EC2 런타임 변경 파일 미러용)."""
+    _get_s3().put_object(
+        Bucket=get_bucket(),
+        Key=key,
+        Body=text.encode("utf-8"),
+        ContentType="text/plain; charset=utf-8",
+    )
+
+
 def write_json(key: str, data: Any) -> None:
     """S3에 JSON 쓰기."""
     _get_s3().put_object(

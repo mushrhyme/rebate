@@ -8,6 +8,14 @@ function sessionHeaders(): Record<string, string> {
   return sid ? { 'X-Session-ID': sid } : {}
 }
 
+export interface FormSyncStatus {
+  ok: boolean
+  changes?: string[]
+  formula_changed?: boolean
+  synced_at: string
+  error?: string | null
+}
+
 export interface FormEntry {
   id: string
   name: string
@@ -17,6 +25,7 @@ export interface FormEntry {
   tbdCount: number
   lastEditor: string | null
   lastEditedAt: string | null
+  syncStatus: FormSyncStatus | null
 }
 
 interface FormsContextValue {
@@ -49,6 +58,7 @@ export function FormsProvider({ children }: { children: ReactNode }) {
           tbdCount: f.tbd_count ?? 0,
           lastEditor: f.last_editor ?? null,
           lastEditedAt: f.last_edited_at ?? null,
+          syncStatus: f.sync_status ?? null,
         })))
       }
     } finally {

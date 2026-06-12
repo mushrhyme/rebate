@@ -1086,8 +1086,18 @@ export function Dashboard() {
                 </span>
 
                 {/* 양식 */}
-                <span style={{ fontSize: 12, color: 'var(--text-2)' }} title={doc.form_id ?? undefined}>
+                <span style={{ fontSize: 12, color: 'var(--text-2)', display: 'inline-flex', alignItems: 'center', gap: 4 }} title={doc.form_id ?? undefined}>
                   {doc.form_id ? (formMap[doc.form_id] ?? doc.form_id) : '—'}
+                  {doc.stale_rules === true && (
+                    <span
+                      title="분석 이후 양식 규칙(MD/수식)이 변경되었습니다. 재분석을 권장합니다."
+                      style={{
+                        background: '#fdf0e8', color: '#c4622c',
+                        fontSize: 10, fontWeight: 700, borderRadius: 20, padding: '1px 6px',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >규칙 변경됨</span>
+                  )}
                 </span>
 
                 {/* 상태 */}

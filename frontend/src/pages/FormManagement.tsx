@@ -272,9 +272,10 @@ export function FormManagement() {
               if (data.content_hash) setHashByForm(prev => ({ ...prev, [selectedId]: data.content_hash }))
               setHistoryByForm(prev => { const n = { ...prev }; delete n[selectedId]; return n })  // 히스토리 캐시 무효화
               const timeStr = now.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
-              const summaryMsg = data.tbd_count > 0
+              const autoSyncMsg = data.auto_sync ? ' 양식 규칙 자동 동기화가 백그라운드에서 진행됩니다.' : ''
+              const summaryMsg = (data.tbd_count > 0
                 ? `✅ ${timeStr} 저장 완료. TBD ${data.tbd_count}개가 아직 남아 있습니다.`
-                : `✅ ${timeStr} 저장 완료. TBD 항목 없이 모두 확정되었습니다.`
+                : `✅ ${timeStr} 저장 완료. TBD 항목 없이 모두 확정되었습니다.`) + autoSyncMsg
               setChatHistory(h => [...h, { role: 'assistant', text: summaryMsg }])
               showToast('저장 완료', true)
             } else if (data.type === 'error') {
@@ -405,6 +406,30 @@ export function FormManagement() {
                         background: '#fdf0e8', borderRadius: 20, padding: '1px 6px',
                       }}>
                         <AlertCircle size={8} />TBD {tbd}
+                      </span>
+                    )}
+                    {form.syncStatus?.ok === false && (
+                      <span
+                        title={`자동 동기화 실패 — 수동 동기화 필요: ${form.syncStatus.error ?? ''}`}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 3,
+                          fontSize: 10, fontWeight: 700, color: '#c92a2a',
+                          background: '#fdeaea', borderRadius: 20, padding: '1px 6px',
+                        }}
+                      >
+                        <AlertCircle size={8} />동기화 실패
+                      </span>
+                    )}
+                    {form.syncStatus?.ok === true && form.syncStatus.formula_changed && (
+                      <span
+                        title="최근 동기화에서 NET 수식·검증 규칙이 변경되었습니다. 샘플 문서로 검산을 권장합니다."
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 3,
+                          fontSize: 10, fontWeight: 700, color: '#c4622c',
+                          background: '#fdf0e8', borderRadius: 20, padding: '1px 6px',
+                        }}
+                      >
+                        수식 변경
                       </span>
                     )}
                   </div>

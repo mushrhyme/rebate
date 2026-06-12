@@ -1,6 +1,7 @@
 """Form 정의 업데이트 채팅 — Claude API 연동."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -235,8 +236,9 @@ async def apply(body: ChatRequest, user: dict = Depends(get_current_user)):
                 "saved_at": datetime.now(timezone.utc).isoformat(),
             })
 
-            # MD 저장 → form_types.json 자동 동기화 (백그라운드, 실패해도 저장은 유효)
-            from .forms import schedule_auto_sync
+            # MD 저장 → S3 미러 (배포 가드 기준점) + form_types.json 자동 동기화
+            from .forms import mirror_form_md, schedule_auto_sync
+            await asyncio.to_thread(mirror_form_md, body.form_id, updated)
             schedule_auto_sync(body.form_id)
 
             tbd_count = len(re.findall(r"\bTBD\b", updated))
