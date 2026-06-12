@@ -12,11 +12,9 @@ class Settings(BaseSettings):
     admin_delete_password: str = ""  # ADMIN_DELETE_PASSWORD in .env — required for form deletion
 
     # ── Phase 3 Tool Use feature flag ──────────────────────────────────────────
-    # 기본값 False — 명시적으로 환경변수를 켠 경우에만 Tool Use 경로 활성화
-    # PHASE3_TOOL_USE_ENABLED=true 로 설정하면 run_phase3_with_tool_use_or_fallback() 사용
+    # 기본값 True — 비활성화 시 .env에 PHASE3_TOOL_USE_ENABLED=false 설정
     # Tool Use 실패 시 자동으로 legacy run_phase3()로 fallback
-    # 아직 experimental — product Tool Use, dist 1:N Claude 결정 미완성
-    phase3_tool_use_enabled: bool = False
+    phase3_tool_use_enabled: bool = True
 
     # ── Phase 3 Tool Use 모델 ───────────────────────────────────────────────────
     # PHASE3_TOOL_USE_MODEL 환경변수로 override 가능

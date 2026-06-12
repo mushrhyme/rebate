@@ -57,13 +57,12 @@ class TestSettingsField:
         assert "phase3_tool_use_enabled" in src
 
     def test_default_value_is_false_in_source(self):
-        """기본값이 False로 명시되어 있다."""
+        """기본값이 True로 명시되어 있다 (2026-06-12 운영 전환 — CLAUDE.md '기본값 ON')."""
         src = Path("backend/core/config.py").read_text(encoding="utf-8")
-        # "phase3_tool_use_enabled: bool = False" 가 있어야 한다
-        assert "phase3_tool_use_enabled: bool = False" in src
+        assert "phase3_tool_use_enabled: bool = True" in src
 
     def test_settings_default_is_false(self, monkeypatch):
-        """환경변수 미설정 → phase3_tool_use_enabled = False."""
+        """환경변수 미설정 → phase3_tool_use_enabled = True (기본값 ON)."""
         monkeypatch.delenv("PHASE3_TOOL_USE_ENABLED", raising=False)
         # Settings 캐시를 우회하기 위해 직접 생성
         from backend.core.config import Settings
@@ -79,7 +78,7 @@ class TestSettingsField:
         if hasattr(Settings, "model_fields"):
             field = Settings.model_fields.get("phase3_tool_use_enabled")
             assert field is not None
-            assert field.default is False
+            assert field.default is True
 
     def test_settings_env_var_name(self):
         """환경변수 이름이 PHASE3_TOOL_USE_ENABLED임을 소스로 검증한다."""
@@ -90,22 +89,20 @@ class TestSettingsField:
 # ── 2. 환경변수별 flag 동작 ───────────────────────────────────────────────────
 
 class TestEnvVarControl:
-    def test_env_not_set_means_false(self, monkeypatch):
-        """환경변수 미설정 → phase3_tool_use_enabled = False."""
+    def test_env_not_set_means_true(self, monkeypatch):
+        """환경변수 미설정 → phase3_tool_use_enabled = True (기본값 ON)."""
         monkeypatch.delenv("PHASE3_TOOL_USE_ENABLED", raising=False)
         from backend.core.config import Settings
         # default 확인만 (실제 Settings 인스턴스는 DB url 등 필요)
         if hasattr(Settings, "model_fields"):
-            assert Settings.model_fields["phase3_tool_use_enabled"].default is False
+            assert Settings.model_fields["phase3_tool_use_enabled"].default is True
 
     def test_env_false_means_off(self, monkeypatch):
-        """PHASE3_TOOL_USE_ENABLED=false → False."""
+        """PHASE3_TOOL_USE_ENABLED=false → 인스턴스 값이 False (기본값 True를 env가 override)."""
         monkeypatch.setenv("PHASE3_TOOL_USE_ENABLED", "false")
         from backend.core.config import Settings
-        if hasattr(Settings, "model_fields"):
-            # 환경변수를 반영한 인스턴스는 DB URL 없이 만들 수 없으므로
-            # Settings 클래스의 필드 기본값만 확인
-            assert Settings.model_fields["phase3_tool_use_enabled"].default is False
+        s = Settings(_env_file=None)
+        assert s.phase3_tool_use_enabled is False
 
     def test_env_true_sets_flag(self, monkeypatch):
         """PHASE3_TOOL_USE_ENABLED=true 설정 시 True가 된다."""
