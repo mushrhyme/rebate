@@ -144,8 +144,13 @@ def _write_page_files(result: dict, pages_dir: Path, pdf_path: Path) -> None:
     _generate_page_images(pdf_path, pages_dir)
 
 
+# 레티나(2x) 화면에서 뷰어 폭 ~1000px 기준 2000+ 물리픽셀 필요 → 250 DPI
+# (A4 세로 2066px). 150 DPI(1240px)는 업스케일로 흐릿하게 보였음.
+PAGE_IMAGE_DPI = 250
+
+
 def _generate_page_images(pdf_path: Path, pages_dir: Path) -> int:
-    """PyMuPDF로 PDF 각 페이지를 150 DPI PNG로 저장. 생성한 페이지 수 반환."""
+    """PyMuPDF로 PDF 각 페이지를 PAGE_IMAGE_DPI PNG로 저장. 생성한 페이지 수 반환."""
     try:
         import fitz  # pymupdf
     except ImportError:
@@ -153,12 +158,16 @@ def _generate_page_images(pdf_path: Path, pages_dir: Path) -> int:
 
     pages_dir.mkdir(parents=True, exist_ok=True)
     doc = fitz.open(str(pdf_path))
-    mat = fitz.Matrix(150 / 72, 150 / 72)
+    mat = fitz.Matrix(PAGE_IMAGE_DPI / 72, PAGE_IMAGE_DPI / 72)
     count = 0
     for page in doc:
         pix = page.get_pixmap(matrix=mat)
         png_path = pages_dir / f"page_{page.number + 1:03d}.png"
-        pix.save(str(png_path))
+        # 기존 파일을 서빙 중일 수 있으므로 tmp에 쓰고 원자적으로 교체
+        tmp_path = png_path.with_name(png_path.name + ".tmp")
+        pix.save(str(tmp_path))
+        import os as _os
+        _os.replace(tmp_path, png_path)
         count += 1
     doc.close()
     return count

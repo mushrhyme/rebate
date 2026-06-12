@@ -56,25 +56,40 @@ export function PdfViewer({ docId, page, totalPages, highlightText, mappingType,
     setPageInput(String(page))
   }
 
+  // v= 는 이미지 캐시 버전 — 서버 DPI 변경 시 immutable 브라우저 캐시를 무효화
   const makeImageUrl = (p: number) =>
     docId && p >= 1
-      ? `${BASE}/api/v3/documents/${docId}/page-image?page=${p}${sid ? `&sid=${encodeURIComponent(sid)}` : ''}`
+      ? `${BASE}/api/v3/documents/${docId}/page-image?page=${p}&v=250${sid ? `&sid=${encodeURIComponent(sid)}` : ''}`
       : null
 
   const pageImageUrl = makeImageUrl(page)
 
-  // 인접 페이지 프리페치
+  // 전체 페이지 프리페치 — 현재 페이지에서 가까운 순으로 1장씩 순차 로드
+  // (immutable 캐시라 한 번 받으면 이후 네비게이션은 즉시 표시)
   useEffect(() => {
     if (!docId || !totalPages) return
-    const prefetch = prefetchRef.current
-    ;[page - 1, page + 1].forEach(p => {
-      if (p < 1 || p > totalPages) return
+    let cancelled = false
+    const order: number[] = []
+    for (let d = 1; d < totalPages; d++) {
+      if (page + d <= totalPages) order.push(page + d)
+      if (page - d >= 1) order.push(page - d)
+    }
+    const loadOne = (p: number) => new Promise<void>(resolve => {
       const url = makeImageUrl(p)
-      if (!url || prefetch.has(url)) return
-      prefetch.add(url)
+      if (!url || prefetchRef.current.has(url)) return resolve()
+      prefetchRef.current.add(url)
       const img = new Image()
+      img.onload = () => resolve()
+      img.onerror = () => resolve()
       img.src = url
     })
+    ;(async () => {
+      for (const p of order) {
+        if (cancelled) break
+        await loadOne(p)
+      }
+    })()
+    return () => { cancelled = true }
   }, [docId, page, totalPages])
 
   // bbox JSON 로드 (page 또는 docId 변경 시)

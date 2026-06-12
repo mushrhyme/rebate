@@ -305,6 +305,54 @@ def _resolve_page_file(pages_dir: Path, page: int, glob: str) -> Path | None:
     return None
 
 
+# ── 저해상도 페이지 PNG 업그레이드 ─────────────────────────────────────────────
+# DPI 인상(150→250) 이전에 생성된 캐시 PNG는 로컬·Drive·S3에 그대로 남는다.
+# 요청 시 PNG 헤더에서 해상도를 읽어 낮으면 PDF에서 1회 재생성한다.
+_PAGE_MIN_PX = 1800  # min(w,h): 150 DPI A4=1240 → 재생성, 250 DPI A4=2066 → 통과
+_pages_upgrade_checked: set[str] = set()
+_pages_upgrade_locks: dict[str, asyncio.Lock] = {}
+
+
+def _png_min_dimension(path: Path) -> int:
+    """PNG IHDR에서 width·height를 읽어 작은 쪽 반환. 실패 시 0."""
+    try:
+        with path.open("rb") as f:
+            head = f.read(24)
+        if len(head) < 24 or head[12:16] != b"IHDR":
+            return 0
+        w = int.from_bytes(head[16:20], "big")
+        h = int.from_bytes(head[20:24], "big")
+        return min(w, h)
+    except Exception:
+        return 0
+
+
+async def _maybe_upgrade_page_images(doc_id: str, pages_dir: Path, img_path: Path) -> None:
+    if doc_id in _pages_upgrade_checked:
+        return
+    dim = await asyncio.to_thread(_png_min_dimension, img_path)
+    if dim == 0 or dim >= _PAGE_MIN_PX:
+        _pages_upgrade_checked.add(doc_id)
+        return
+    lock = _pages_upgrade_locks.setdefault(doc_id, asyncio.Lock())
+    async with lock:
+        if doc_id in _pages_upgrade_checked:
+            return
+        _pages_upgrade_checked.add(doc_id)  # 실패해도 요청마다 재시도하지 않음
+        doc = await get_document(doc_id)
+        pdf_filename = (doc or {}).get("pdf_filename") or ""
+        if not pdf_filename or not await _ensure_pdf_local(doc_id, pdf_filename):
+            log.warning("[%s] 저해상도 PNG 재생성 불가 — PDF 없음", doc_id)
+            return
+        settings = get_settings()
+        from ...pipeline.ocr import _generate_page_images
+        count = await asyncio.to_thread(
+            _generate_page_images, settings.samples_dir / pdf_filename, pages_dir
+        )
+        if count:
+            log.info("[%s] 저해상도 페이지 PNG %d장 재생성 완료", doc_id, count)
+
+
 @router.get("/{doc_id}/page-image")
 async def get_page_image(
     doc_id: str,
@@ -319,6 +367,7 @@ async def get_page_image(
     img_path = _resolve_page_file(pages_dir, page, "page_*.png")
     if not img_path:
         raise HTTPException(status_code=404, detail=f"페이지 {page} 이미지 없음")
+    await _maybe_upgrade_page_images(doc_id, pages_dir, img_path)
     return FileResponse(
         str(img_path),
         media_type="image/png",

@@ -50,6 +50,13 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 기본 풀은 cpu+4 (EC2 2 vCPU → 6개) — 파이프라인의 S3·Drive·파일 작업이
+    # 점유하면 API 요청의 S3 읽기까지 줄을 서서 프론트 전체가 멈춘 듯 보인다.
+    # I/O 대기 스레드이므로 넉넉히 확장.
+    from concurrent.futures import ThreadPoolExecutor
+    asyncio.get_running_loop().set_default_executor(
+        ThreadPoolExecutor(max_workers=32, thread_name_prefix="io")
+    )
     await reset_stalled_on_startup()
     watcher = asyncio.create_task(stall_watcher())
     from .core.config import get_settings
