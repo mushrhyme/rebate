@@ -274,6 +274,12 @@ cover totals 키 표에서 아래 패턴으로 semantic role을 매핑한다.
 
 **계층 구조 섹션이 없거나 `← 항목 추출 단위` 마커가 없으면 `row_anchor` 키를 생략한다.**
 
+**개발자 관리 필드 — `row_anchor.recovery_cell_map`:**
+phase2_verify 결정적 복구의 셀 인덱스 정의. **MD에서 파싱하지 않는다** — 기존 form_types.json 값을
+그대로 유지할 것 (백엔드 `_run_form_sync_inner`가 코드 레벨에서도 보존을 강제하며,
+`tests/unit/test_output_format_contract.py`가 form_04 값을 고정한다).
+이 필드가 없는 양식은 결정적 복구를 건너뛰고 Haiku 폴백으로 처리된다 (로그에 명시).
+
 ---
 
 #### 2-J. `번들 경계 감지` → `bundle_detection` 설정

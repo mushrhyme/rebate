@@ -405,7 +405,11 @@ Python 백엔드의 병렬화는 `asyncio`(`orchestrator.py`)가 담당. Claude 
 
 | Phase 4 DSL 전환 완료 (2026-06-05) | `formula_type: "expr"` DSL 경로를 기본으로 채택. `_safe_eval` AST 평가기 구현. form_01·04 전환 완료 | eval() 직접 사용, 양식별 if 분기 하드코딩 | LLM 없음·결정적 계산·재현성 보장. Plugin은 예외 경로로 개발자 승인 필수. JSON Schema + 회귀 테스트로 안전장치 강화. 전체 테스트 681 passed |
 
-**Last Updated:** 2026-06-05 (Phase 4 DSL 전환 완료 — form_01·04 expr 경로, JSON Schema, Mock form 테스트, sync-form-config 안전장치, 전체 테스트 681 passed)
+| md-driven 강화 일괄 적용 (2026-06-12) | ① 프롬프트 로더 mtime 캐시 — docs/*.md 수정이 재시작 없이 반영 (phase1·2·3·product tool-use) ② Tool Use 제품 매핑 프롬프트를 phase3_fallback.py 인라인에서 docs/phase3-tool-use-product-prompt.md로 이동 ③ 消費税率 규칙을 config/tax_rules.json으로 분리 (코드 하드코딩 제거, 없으면 명시적 오류) ④ phase2_verify 결정적 복구 셀 인덱스를 form_types.json row_anchor.recovery_cell_map으로 이동 (미정의 양식은 Haiku 폴백 + 로그) ⑤ docs/output-format.md ↔ sap.py 컬럼 contract test 추가 | 프로세스 재시작 의존·인라인 프롬프트·세율/레이아웃 하드코딩 유지 | 출력 컬럼은 전 양식 공통 상수로 유지하되 contract test로 문서·코드 괴리를 CI에서 차단 (D→B). recovery_cell_map은 개발자 관리 필드 — sync가 보존(코드 강제 + 테스트 고정) |
+
+| 프론트 인증 안정화 (2026-06-12) | me() 부트스트랩을 401일 때만 세션 제거 + 일시 오류는 백오프 재시도(0/2/5s) + storage 이벤트로 탭 간 세션 동기화 + Results stale 응답 가드 | 모든 에러에서 session_id 제거 (기존) | "동시분석 중 새 창 로그인 튕김"의 원인 = 타임아웃·일시 오류를 로그아웃으로 처리하던 catch-all. 백엔드는 stateless JWT라 유효 토큰은 401이 나지 않음 — 401만 진짜 만료 |
+
+**Last Updated:** 2026-06-12 (md-driven 강화 — 프롬프트 mtime 반영·tax_rules.json·recovery_cell_map·output-format contract test·프론트 인증 안정화)
 
 ---
 

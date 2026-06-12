@@ -768,6 +768,8 @@ export function Results() {
 
   useEffect(() => {
     if (!docId) return
+    // docId 전환 직후 이전 문서의 늦은 응답이 새 문서 화면을 덮어쓰지 않게 가드
+    let stale = false
     setLoading(true)
     Promise.all([
       api.getResults(docId),
@@ -776,6 +778,7 @@ export function Results() {
       api.getReviews(docId),
       api.recheckConfirm(docId),
     ]).then(([res, doc, me, revs, recheckResult]) => {
+      if (stale) return
       setResult(res)
       setTotalPages(doc.pages_count ?? 0)
       setUser(me)
@@ -784,8 +787,9 @@ export function Results() {
       if (me.role === '영업사원') {
         setFilterAssigneeId(me.username)
       }
-    }).catch(e => setError(e.message))
-      .finally(() => setLoading(false))
+    }).catch(e => { if (!stale) setError(e.message) })
+      .finally(() => { if (!stale) setLoading(false) })
+    return () => { stale = true }
   }, [docId])
 
   if (loading) {

@@ -44,6 +44,13 @@ def _get_sheets_store():
 with open(BASE / "config" / "form_types.json", encoding="utf-8") as _f:
     FORM_TYPES: dict = json.load(_f)
 
+# 消費税率 — config/tax_rules.json이 단일 출처 (코드에 세율 하드코딩 금지)
+# 파일 없으면 즉시 FileNotFoundError로 중단 (숨은 기본값 없음)
+with open(BASE / "config" / "tax_rules.json", encoding="utf-8") as _f:
+    TAX_RULES: dict = json.load(_f)
+_RATE_8:  float = TAX_RULES["bracket_rates"]["8"]
+_RATE_10: float = TAX_RULES["bracket_rates"]["10"]
+
 # ── 헬퍼 ─────────────────────────────────────────────────────────────────────
 def to_f(v, default=None):
     try:
@@ -382,8 +389,8 @@ def print_summary_rate_then_customer(rows_out, summary_totals, cover_totals, cov
     print(f"  {'得意先名':<44} {'Detail+税(税込)':>16} {'Summary(税込)':>14} 일치")
     print(f"  {'─'*86}")
     for norm in merged_order:
-        t8  = math.floor(merged_tax8[norm]  * 0.08)
-        t10 = math.floor(merged_tax10[norm] * 0.10)
+        t8  = math.floor(merged_tax8[norm]  * _RATE_8)
+        t10 = math.floor(merged_tax10[norm] * _RATE_10)
         ck_incl = merged_sums[norm] + t8 + t10
         sv = merged_svkey[norm]
         if sv is not None:

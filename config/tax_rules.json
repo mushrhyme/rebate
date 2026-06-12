@@ -1,0 +1,13 @@
+{
+  "description": "消費税率 규칙 — タイプ명→세율 매핑. backend/pipeline/phase4.py(교차검증 집계)와 scripts/phase4_calc.py(得意先별 소계 표시)가 읽는다. 수정 시 백엔드 재시작 불필요 (mtime 기반 자동 반영). 파일이 없으면 명시적 오류 — 코드에 숨은 기본값 없음.",
+  "zero_rated_types": ["非課税", "ロットアウト"],
+  "rate_keywords": {
+    "10%": 0.10,
+    "8%": 0.08
+  },
+  "default_rate": 0.08,
+  "bracket_rates": {
+    "8": 0.08,
+    "10": 0.10
+  }
+}

@@ -226,30 +226,45 @@ def _insert_after_kanri(
     return result
 
 
+def _load_recovery_cell_map(form_id: str) -> dict | None:
+    """form_types.json `row_anchor.recovery_cell_map` 로드 — 결정적 복구의 셀 인덱스 정의.
+
+    없으면 None — 결정적 복구를 건너뛰고 Haiku 폴백으로 처리한다.
+    양식별 테이블 레이아웃을 코드에 하드코딩하지 않기 위한 명시적 게이트.
+    (예: form_04 = {"product": 1, "nyusuu": 2, "qty": 3, "cond": 5, "biko": 8,
+                    "cond_field": "未収条件", "cond_scale": 0.01, ...})
+    """
+    try:
+        path = get_settings().workspace_root / "config" / "form_types.json"
+        cfg = json.loads(path.read_text(encoding='utf-8')).get(form_id, {})
+        cell_map = (cfg.get('row_anchor') or {}).get('recovery_cell_map')
+        return cell_map if isinstance(cell_map, dict) else None
+    except Exception:
+        logger.warning("recovery_cell_map 로드 실패 (%s) — 결정적 복구 비활성", form_id, exc_info=True)
+        return None
+
+
 def _recover_from_anchor(
     anchor: dict,
     template: dict,
+    cell_map: dict | None,
 ) -> dict | None:
-    """단일 row anchor → item 복구. 현재 form_04 레이아웃 전용.
+    """단일 row anchor → item 복구. 셀 인덱스는 form_types.json recovery_cell_map에서 온다.
 
     template item(같은 kanri_no의 다른 item)에서 상속 필드(customer, source_pages 등)를 가져온다.
-    amount_hint가 없거나 product 셀이 비어 있으면 None 반환 (Haiku 폴백).
-
-    form_04 컬럼 레이아웃 가정:
-      - cells[1]: product (得意先又は商品)
-      - cells[2]: 入数
-      - cells[3]: 数量 (또는 '個' 포함 셀)
-      - cells[5]: 未収条件 OCR
-      - cells[8]: 備考
-    다른 레이아웃을 가진 양식은 kanri_no 기반 template 조회가 실패해 이 함수가 호출되지 않는다.
-    신규 양식 추가 시 form_types.json에 recovery_cell_map을 추가하고 이 함수를 파라미터화할 것.
+    cell_map이 없으면(=양식에 recovery_cell_map 미정의) None 반환 — Haiku 폴백.
+    amount_hint가 없거나 product 셀이 비어 있어도 None 반환 (Haiku 폴백).
     """
-    line  = anchor['raw_row']
-    cells = [c.strip() for c in line.split('|')]
-    if len(cells) < 3:
+    if not cell_map:
         return None
 
-    product = cells[1]
+    line  = anchor['raw_row']
+    cells = [c.strip() for c in line.split('|')]
+    product_idx = int(cell_map.get('product', 1))
+    if len(cells) <= product_idx:
+        return None
+
+    product = cells[product_idx]
     if not product:
         return None
 
@@ -261,10 +276,12 @@ def _recover_from_anchor(
         s2 = re.sub(r'[個件,. :]', '', s)
         return int(s2) if s2.isdigit() else None
 
-    nyusuu = _si(cells[2]) if len(cells) > 2 else None
+    nyusuu_idx = cell_map.get('nyusuu')
+    nyusuu = _si(cells[nyusuu_idx]) if nyusuu_idx is not None and len(cells) > nyusuu_idx else None
 
     qty = None
-    for c in cells[3:]:
+    qty_idx = int(cell_map.get('qty', product_idx + 2))
+    for c in cells[qty_idx:]:
         if '個' in c:
             qty = _si(c)
             break
@@ -300,6 +317,7 @@ def _check_anchor_coverage(
     anchors:        list[dict],
     items:          list[dict],
     items_by_kanri: dict[str, list[dict]],
+    cell_map:       dict | None = None,
 ) -> dict[str, list[dict]]:
     """row anchor → LLM item[] 커버리지 비교. 누락 row_id를 복구해 반환.
 
@@ -327,6 +345,16 @@ def _check_anchor_coverage(
     if not missing_by_kanri:
         return {}
 
+    if not cell_map:
+        # recovery_cell_map 미정의 양식 — 결정적 복구를 시도하지 않는다 (명시적 게이트).
+        # 누락 행은 2차 검증(管理No計)의 Haiku 폴백 경로에서 처리된다.
+        logger.info(
+            "anchor 누락 %d건 감지했으나 recovery_cell_map 미정의 — 결정적 복구 건너뜀 "
+            "(form_types.json row_anchor.recovery_cell_map 추가 시 활성화)",
+            sum(len(v) for v in missing_by_kanri.values()),
+        )
+        return {}
+
     # jisho → 대표 item 인덱스 (2순위 fallback용)
     real_items = [it for it in items if not it.get('not_item')]
     jisho_template: dict[str, dict] = {}
@@ -349,7 +377,7 @@ def _check_anchor_coverage(
             continue
         new_items = []
         for anchor in missing_anchors:
-            item = _recover_from_anchor(anchor, templates[0])
+            item = _recover_from_anchor(anchor, templates[0], cell_map)
             if item:
                 new_items.append(item)
         if new_items:
@@ -445,14 +473,13 @@ def _try_deterministic_recovery(
     kanri_no:       str,
     expected_total: int,
     actual_total:   int,
+    cell_map:       dict | None = None,
 ) -> list[dict] | None:
-    """block_text에서 누락 항목을 결정적으로 추출 시도. 현재 form_04 레이아웃 전용.
+    """block_text에서 누락 항목을 결정적으로 추출 시도.
 
-    form_04 컬럼 레이아웃 가정:
-      - cells[1]: product (得意先又は商品)
-      - cells[2]: 入数, cells[3]: 数量, cells[5]: 未収OCR, cells[8]: 備考
+    셀 인덱스·조건 필드는 form_types.json `row_anchor.recovery_cell_map`에서 온다.
+    cell_map이 없으면(=양식에 recovery_cell_map 미정의) None 반환 — Haiku 폴백.
     kanri_no가 없는 양식(form_01 등)은 호출 경로가 없으므로 안전.
-    신규 양식 추가 시 recovery_cell_map 파라미터화 필요.
 
     알고리즘:
       1. block_text의 각 테이블 행을 파싱해 제품 행 후보를 추출
@@ -470,6 +497,23 @@ def _try_deterministic_recovery(
     if diff <= 0 or not existing_items:
         return None
 
+    if not cell_map:
+        # recovery_cell_map 미정의 양식 — 결정적 추출 불가, Haiku 폴백 (명시적 게이트)
+        logger.info(
+            "管理No %s — recovery_cell_map 미정의로 결정적 복구 건너뜀 → Haiku 폴백 "
+            "(form_types.json row_anchor.recovery_cell_map 추가 시 활성화)", kanri_no,
+        )
+        return None
+
+    product_idx = int(cell_map.get('product', 1))
+    nyusuu_idx  = cell_map.get('nyusuu')
+    qty_idx     = cell_map.get('qty')
+    cond_idx    = cell_map.get('cond')
+    biko_idx    = cell_map.get('biko')
+    cond_field  = cell_map.get('cond_field', '未収条件')
+    cond_scale  = float(cell_map.get('cond_scale', 1.0))
+    skip_pat    = cell_map.get('skip_product_pattern', '管理No|入出荷|得意先|計上場所')
+
     # ※·▷ 접두사를 제거한 정규화 제품명 집합 (비교용)
     def _norm(p: str) -> str:
         return re.sub(r'^[※▷]+\s*', '', (p or '')).strip()
@@ -484,11 +528,11 @@ def _try_deterministic_recovery(
         cells = [c.strip() for c in line.split('|')]
         if len(cells) < 4:
             continue
-        product = cells[1] if len(cells) > 1 else ''
+        product = cells[product_idx] if len(cells) > product_idx else ''
         if not product:
             continue
         # 헤더·집계 행 제외: 첫 번째 데이터 셀로 판별
-        if re.search(r'管理No|入出荷|得意先|計上場所', product):
+        if re.search(skip_pat, product):
             continue
         if _RE_TOTAL_CELL.search(line):
             continue
@@ -507,20 +551,19 @@ def _try_deterministic_recovery(
         if kingaku is None:
             continue
 
-        # 컬럼 파싱 (form_04 레이아웃: cells[2]=入数, cells[3]=数量, cells[5]=未収OCR)
         def _si(s: str) -> int | None:
             s2 = re.sub(r'[個件,. :]', '', s)
             return int(s2) if s2.isdigit() else None
 
-        nyusuu = _si(cells[2]) if len(cells) > 2 else None
-        qty    = _si(cells[3]) if len(cells) > 3 else None
-        mishuu_raw = cells[5].replace(',', '').strip() if len(cells) > 5 else ''
-        mishuu = int(mishuu_raw) / 100.0 if mishuu_raw.isdigit() else None
-        biko   = cells[8] if len(cells) > 8 else ''
+        nyusuu = _si(cells[nyusuu_idx]) if nyusuu_idx is not None and len(cells) > nyusuu_idx else None
+        qty    = _si(cells[qty_idx])    if qty_idx    is not None and len(cells) > qty_idx    else None
+        cond_raw = cells[cond_idx].replace(',', '').strip() if cond_idx is not None and len(cells) > cond_idx else ''
+        cond   = int(cond_raw) * cond_scale if cond_raw.isdigit() else None
+        biko   = cells[biko_idx] if biko_idx is not None and len(cells) > biko_idx else ''
 
         missing.append({
             'product': product, '金額': kingaku,
-            '入数': nyusuu, '数量': qty, '未収条件': mishuu, '備考': biko,
+            '入数': nyusuu, '数量': qty, cond_field: cond, '備考': biko,
         })
 
     if not missing:
@@ -537,7 +580,7 @@ def _try_deterministic_recovery(
         cols['金額'] = row['金額']
         if row['入数']    is not None: cols['入数']    = row['入数']
         if row['数量']    is not None: cols['数量']    = row['数量']
-        if row['未収条件'] is not None: cols['未収条件'] = row['未収条件']
+        if row.get(cond_field) is not None: cols[cond_field] = row[cond_field]
         if '備考' in cols:             cols['備考']    = row['備考']
         new_item['columns'] = cols
         result.append(new_item)
@@ -552,13 +595,15 @@ async def _retry_missing_items(
     expected_total: int,
     actual_total:   int,
     run_id:         str = "",
+    cell_map:       dict | None = None,
 ) -> list[dict]:
     """특정 管理No 블록의 누락 행을 복구. Python 결정적 추출 → 실패 시 Haiku 폴백."""
     diff = expected_total - actual_total
 
     # ── 결정적 추출 먼저 시도 (Haiku 불필요) ─────────────────────────
     det = _try_deterministic_recovery(
-        block_text, existing_items, kanri_no, expected_total, actual_total
+        block_text, existing_items, kanri_no, expected_total, actual_total,
+        cell_map=cell_map,
     )
     if det is not None:
         logger.info(
@@ -714,6 +759,9 @@ async def run_phase2_verify(
     """
     items = phase2_result.get('items', [])
 
+    # 결정적 복구용 셀 인덱스 — form_types.json row_anchor.recovery_cell_map (양식별 정의)
+    recovery_cell_map = _load_recovery_cell_map(form_id)
+
     # ── 1차: row anchor 커버리지 검증 (form_04) ──────────────────────
     anchors = load_row_anchors(output_dir)
     if anchors:
@@ -753,7 +801,9 @@ async def run_phase2_verify(
             if k:
                 items_by_kanri_for_anchor.setdefault(k, []).append(item)
 
-        anchor_recovered = _check_anchor_coverage(anchors, items, items_by_kanri_for_anchor)
+        anchor_recovered = _check_anchor_coverage(
+            anchors, items, items_by_kanri_for_anchor, cell_map=recovery_cell_map,
+        )
         if anchor_recovered:
             total_ar = sum(len(v) for v in anchor_recovered.values())
             logger.info(
@@ -799,13 +849,13 @@ async def run_phase2_verify(
             ]
             if mismatches:
                 logger.warning(
-                    "[%s] form_01 역산검증 — %d/%d 伝票 불일치: %s",
+                    "[%s] invoice_no 역산검증 — %d/%d 伝票 불일치: %s",
                     doc_id, len(mismatches), len(invoice_totals),
                     [(inv, exp - act) for inv, _, exp, act in mismatches],
                 )
             else:
                 logger.info(
-                    "[%s] form_01 역산검증 — 전체 일치 (%d 伝票)", doc_id, len(invoice_totals)
+                    "[%s] invoice_no 역산검증 — 전체 일치 (%d 伝票)", doc_id, len(invoice_totals)
                 )
 
     # kanri_no 기반 양식이 아니면 管理No計 2차 스킵
@@ -895,6 +945,7 @@ async def run_phase2_verify(
                 doc_id, kanri_no, block_text,
                 items_by_kanri.get(kanri_no, []),
                 expected, actual, run_id,
+                cell_map=recovery_cell_map,
             )
             if recovered:
                 for item in recovered:

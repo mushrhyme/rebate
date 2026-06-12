@@ -11,25 +11,39 @@ logger = logging.getLogger(__name__)
 from ..core.config import get_settings
 from ..db.queries import accumulate_token_usage
 
-_SYSTEM_PROMPT_CACHE: str | None = None
+_SYSTEM_PROMPT_CACHE: tuple[float, str] | None = None  # (mtime, prompt)
 _MODEL = "claude-sonnet-4-6"
 
 
 def _get_system_prompt() -> str:
+    """docs/phase2-prompt.md의 '## 프롬프트' 코드펜스 내용을 시스템 프롬프트로 사용.
+
+    사용 섹션: '## 프롬프트' 코드펜스 안 (없으면 파일 전체) / 무시 섹션: 메타 설명·예시.
+    mtime 기반 캐시 — md 수정 시 백엔드 재시작 없이 다음 호출부터 반영된다.
+    """
     global _SYSTEM_PROMPT_CACHE
-    if _SYSTEM_PROMPT_CACHE is None:
-        prompt_path = get_settings().workspace_root / "docs" / "phase2-prompt.md"
-        raw = prompt_path.read_text(encoding="utf-8")
-        # ## 프롬프트 섹션의 코드 펜스 안 내용만 추출 (메타 설명·예시 섹션 제외)
-        m = re.search(r'## 프롬프트\s*\n+```[^\n]*\n', raw)
-        if m:
-            prompt_start = m.end()
-            close = raw.rfind('\n```')
-            content = raw[prompt_start:close] if close > prompt_start else raw[prompt_start:]
-        else:
-            content = raw
-        _SYSTEM_PROMPT_CACHE = content.strip()
-    return _SYSTEM_PROMPT_CACHE
+    prompt_path = get_settings().workspace_root / "docs" / "phase2-prompt.md"
+    mtime = prompt_path.stat().st_mtime
+    if _SYSTEM_PROMPT_CACHE is not None and _SYSTEM_PROMPT_CACHE[0] == mtime:
+        return _SYSTEM_PROMPT_CACHE[1]
+    raw = prompt_path.read_text(encoding="utf-8")
+    # ## 프롬프트 섹션의 코드 펜스 안 내용만 추출 (메타 설명·예시 섹션 제외)
+    m = re.search(r'## 프롬프트\s*\n+```[^\n]*\n', raw)
+    if m:
+        prompt_start = m.end()
+        close = raw.rfind('\n```')
+        content = raw[prompt_start:close] if close > prompt_start else raw[prompt_start:]
+        used = "'## 프롬프트' 코드펜스"
+    else:
+        content = raw
+        used = "파일 전체 ('## 프롬프트' 코드펜스 없음)"
+    prompt = content.strip()
+    logger.info(
+        "phase2 시스템 프롬프트 로드 — %s %d자 사용 (phase2-prompt.md mtime=%.0f)",
+        used, len(prompt), mtime,
+    )
+    _SYSTEM_PROMPT_CACHE = (mtime, prompt)
+    return prompt
 
 
 def _page_num(f: Path) -> int:

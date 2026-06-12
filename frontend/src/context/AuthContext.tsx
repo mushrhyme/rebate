@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
-import { api, type User } from '../api/client'
+import { api, ApiError, type User } from '../api/client'
 
 interface AuthContextValue {
   user: User | null
@@ -20,13 +20,49 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const sid = localStorage.getItem('session_id')
     if (!sid) { setLoading(false); return }
-    api.me()
-      .then(u => {
-        setUser(u)
-        setMustChangePassword(u.force_password_change)
-      })
-      .catch(() => localStorage.removeItem('session_id'))
-      .finally(() => setLoading(false))
+    let cancelled = false
+
+    // 분석 중 백엔드가 느릴 때 새 탭의 me()가 타임아웃·일시 오류로 실패하면
+    // 예전 코드는 session_id를 지워 모든 탭이 로그아웃됐다 ("로그인 튕김"의 원인).
+    // → 401일 때만 세션이 제거되고(client.ts), 일시 오류는 백오프 재시도한다.
+    const RETRY_DELAYS = [0, 2000, 5000]
+    const bootstrap = async () => {
+      for (const delay of RETRY_DELAYS) {
+        if (delay) await new Promise(r => setTimeout(r, delay))
+        if (cancelled) return
+        try {
+          const u = await api.me()
+          if (cancelled) return
+          setUser(u)
+          setMustChangePassword(u.force_password_change)
+          return
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 401) return // client.ts가 세션 제거·리다이렉트 처리
+          // 타임아웃·네트워크·5xx → 세션은 보존하고 재시도
+        }
+      }
+      // 재시도 소진: 세션을 지우지 않는다 — 다른 탭의 로그인 상태를 파괴하지 않기 위함.
+      // 이 탭은 미로그인 상태로 표시되며, 새로고침으로 복구 가능.
+    }
+    bootstrap().finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [])
+
+  // 탭 간 세션 동기화 — 다른 탭의 로그인/로그아웃을 이 탭에도 반영
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== 'session_id') return
+      if (e.newValue === null) {
+        setUser(null)
+        setMustChangePassword(false)
+      } else if (e.newValue !== e.oldValue) {
+        api.me()
+          .then(u => { setUser(u); setMustChangePassword(u.force_password_change) })
+          .catch(() => {})
+      }
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
   }, [])
 
   async function login(username: string, password: string) {

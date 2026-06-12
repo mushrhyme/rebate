@@ -19,15 +19,45 @@ log = logging.getLogger(__name__)
 
 _XV_MODEL = "claude-haiku-4-5-20251001"
 
+_TAX_RULES_CACHE: tuple[float, dict] | None = None  # (mtime, rules)
+
+
+def _load_tax_rules() -> dict:
+    """config/tax_rules.json 로드 — mtime 기반 캐시 (수정 시 재시작 불필요).
+
+    파일 없음·키 누락은 명시적 오류 — 코드에 숨은 기본 세율을 두지 않는다.
+    """
+    global _TAX_RULES_CACHE
+    path = get_settings().workspace_root / "config" / "tax_rules.json"
+    if not path.exists():
+        raise RuntimeError(
+            "config/tax_rules.json 없음 — 消費税率 규칙을 로드할 수 없습니다. "
+            "(세율은 코드에 하드코딩하지 않음)"
+        )
+    mtime = path.stat().st_mtime
+    if _TAX_RULES_CACHE is not None and _TAX_RULES_CACHE[0] == mtime:
+        return _TAX_RULES_CACHE[1]
+    rules = json.loads(path.read_text(encoding="utf-8"))
+    for key in ("zero_rated_types", "rate_keywords", "default_rate"):
+        if key not in rules:
+            raise RuntimeError(f"config/tax_rules.json에 '{key}' 누락")
+    _TAX_RULES_CACHE = (mtime, rules)
+    return rules
+
 
 def _type_tax_rate(type_name: str) -> float:
-    """タイプ名から消費税率を返す。タイプ名に '10%' を含む → 10%、非課税/ロットアウト → 0%、それ以外 → 8%."""
+    """タイプ名から消費税率を返す — 규칙은 config/tax_rules.json에서 로드.
+
+    zero_rated_types에 해당 → 0% / rate_keywords 포함 문자열 → 해당 세율 / 그 외 → default_rate.
+    """
+    rules = _load_tax_rules()
     t = (type_name or "").strip()
-    if not t or t in ("非課税", "ロットアウト"):
+    if not t or t in rules["zero_rated_types"]:
         return 0.0
-    if "10%" in t:
-        return 0.10
-    return 0.08
+    for keyword, rate in rules["rate_keywords"].items():
+        if keyword in t:
+            return float(rate)
+    return float(rules["default_rate"])
 
 
 async def run_phase4(doc_id: str, run_id: str = "", skip_xv: bool = False) -> dict:

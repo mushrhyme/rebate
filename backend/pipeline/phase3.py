@@ -29,7 +29,7 @@ from ..tools.mapping import (
 
 log = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT_CACHE: str | None = None
+_SYSTEM_PROMPT_CACHE: tuple[float, str] | None = None  # (mtime, prompt)
 
 
 # ── 캐시 로더 ─────────────────────────────────────────────────────────────────
@@ -91,11 +91,22 @@ def _build_issuer_fingerprint(issuer: dict, fields: list[str]) -> str:
 # ── 시스템 프롬프트 ────────────────────────────────────────────────────────────
 
 def _get_system_prompt() -> str:
+    """docs/phase3-prompt.md 전체를 시스템 프롬프트로 사용 (파일 헤더에 명시된 계약).
+
+    mtime 기반 캐시 — md 수정 시 백엔드 재시작 없이 다음 호출부터 반영된다.
+    """
     global _SYSTEM_PROMPT_CACHE
-    if _SYSTEM_PROMPT_CACHE is None:
-        path = get_settings().workspace_root / "docs" / "phase3-prompt.md"
-        _SYSTEM_PROMPT_CACHE = path.read_text(encoding="utf-8")
-    return _SYSTEM_PROMPT_CACHE
+    path = get_settings().workspace_root / "docs" / "phase3-prompt.md"
+    mtime = path.stat().st_mtime
+    if _SYSTEM_PROMPT_CACHE is not None and _SYSTEM_PROMPT_CACHE[0] == mtime:
+        return _SYSTEM_PROMPT_CACHE[1]
+    prompt = path.read_text(encoding="utf-8")
+    log.info(
+        "phase3 시스템 프롬프트 로드 — 파일 전체 %d자 사용 (phase3-prompt.md mtime=%.0f)",
+        len(prompt), mtime,
+    )
+    _SYSTEM_PROMPT_CACHE = (mtime, prompt)
+    return prompt
 
 
 # ── CSV 컨텍스트 구축 ──────────────────────────────────────────────────────────
@@ -365,6 +376,12 @@ async def run_phase3(
         retail_user_rows = []
     retailer_name_by_code: dict[str, str] = {r["소매처코드"]: r["소매처명"] for r in retail_user_rows}
     dist_name_by_code: dict[str, str] = {r["판매처코드"]: r["판매처명"] for r in retail_user_rows}
+    # 소매처코드 → 판매처 후보 목록 인덱스 (dist 1:1/1:N 판정용 — 거래처마다 전체 행 순회 방지)
+    dist_candidates_by_retailer: dict[str, list[dict]] = {}
+    for r in retail_user_rows:
+        dist_candidates_by_retailer.setdefault(r.get("소매처코드", ""), []).append(
+            {"dist_code": r["판매처코드"], "dist_name": r["판매처명"]}
+        )
 
     # Claude 확정 답변 검증용 마스터 코드 집합 (마스터 밖 코드는 자동확정·캐시기록 금지)
     valid_retailer_codes = set(retailer_name_by_code)
@@ -433,11 +450,7 @@ async def run_phase3(
         if _name not in confirmed_retailers or confirmed_retailers[_name].get("dist_code"):
             continue
         _rc = confirmed_retailers[_name]["retailer_code"]
-        _candidates = [
-            {"dist_code": r["판매처코드"], "dist_name": r["판매처명"]}
-            for r in retail_user_rows
-            if r.get("소매처코드") == _rc
-        ]
+        _candidates = dist_candidates_by_retailer.get(_rc, [])
         if len(_candidates) == 1:
             # 1:1 → Python 자동 확정 + 캐시 저장
             _dc = _candidates[0]["dist_code"]

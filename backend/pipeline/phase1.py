@@ -13,7 +13,7 @@ import anthropic
 from ..core.config import get_settings
 from ..db.queries import accumulate_token_usage
 
-_SYSTEM_PROMPT_CACHE: str | None = None
+_SYSTEM_PROMPT_CACHE: tuple[float, str] | None = None  # (mtime, prompt)
 _MODEL = "claude-haiku-4-5-20251001"
 
 # 문서 내 페이지 병렬 호출 상한 (env: MAX_CONCURRENT_PHASE1_PAGES, 기본 5)
@@ -30,20 +30,32 @@ def _get_page_semaphore() -> asyncio.Semaphore:
 
 
 def _get_system_prompt() -> str:
+    """docs/phase1-prompt.md의 '## 프롬프트' 코드펜스 내용을 시스템 프롬프트로 사용.
+
+    사용 섹션: '## 프롬프트' 코드펜스 안 / 무시 섹션: '## 검증 기준' 이하 + 펜스 밖 텍스트.
+    mtime 기반 캐시 — md 수정 시 백엔드 재시작 없이 다음 호출부터 반영된다.
+    """
     global _SYSTEM_PROMPT_CACHE
-    if _SYSTEM_PROMPT_CACHE is None:
-        prompt_path = get_settings().workspace_root / "docs" / "phase1-prompt.md"
-        raw = prompt_path.read_text(encoding="utf-8")
-        # 검증 기준 섹션 제거 — Phase B 변환 호출에는 불필요한 오버헤드
-        content = re.split(r'\n---\s*\n\s*## 검증 기준', raw)[0]
-        # ## 프롬프트 섹션의 코드 펜스 안 내용만 추출
-        m = re.search(r'## 프롬프트\s*\n+```[^\n]*\n', content)
-        if m:
-            prompt_start = m.end()
-            close = content.rfind('\n```')
-            content = content[prompt_start:close] if close > prompt_start else content[prompt_start:]
-        _SYSTEM_PROMPT_CACHE = content.strip()
-    return _SYSTEM_PROMPT_CACHE
+    prompt_path = get_settings().workspace_root / "docs" / "phase1-prompt.md"
+    mtime = prompt_path.stat().st_mtime
+    if _SYSTEM_PROMPT_CACHE is not None and _SYSTEM_PROMPT_CACHE[0] == mtime:
+        return _SYSTEM_PROMPT_CACHE[1]
+    raw = prompt_path.read_text(encoding="utf-8")
+    # 검증 기준 섹션 제거 — Phase B 변환 호출에는 불필요한 오버헤드
+    content = re.split(r'\n---\s*\n\s*## 검증 기준', raw)[0]
+    # ## 프롬프트 섹션의 코드 펜스 안 내용만 추출
+    m = re.search(r'## 프롬프트\s*\n+```[^\n]*\n', content)
+    if m:
+        prompt_start = m.end()
+        close = content.rfind('\n```')
+        content = content[prompt_start:close] if close > prompt_start else content[prompt_start:]
+    prompt = content.strip()
+    log.info(
+        "phase1 시스템 프롬프트 로드 — '## 프롬프트' 코드펜스 %d자 사용, "
+        "'## 검증 기준' 이하 제외 (phase1-prompt.md mtime=%.0f)", len(prompt), mtime,
+    )
+    _SYSTEM_PROMPT_CACHE = (mtime, prompt)
+    return prompt
 
 
 def _parse_ocr_tables(ocr_text: str) -> list[dict]:

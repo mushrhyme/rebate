@@ -62,6 +62,7 @@ import asyncio
 import inspect
 import json
 import logging
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -107,6 +108,39 @@ from .phase3_tool_result_adapter import (
 )
 
 log = logging.getLogger(__name__)
+
+_PRODUCT_PROMPT_CACHE: tuple[float, str] | None = None  # (mtime, prompt)
+
+
+def _get_product_system_prompt() -> str:
+    """docs/phase3-tool-use-product-prompt.md '## 프롬프트' 코드펜스 내용을 사용.
+
+    mtime 기반 캐시 — md 수정 시 재시작 없이 다음 호출부터 반영.
+    파일·섹션 없음은 명시적 오류 (조용한 인라인 fallback 금지) — 호출부에서
+    Tool Use 실패로 처리되어 legacy 경로로 fallback하며 로그가 남는다.
+    """
+    global _PRODUCT_PROMPT_CACHE
+    path = get_settings().workspace_root / "docs" / "phase3-tool-use-product-prompt.md"
+    mtime = path.stat().st_mtime  # 파일 없으면 FileNotFoundError
+    if _PRODUCT_PROMPT_CACHE is not None and _PRODUCT_PROMPT_CACHE[0] == mtime:
+        return _PRODUCT_PROMPT_CACHE[1]
+    raw = path.read_text(encoding="utf-8")
+    m = re.search(r'## 프롬프트\s*\n+```[^\n]*\n', raw)
+    if not m:
+        raise RuntimeError(
+            "docs/phase3-tool-use-product-prompt.md에 '## 프롬프트' 코드펜스가 없음 — "
+            "제품 매핑 시스템 프롬프트를 로드할 수 없습니다."
+        )
+    start = m.end()
+    close = raw.rfind('\n```')
+    prompt = (raw[start:close] if close > start else raw[start:]).strip()
+    log.info(
+        "product tool-use 시스템 프롬프트 로드 — '## 프롬프트' 코드펜스 %d자 사용 "
+        "(phase3-tool-use-product-prompt.md mtime=%.0f)", len(prompt), mtime,
+    )
+    _PRODUCT_PROMPT_CACHE = (mtime, prompt)
+    return prompt
+
 
 __all__ = [
     # 예외
@@ -555,23 +589,9 @@ async def _run_single_product_mapping(
         c["code"] for c in candidates
         if isinstance(c, dict) and c.get("code")
     }
-    _system_prompt = (
-        "당신은 일본 식품 유통 리베이트 시스템의 제품 매핑 전문가입니다.\n"
-        "OCR로 읽은 제품명을 마스터 데이터의 제품코드에 매핑합니다.\n"
-        "최종 응답은 JSON 객체 하나만 출력한다. 분석·설명·마크다운 금지.\n\n"
-        "## 매핑 판단 규칙\n"
-        "1. 제조사명(農心, Nongshim 등)은 무시한다 — OCR명에 붙어 있어도 제품 식별에 쓰지 않는다.\n"
-        "2. 플레이버·한정어(激辛, キムチ, ブラック, トゥーンバ, スパイシーチキン 등)는 반드시 확인한다.\n"
-        "   - OCR명에 한정어가 있으면 → 동일 한정어가 있는 제품을 선택한다.\n"
-        "   - OCR명에 한정어가 없으면 → 한정어 없는 기본 제품을 선택한다.\n"
-        "3. 용량(68g, 114g, 120g 등)이 OCR명에 명시되어 있으면 후보의 volume 필드와 대조해야 한다.\n"
-        "   - 용량이 일치하는 후보가 있으면 그것을 우선한다.\n"
-        "   - 제품명에서 용량을 추측하지 말 것 — volume 필드 값만 신뢰한다.\n"
-        "4. 형태 한정어(カップ, 袋, バケツ 등)가 마스터명에만 있고 OCR명에 없어도,\n"
-        "   플레이버와 용량이 모두 일치하면 그 제품을 선택한다.\n"
-        "5. 유사도 점수는 참고용일 뿐, 위 규칙이 우선한다.\n"
-        "6. 플레이버·용량 두 조건 중 하나라도 불일치하면 not_found로 반환한다."
-    )
+    # 시스템 프롬프트는 docs/phase3-tool-use-product-prompt.md에서 로드 (md-driven).
+    # 로드 실패 시 예외 → Tool Use 실패 → legacy fallback (조용한 인라인 기본값 없음).
+    _system_prompt = _get_product_system_prompt()
     messages: list[dict] = [{
         "role": "user",
         "content": (

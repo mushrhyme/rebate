@@ -1,5 +1,16 @@
 const BASE = import.meta.env.VITE_API_URL ?? ''
 
+// HTTP 상태를 보존하는 에러 — 호출부가 인증 실패(401)와 일시 오류(타임아웃·5xx·네트워크)를
+// 구분할 수 있게 한다. status가 없으면 네트워크/타임아웃 계열.
+export class ApiError extends Error {
+  status?: number
+  constructor(message: string, status?: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
 function sessionId(): string | null {
   return localStorage.getItem('session_id')
 }
@@ -21,23 +32,27 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 30_0
     const res = await fetch(`${BASE}${path}`, { ...init, headers, signal: controller.signal })
 
     if (res.status === 401) {
-      localStorage.removeItem('session_id')
       const body = await res.json().catch(() => ({} as { detail?: string }))
+      // 401 = 토큰 만료/무효 (백엔드는 stateless JWT — 유효한 토큰은 401이 나지 않는다).
+      // 로그인 시도 자체의 401은 세션 제거·리다이렉트 대상이 아니다.
       if (path !== '/api/auth/login') {
-        window.location.href = '/login'
+        localStorage.removeItem('session_id')
+        if (window.location.pathname !== '/login') {
+          window.location.href = '/login'
+        }
       }
-      throw new Error(body.detail ?? '로그인이 필요합니다.')
+      throw new ApiError(body.detail ?? '로그인이 필요합니다.', 401)
     }
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }))
-      throw new Error(err.detail ?? '서버 오류')
+      throw new ApiError(err.detail ?? '서버 오류', res.status)
     }
 
     return res.json()
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') {
-      throw new Error('요청 시간 초과 (30초). 잠시 후 다시 시도하세요.')
+      throw new ApiError('요청 시간 초과 (30초). 잠시 후 다시 시도하세요.')
     }
     throw e
   } finally {
