@@ -282,10 +282,12 @@ export function PdfViewer({ docId, page, totalPages, highlightText, mappingType,
         {pageImageUrl ? (
           // position:relative인 inner div가 img를 감싸서 오버레이 기준점이 됨
           <div style={{ position: 'relative', width: `${zoom}%`, minWidth: zoom <= 100 ? '100%' : undefined, margin: '0 auto' }}>
+            {/* e.target.src는 절대 URL이라 상대 URL인 pageImageUrl과 영원히 불일치
+                → opacity 0.4 고정(반투명 흐림 버그). 비교 대신 값을 직접 기록한다. */}
             <img
               src={pageImageUrl}
               alt={`page ${page}`}
-              onLoad={e => setLoadedUrl((e.target as HTMLImageElement).src)}
+              onLoad={() => setLoadedUrl(pageImageUrl)}
               style={{ width: '100%', display: 'block', opacity: loadedUrl === pageImageUrl ? 1 : 0.4, transition: 'opacity 0.15s' }}
             />
             {highlight && (
