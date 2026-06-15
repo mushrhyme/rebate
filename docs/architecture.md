@@ -411,7 +411,9 @@ Python 백엔드의 병렬화는 `asyncio`(`orchestrator.py`)가 담당. Claude 
 
 | Remaining Risks 처리 #3·#2·#4 (2026-06-15) | #3 token.pickle 조기경보: SheetsStore.probe()+fetch 에러 추적, /health에 sheets 상태·/health/sheets deep probe(503), 분석 진입 전 마스터(unit_price) 가용성 가드(빈 마스터=장애→명시적 error, '조용한 오답' 차단), phase4_calc unit_price 빈결과 sys.exit. #2 회귀 픽스처 고정: gen_regression_fixture.py로 phase3+phase2 입력·참조 마스터를 tests/fixtures/regression/<form>/에 박제, run()이 _sheets_store=None+base_dir로 Sheets/extracted 독립 실행 → form_01·form_04 둘 다 CI에서 Sheets 없이 통과(form_04는 doc③ 신규 골든으로 커버리지 복원). #4 영향 가시화: sync 시 골든 번들로 변경 전/후 NET 재계산→변동 행수·금액 delta·샘플을 sync_status.impact에 기록, FormManagement 뱃지 '수식 변경 · N행' | 차단형 자동 게이트 | #4는 차단이 아니라 가시화 — 현업이 영향 보고 판단(Phase4 교차검증이 2차 방어선). 골든 번들 없으면 available=False로 sync 안 막음 |
 
-**Last Updated:** 2026-06-15 (Remaining Risks #3 토큰 조기경보·#2 회귀 픽스처 Sheets 독립·#4 수식 영향 가시화)
+| 제품 매핑 용량 우선 (2026-06-15) | search_product 후보 검색에서 OCR 용량이 있으면 '용량 일치' 후보를 점수와 무관하게 1차 정렬키로 위에 올리고 컷오프(0.3) 면제. 용량 일치 판정을 ±5% 비율(0.95)에서 정수 정확 일치(±0.5g)로 좁힘 | 용량을 단일 점수에 ±가산만 | 103↔105·113↔114처럼 인접하지만 다른 용량을 '같은 용량'으로 오판해 이름 더 비슷한 틀린 제품에 가산까지 주던 버그(사용자 보고: "103인데 105 가져옴") 해소. 105 등 불일치 후보는 목록에 남되 하위로(재고 여지). 입수(24入 vs 12入) 변별·용량추출 보강(ml·단위없음)은 후속(3·4순위) |
+
+**Last Updated:** 2026-06-15 (제품 매핑 용량 우선 정렬·정확 일치 — #1·#2순위)
 
 ---
 

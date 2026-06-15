@@ -328,6 +328,66 @@ class TestNotFound:
         assert result.retailer_code == "1111"
 
 
+# ── 4-B. 제품 용량 우선 매칭 ──────────────────────────────────────────────────
+
+class TestProductVolumePriority:
+    """search_product 후보 검색의 용량 우선 정렬·정확 일치 판정.
+
+    배경: 과거 ±5% 비율 톨러런스(0.95)가 103↔105처럼 인접하지만 다른 용량을
+    '같은 용량'으로 오판해, 이름이 더 비슷한 틀린 용량 제품에 가산까지 줬다.
+    → OCR에 용량이 있으면 용량 일치 후보를 점수와 무관하게 위로 올린다.
+    """
+
+    def _master(self, mappings: Path) -> None:
+        # 이름은 거의 같고 용량만 다른 실제 패턴 (103 vs 105)
+        write_csv(mappings / "unit_price.csv", [
+            {"제품코드": "P103", "제품명": "辛ラーメン焼きそばカップ24入",  "제품용량": "103.0", "규격": "12×2", "시키리": "100", "본부장": "110", "JANコード": ""},
+            {"제품코드": "P105", "제품명": "N辛ラーメン焼きそばカップ24入", "제품용량": "105.0", "규격": "12×2", "시키리": "100", "본부장": "110", "JANコード": ""},
+        ])
+
+    async def test_exact_volume_outranks_more_similar_name(self, dirs):
+        """이름은 105 제품과 똑같지만 OCR 용량이 103이면 103 제품이 1순위."""
+        mappings, _ = dirs
+        self._master(mappings)
+        from backend.tools.mapping import search_product
+        # 이름은 N제품(105)과 동일, 용량만 103
+        res = await search_product("N辛ラーメン焼きそばカップ24入 103g", mappings, top_k=15)
+        assert res.basis == "candidate"
+        assert res.candidates[0]["code"] == "P103", (
+            f"용량 103 후보가 1순위여야 함, 실제 1순위={res.candidates[0]['code']}"
+        )
+
+    async def test_close_but_distinct_volume_not_treated_as_match(self, dirs):
+        """103과 105는 ±5% 이내(0.981)지만 다른 제품 — 105는 용량 불일치로 하위."""
+        mappings, _ = dirs
+        self._master(mappings)
+        from backend.tools.mapping import search_product
+        res = await search_product("辛ラーメン焼きそばカップ24入 103g", mappings, top_k=15)
+        codes = [c["code"] for c in res.candidates]
+        # 105 제품은 후보에 남되(재고 여지), 103보다 뒤
+        assert codes.index("P103") < codes.index("P105")
+
+    async def test_volume_match_candidate_survives_cutoff(self, dirs):
+        """이름이 거의 안 맞아도 용량 일치 후보는 컷오프(0.3) 면제로 후보에 포함."""
+        mappings, _ = dirs
+        write_csv(mappings / "unit_price.csv", [
+            {"제품코드": "PX", "제품명": "全く違う商品名アイウエオ", "제품용량": "103.0", "규격": "", "시키리": "1", "본부장": "1", "JANコード": ""},
+        ])
+        from backend.tools.mapping import search_product
+        res = await search_product("辛ラーメン焼きそば 103g", mappings, top_k=15)
+        assert res.basis == "candidate"
+        assert any(c["code"] == "PX" for c in res.candidates), "용량 일치 후보가 컷오프로 누락됨"
+
+    async def test_no_ocr_volume_keeps_name_only_ranking(self, dirs):
+        """OCR에 용량이 없으면 기존대로 명칭 유사도 순 (용량 정렬 미적용)."""
+        mappings, _ = dirs
+        self._master(mappings)
+        from backend.tools.mapping import search_product
+        res = await search_product("辛ラーメン焼きそばカップ24入", mappings, top_k=15)  # 용량 토큰 없음
+        # 이름 더 가까운 P103(접두 N 없음)이 자연스럽게 위 — 단 용량 보정 없이 순수 명칭
+        assert res.candidates[0]["code"] == "P103"
+
+
 # ── 5. phase3.py 회귀 테스트 ─────────────────────────────────────────────────
 
 class TestPhase3Regression:

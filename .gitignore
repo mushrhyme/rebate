@@ -82,3 +82,6 @@ mappings/ocr_retailer.csv
 !tests/fixtures/regression/**/extracted/**
 !tests/fixtures/regression/**/mappings/
 !tests/fixtures/regression/**/mappings/**
+# 번들은 입력(phase2/phase3)·마스터만 — run 부산물은 추적 제외
+tests/fixtures/regression/**/timing.json
+tests/fixtures/regression/**/phase4_output.json

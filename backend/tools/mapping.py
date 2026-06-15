@@ -550,9 +550,12 @@ def _tokenize(text: str) -> set[str]:
 
 
 # 용량 보정 파라미터
-_VOL_BOOST = 0.15       # OCR 용량과 DB 용량이 ±5% 이내 일치할 때 가산
-_VOL_PENALTY = 0.20     # OCR 용량이 있는데 DB 용량이 명백히 다를 때 감산
-_VOL_RATIO_THRESHOLD = 0.95  # min/max 비율 ≥ 이 값이면 "일치"로 판정
+_VOL_BOOST = 0.15       # OCR 용량과 DB 용량이 일치할 때 가산
+_VOL_PENALTY = 0.20     # OCR 용량이 있는데 DB 용량이 다를 때 감산
+# 용량 일치 허용 오차(g). 제품용량은 정수라 사실상 정확 일치를 요구한다.
+# 과거 ±5% 비율 톨러런스(0.95)는 103↔105·113↔114처럼 인접하지만 다른 제품을
+# "같은 용량"으로 오판해 틀린 후보에 가산까지 줬다. 0.5g 미만 = 같은 정수로 좁힌다.
+_VOL_MATCH_TOLERANCE = 0.5
 
 # 점수 혼합 비율
 _SEQ_WEIGHT = 0.6   # SequenceMatcher 비중 (문자열 연속 일치)
@@ -568,15 +571,21 @@ def _search_product_candidates(
 
     점수 = SequenceMatcher * 0.6 + Jaccard(토큰) * 0.4 + 용량 보정
     용량 보정: OCR에 g 정보가 있을 때만 적용.
-      - DB 용량과 ±5% 이내 → +_VOL_BOOST
-      - DB 용량이 명백히 다름  → -_VOL_PENALTY
+      - DB 용량과 정확 일치(±0.5g) → +_VOL_BOOST
+      - DB 용량이 다름            → -_VOL_PENALTY
+
+    용량 우선 정렬: OCR에 용량이 있으면 "용량 일치" 후보를 점수와 무관하게 위로 올리고
+    (1차 정렬키), 컷오프(0.3)도 면제한다. 이름이 더 비슷한 다른 용량 제품(예: 103 OCR에
+    이름이 똑같은 105 제품)이 정답을 밀어내거나 top_k에서 잘라버리는 것을 막는다.
+
     동일 product_code가 여러 행에 있으면 최고 점수 1건만 유지.
     컬럼이 없거나 파일이 없으면 빈 리스트 반환.
     """
     norm_query = _strip_manufacturer_prefix(normalize_ocr_name(ocr_name))
     query_vol = _extract_volume_g(norm_query)
     query_tokens = _tokenize(norm_query)
-    scored: list[ProductCandidate] = []
+    # (volume_match, ProductCandidate) — volume_match: True=일치, False=불일치, None=비교불가
+    scored: list[tuple[bool | None, ProductCandidate]] = []
     seen_codes: set[str] = set()
 
     p = mappings_dir / "unit_price.csv"
@@ -611,14 +620,16 @@ def _search_product_candidates(
         jac_score = len(query_tokens & name_tokens) / len(union) if union else 0.0
         score = _SEQ_WEIGHT * seq_score + _JAC_WEIGHT * jac_score
 
+        vol_match: bool | None = None  # OCR/DB 용량 둘 다 있을 때만 True/False
         if query_vol is not None:
             db_vol = _num(row.get(vol_col, ""))
             if db_vol > 0:
-                vol_ratio = min(query_vol, db_vol) / max(query_vol, db_vol)
-                score += _VOL_BOOST if vol_ratio >= _VOL_RATIO_THRESHOLD else -_VOL_PENALTY
+                vol_match = abs(query_vol - db_vol) < _VOL_MATCH_TOLERANCE
+                score += _VOL_BOOST if vol_match else -_VOL_PENALTY
 
-        if score > 0.3:
-            scored.append(ProductCandidate(
+        # 용량 일치 후보는 컷오프 면제 — 이름이 달라도 Claude가 보게 한다
+        if score > 0.3 or vol_match is True:
+            scored.append((vol_match, ProductCandidate(
                 code=code_val,
                 name=name_val.strip(),
                 score=round(score, 3),
@@ -626,11 +637,18 @@ def _search_product_candidates(
                 case_qty=row.get(spec_col, ""),
                 shikiri=_num(row.get("시키리", "")),
                 honbucho=_num(row.get("본부장", "")),
-            ))
+            )))
 
-    scored.sort(key=lambda x: x["score"], reverse=True)
+    # 정렬: OCR에 용량이 있으면 "용량 일치" 우선(1차), 그 다음 점수(2차).
+    # vol_match: True=일치(맨 위), None=비교불가(중립), False=불일치(맨 아래).
+    def _rank(item: tuple[bool | None, ProductCandidate]) -> tuple[int, float]:
+        vm, cand = item
+        tier = 1 if vm is True else (0 if vm is None else -1)
+        return (tier, cand["score"])
+
+    scored.sort(key=_rank, reverse=True)
     deduped: list[ProductCandidate] = []
-    for item in scored:
+    for _vm, item in scored:
         code = item["code"]
         if code not in seen_codes:
             seen_codes.add(code)
