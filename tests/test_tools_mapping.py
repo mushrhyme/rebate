@@ -388,6 +388,37 @@ class TestProductVolumePriority:
         assert res.candidates[0]["code"] == "P103"
 
 
+class TestVolumeExtraction:
+    """_extract_volume_g — g 뒤 CJK/가나 경계 처리.
+
+    배경: 정규식 `g\\b`는 袋·カップ 같은 유니코드 단어 문자에서 경계가 사라져
+    "120g袋"·"120gカップ"의 추출이 실패했다(봉지·컵 주력 SKU 16% 누락).
+    """
+
+    def test_g_followed_by_cjk_or_kana(self):
+        from backend.tools.mapping import _extract_volume_g
+        assert _extract_volume_g("辛ラーメン 120g袋") == 120.0
+        assert _extract_volume_g("辛ラーメン 120gカップ") == 120.0
+        assert _extract_volume_g("カムジャ麺 100g袋") == 100.0
+        assert _extract_volume_g("135g") == 135.0          # 끝
+        assert _extract_volume_g("68g 12×2") == 68.0       # 공백
+        assert _extract_volume_g("辛ラーメン 137.5g袋") == 137.5  # 소수
+
+    def test_no_false_positive_on_word_g(self):
+        from backend.tools.mapping import _extract_volume_g
+        # 'g'가 영어 단어 중간이면 용량 아님
+        assert _extract_volume_g("100gram pack") is None
+        assert _extract_volume_g("big size") is None
+        # 단위 없는 끝 숫자는 용량으로 보지 않음 (입수·수량 오인 방지)
+        assert _extract_volume_g("辛ラーメン焼きそばカップ炒めキムチ味122") is None
+
+    def test_pack_count_not_volume(self):
+        from backend.tools.mapping import _extract_volume_g
+        # 'P'·'袋'만 붙은 개수 표기는 g 용량 아님
+        assert _extract_volume_g("辛ラーメン キムチ 3P袋") is None
+        assert _extract_volume_g("本場韓国コムタンラーメン 3袋") is None
+
+
 # ── 5. phase3.py 회귀 테스트 ─────────────────────────────────────────────────
 
 class TestPhase3Regression:

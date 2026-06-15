@@ -536,8 +536,14 @@ async def lookup_retailer(
 # ── 내부 검색 헬퍼 ────────────────────────────────────────────────────────────
 
 def _extract_volume_g(text: str) -> float | None:
-    """텍스트에서 용량(g 단위)을 추출. 없으면 None."""
-    m = re.search(r'(\d+(?:\.\d+)?)\s*g\b', text, re.IGNORECASE)
+    """텍스트에서 용량(g 단위)을 추출. 없으면 None.
+
+    경계 조건은 `\\b`가 아니라 `(?![a-zA-Z])`를 쓴다. `\\b`는 g 뒤에 오는
+    袋·カップ 같은 CJK/가나도 단어 문자로 보아 경계가 사라져 "120g袋"의 추출이
+    실패했다(주력 봉지·컵 SKU에서 16% 누락). g 다음이 ASCII 글자가 아니면
+    (CJK·가나·기호·끝) 용량으로 인정한다. 'gram'처럼 단어 중간의 g는 제외된다.
+    """
+    m = re.search(r'(\d+(?:\.\d+)?)\s*[gG](?![a-zA-Z])', text)
     return float(m.group(1)) if m else None
 
 
