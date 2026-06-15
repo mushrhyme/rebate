@@ -8,10 +8,23 @@ function sessionHeaders(): Record<string, string> {
   return sid ? { 'X-Session-ID': sid } : {}
 }
 
+export interface FormulaImpact {
+  available: boolean
+  reason?: string
+  doc_id?: string
+  rows_total?: number
+  rows_changed?: number
+  net_before?: number
+  net_after?: number
+  net_delta?: number
+  samples?: { product: string; net_before: number | null; net_after: number | null }[]
+}
+
 export interface FormSyncStatus {
   ok: boolean
   changes?: string[]
   formula_changed?: boolean
+  impact?: FormulaImpact | null
   synced_at: string
   error?: string | null
 }

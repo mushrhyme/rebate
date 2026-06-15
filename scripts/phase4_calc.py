@@ -614,6 +614,10 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
 
     unit_price    = load_csv_dict("unit_price.csv",   "제품코드",  root)
     retail_master = load_csv_dict("retail_user.csv",  "소매처코드", root)
+    # 마스터 빈 결과 = Sheets 토큰/네트워크 장애 (운영상 빈 적 없음).
+    # NET을 전부 None으로 '조용히' 계산하지 않고 명시적으로 실패한다.
+    if not unit_price:
+        sys.exit("[오류] unit_price 마스터가 비어 있음 — Sheets 토큰/네트워크 확인 필요 (NET 계산 중단)")
 
     retail_tantou:    dict[str, list[str]] = {}
     retail_tantou_id: dict[str, list[str]] = {}

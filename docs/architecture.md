@@ -409,7 +409,9 @@ Python 백엔드의 병렬화는 `asyncio`(`orchestrator.py`)가 담당. Claude 
 
 | 프론트 인증 안정화 (2026-06-12) | me() 부트스트랩을 401일 때만 세션 제거 + 일시 오류는 백오프 재시도(0/2/5s) + storage 이벤트로 탭 간 세션 동기화 + Results stale 응답 가드 | 모든 에러에서 session_id 제거 (기존) | "동시분석 중 새 창 로그인 튕김"의 원인 = 타임아웃·일시 오류를 로그아웃으로 처리하던 catch-all. 백엔드는 stateless JWT라 유효 토큰은 401이 나지 않음 — 401만 진짜 만료 |
 
-**Last Updated:** 2026-06-12 (md-driven 강화 — 프롬프트 mtime 반영·tax_rules.json·recovery_cell_map·output-format contract test·프론트 인증 안정화)
+| Remaining Risks 처리 #3·#2·#4 (2026-06-15) | #3 token.pickle 조기경보: SheetsStore.probe()+fetch 에러 추적, /health에 sheets 상태·/health/sheets deep probe(503), 분석 진입 전 마스터(unit_price) 가용성 가드(빈 마스터=장애→명시적 error, '조용한 오답' 차단), phase4_calc unit_price 빈결과 sys.exit. #2 회귀 픽스처 고정: gen_regression_fixture.py로 phase3+phase2 입력·참조 마스터를 tests/fixtures/regression/<form>/에 박제, run()이 _sheets_store=None+base_dir로 Sheets/extracted 독립 실행 → form_01·form_04 둘 다 CI에서 Sheets 없이 통과(form_04는 doc③ 신규 골든으로 커버리지 복원). #4 영향 가시화: sync 시 골든 번들로 변경 전/후 NET 재계산→변동 행수·금액 delta·샘플을 sync_status.impact에 기록, FormManagement 뱃지 '수식 변경 · N행' | 차단형 자동 게이트 | #4는 차단이 아니라 가시화 — 현업이 영향 보고 판단(Phase4 교차검증이 2차 방어선). 골든 번들 없으면 available=False로 sync 안 막음 |
+
+**Last Updated:** 2026-06-15 (Remaining Risks #3 토큰 조기경보·#2 회귀 픽스처 Sheets 독립·#4 수식 영향 가시화)
 
 ---
 

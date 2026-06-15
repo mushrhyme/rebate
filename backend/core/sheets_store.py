@@ -25,6 +25,15 @@ TAB_MAP: dict[str, str] = {
 
 _SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets"
 
+# 운영상 절대 비어 있으면 안 되는 마스터 탭 — 빈 결과 = 토큰/네트워크 장애로 간주
+MASTER_CSV_FILES = ("unit_price.csv", "retail_user.csv", "domae_retail_1.csv")
+
+
+class SheetsUnavailableError(RuntimeError):
+    """Sheets 마스터를 읽을 수 없음 (토큰 만료·네트워크 장애 등).
+
+    빈 마스터로 분석을 '조용히' 진행하지 않기 위해 명시적으로 던진다."""
+
 
 class SheetsStore:
     """Google Sheets 기반 매핑 데이터 저장소.
@@ -42,6 +51,8 @@ class SheetsStore:
         self._ttl = ttl_seconds
         # tab → (cached_at_monotonic, rows)
         self._cache: dict[str, tuple[float, list[dict]]] = {}
+        # tab → (실패 시각(monotonic), 메시지) — fetch 실패를 조용히 삼키지 않고 노출
+        self._fetch_errors: dict[str, tuple[float, str]] = {}
         self._session = self._build_session()
 
     def _build_session(self) -> AuthorizedSession:
@@ -72,8 +83,12 @@ class SheetsStore:
     def tab_for(self, csv_filename: str) -> Optional[str]:
         return TAB_MAP.get(csv_filename)
 
-    def read_csv(self, csv_filename: str) -> list[dict]:
-        """CSV 파일명에 대응하는 Sheets 탭을 list[dict]로 반환 (TTL 메모리 캐시)."""
+    def read_csv(self, csv_filename: str, required: bool = False) -> list[dict]:
+        """CSV 파일명에 대응하는 Sheets 탭을 list[dict]로 반환 (TTL 메모리 캐시).
+
+        required=True: 결과가 비고 직전 fetch가 실패했으면 SheetsUnavailableError를 던진다.
+        마스터(unit_price 등)를 '빈 결과로 조용히' 쓰지 않기 위한 가드.
+        """
         tab = self.tab_for(csv_filename)
         if tab is None:
             return []
@@ -81,13 +96,38 @@ class SheetsStore:
         now = time.monotonic()
         if entry is None or (now - entry[0]) >= self._ttl:
             self._cache[tab] = (now, self._fetch(tab))
-        return self._cache[tab][1]
+        rows = self._cache[tab][1]
+        if required and not rows and tab in self._fetch_errors:
+            _, msg = self._fetch_errors[tab]
+            raise SheetsUnavailableError(f"Sheets 탭 '{tab}' 읽기 실패: {msg}")
+        return rows
+
+    def probe(self) -> tuple[bool, str]:
+        """토큰·연결 상태를 가볍게 검증 (spreadsheet 메타데이터 1회 GET).
+
+        반환: (정상 여부, 사유). 모니터링·/health/sheets용."""
+        try:
+            url = f"{_SHEETS_BASE}/{self._id}"
+            resp = self._session.get(url, params={"fields": "spreadsheetId"})
+            resp.raise_for_status()
+            return True, "ok"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
+    @property
+    def last_fetch_error(self) -> Optional[tuple[float, str]]:
+        """가장 최근 fetch 실패 (시각 monotonic, 메시지) — 없으면 None."""
+        if not self._fetch_errors:
+            return None
+        return max(self._fetch_errors.values(), key=lambda v: v[0])
 
     def _fetch(self, tab: str) -> list[dict]:
         try:
             result = self._get("values/" + tab + "!A1:ZZ")
+            self._fetch_errors.pop(tab, None)
         except Exception as e:
             import logging
+            self._fetch_errors[tab] = (time.monotonic(), f"{type(e).__name__}: {e}")
             logging.getLogger(__name__).warning("Sheets 탭 '%s' 읽기 실패 — 빈 결과 반환: %s", tab, e)
             return []
         raw = result.get("values", [])
@@ -186,6 +226,7 @@ class SheetsStore:
 
 _instance: Optional[SheetsStore] = None
 _init_failed_at: Optional[float] = None
+_init_error_msg: Optional[str] = None
 _INIT_RETRY_COOLDOWN_SECONDS = 60.0
 
 
@@ -194,7 +235,7 @@ def get_sheets_store() -> Optional[SheetsStore]:
 
     초기화 실패는 영구 고착하지 않는다 — 쿨다운 후 재시도해서
     token 갱신 일시 장애가 '프로세스 수명 내내 빈 마스터'로 이어지지 않게 한다."""
-    global _instance, _init_failed_at
+    global _instance, _init_failed_at, _init_error_msg
     if _instance is not None:
         return _instance
     if (_init_failed_at is not None
@@ -207,8 +248,10 @@ def get_sheets_store() -> Optional[SheetsStore]:
     try:
         _instance = SheetsStore(sid)
         _init_failed_at = None
+        _init_error_msg = None
     except Exception as e:
         import logging
+        _init_error_msg = f"{type(e).__name__}: {e}"
         logging.getLogger(__name__).warning(
             "SheetsStore 초기화 실패 — %d초 후 재시도, 그동안 로컬 CSV fallback: %s",
             int(_INIT_RETRY_COOLDOWN_SECONDS), e,
@@ -216,3 +259,46 @@ def get_sheets_store() -> Optional[SheetsStore]:
         _init_failed_at = time.monotonic()
         return None
     return _instance
+
+
+def get_sheets_health(deep: bool = False) -> dict:
+    """Sheets 연결 상태 요약 — /health 및 모니터링용.
+
+    deep=False: API 호출 없이 캐시된 상태(설정 여부·인스턴스 여부·최근 에러)만 본다.
+    deep=True : probe()로 실제 토큰·연결을 검증한다 (운영자/모니터 폴링용).
+    """
+    from .config import get_settings
+    sid = get_settings().google_sheets_mappings_id
+    if not sid:
+        return {"configured": False, "status": "disabled"}
+
+    info: dict = {"configured": True}
+    if _instance is None:
+        info["status"] = "uninitialized"
+        if _init_error_msg:
+            info["init_error"] = _init_error_msg
+        if deep:
+            # 초기화를 한 번 시도해 본다 (쿨다운 무시하지 않음 — get_sheets_store 경유)
+            store = get_sheets_store()
+            if store is None:
+                info["status"] = "error"
+                if _init_error_msg:
+                    info["init_error"] = _init_error_msg
+                return info
+            ok, reason = store.probe()
+            info["status"] = "ok" if ok else "error"
+            if not ok:
+                info["probe_error"] = reason
+        return info
+
+    last_err = _instance.last_fetch_error
+    if deep:
+        ok, reason = _instance.probe()
+        info["status"] = "ok" if ok else "error"
+        if not ok:
+            info["probe_error"] = reason
+    else:
+        info["status"] = "degraded" if last_err else "ok"
+    if last_err:
+        info["last_fetch_error"] = last_err[1]
+    return info

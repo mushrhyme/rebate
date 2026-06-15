@@ -98,4 +98,24 @@ app.include_router(usage.router)
 
 @app.get("/health")
 async def health():
-    return {"ok": True}
+    """가벼운 헬스 — API 왕복 없이 캐시된 Sheets 상태 요약 포함.
+
+    sheets.status: disabled(미설정) / ok / degraded(최근 fetch 실패) / uninitialized / error.
+    토큰 만료를 적극 감지하려면 /health/sheets(deep probe)를 폴링한다.
+    """
+    from .core.sheets_store import get_sheets_health
+    return {"ok": True, "sheets": get_sheets_health(deep=False)}
+
+
+@app.get("/health/sheets")
+async def health_sheets():
+    """Sheets 토큰·연결 deep probe — 모니터링/운영자 폴링용.
+
+    토큰 만료·refresh_token 철회를 분석 실패 전에 잡기 위한 조기 경보 엔드포인트.
+    상태가 error면 503으로 응답해 외부 모니터가 알람을 띄울 수 있게 한다.
+    """
+    from fastapi.responses import JSONResponse
+    from .core.sheets_store import get_sheets_health
+    h = await asyncio.to_thread(get_sheets_health, True)
+    code = 503 if h.get("status") == "error" else 200
+    return JSONResponse(status_code=code, content={"ok": code == 200, "sheets": h})

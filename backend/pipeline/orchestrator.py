@@ -123,6 +123,21 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
             await _set_form_id(doc_id, form_id)
             await _record_pipeline_hashes(doc_id, form_id, settings)
 
+            # ── 마스터 가용성 가드 (Sheets 모드) ──────────────────
+            # 토큰 만료/네트워크 장애로 마스터(unit_price)가 빈 채로 분석이 진행되면
+            # 모든 매핑이 not_found·NET이 None이 되어 '조용히 틀린' 결과가 나온다.
+            # 분석을 시작하기 전에 명시적 error로 떨궈 운영자가 즉시 알 수 있게 한다.
+            _master_err = await asyncio.to_thread(_check_master_availability)
+            if _master_err:
+                await update_document_error(
+                    doc_id,
+                    error_type="sheets_unavailable",
+                    error_phase="Phase 3",
+                    message=_master_err,
+                )
+                log.error("[%s] 마스터 가용성 가드 실패 — 분석 중단: %s", doc_id, _master_err)
+                return
+
             # ── Phase 1 ──────────────────────────────────────────
             await update_document_status(doc_id, "phase1")
             _t0 = time.monotonic()
@@ -752,6 +767,32 @@ async def _identify_form(doc_id: str, pages_dir: Path) -> tuple[str, float]:
 
 async def _set_form_id(doc_id: str, form_id: str) -> None:
     await set_form_id(doc_id, form_id)
+
+
+def _check_master_availability() -> str | None:
+    """Sheets 모드일 때 마스터(unit_price) 가용성 확인. 문제 있으면 사유 문자열, 없으면 None.
+
+    로컬 CSV 모드(Sheets 미설정)는 검사하지 않는다 — 파일 기반은 가드 대상이 아님.
+    빈 unit_price는 운영상 정상이 아니므로(=토큰/네트워크 장애) 분석을 막는다.
+    """
+    from ..core.sheets_store import get_sheets_store, SheetsUnavailableError
+    store = get_sheets_store()
+    if store is None:
+        from ..core.config import get_settings
+        # Sheets가 설정돼 있는데 인스턴스 생성 실패 = 토큰/네트워크 장애
+        if get_settings().google_sheets_mappings_id:
+            from ..core.sheets_store import _init_error_msg
+            return f"Sheets 초기화 실패 (토큰 만료/네트워크 가능성): {_init_error_msg or 'unknown'}"
+        return None  # 로컬 CSV 모드 — 가드 비대상
+    ok, reason = store.probe()
+    if not ok:
+        return f"Sheets 연결 probe 실패: {reason}"
+    try:
+        if not store.read_csv("unit_price.csv", required=True):
+            return "unit_price 마스터가 비어 있음 (탭 비정상 또는 권한 문제)"
+    except SheetsUnavailableError as e:
+        return str(e)
+    return None
 
 
 def _compute_pipeline_hashes(form_id: str, settings) -> dict:

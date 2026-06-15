@@ -76,3 +76,9 @@ mappings/ocr_retailer.csv
 
 # form_manage 자동 백업 산출물
 *.md.bak
+
+# 회귀 테스트 골든 번들 — extracted/·mappings/ 전역 무시의 예외 (CI 자급용 입력)
+!tests/fixtures/regression/**/extracted/
+!tests/fixtures/regression/**/extracted/**
+!tests/fixtures/regression/**/mappings/
+!tests/fixtures/regression/**/mappings/**

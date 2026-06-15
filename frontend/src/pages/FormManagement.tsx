@@ -420,18 +420,33 @@ export function FormManagement() {
                         <AlertCircle size={8} />동기화 실패
                       </span>
                     )}
-                    {form.syncStatus?.ok === true && form.syncStatus.formula_changed && (
-                      <span
-                        title="최근 동기화에서 NET 수식·검증 규칙이 변경되었습니다. 샘플 문서로 검산을 권장합니다."
-                        style={{
-                          display: 'inline-flex', alignItems: 'center', gap: 3,
-                          fontSize: 10, fontWeight: 700, color: '#c4622c',
-                          background: '#fdf0e8', borderRadius: 20, padding: '1px 6px',
-                        }}
-                      >
-                        수식 변경
-                      </span>
-                    )}
+                    {form.syncStatus?.ok === true && form.syncStatus.formula_changed && (() => {
+                      const imp = form.syncStatus.impact
+                      let tip = '최근 동기화에서 NET 수식·검증 규칙이 변경되었습니다. 샘플 문서로 검산을 권장합니다.'
+                      let label = '수식 변경'
+                      if (imp?.available) {
+                        const delta = imp.net_delta ?? 0
+                        const sign = delta > 0 ? '+' : ''
+                        tip = `골든 샘플(${imp.doc_id}) 재계산 영향: ${imp.rows_changed}/${imp.rows_total}행 변동, `
+                          + `NET 합계 ${imp.net_before?.toLocaleString()} → ${imp.net_after?.toLocaleString()} (${sign}${delta.toLocaleString()}). `
+                          + `의도한 변경인지 확인하세요.`
+                        if ((imp.rows_changed ?? 0) > 0) label = `수식 변경 · ${imp.rows_changed}행`
+                      } else if (imp && !imp.available) {
+                        tip += ` (영향 자동계산 불가: ${imp.reason ?? ''} — 골든 번들 박제 권장)`
+                      }
+                      return (
+                        <span
+                          title={tip}
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 3,
+                            fontSize: 10, fontWeight: 700, color: '#c4622c',
+                            background: '#fdf0e8', borderRadius: 20, padding: '1px 6px',
+                          }}
+                        >
+                          {label}
+                        </span>
+                      )
+                    })()}
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-2)' }}>{form.name}</div>
                   {form.lastEditor ? (

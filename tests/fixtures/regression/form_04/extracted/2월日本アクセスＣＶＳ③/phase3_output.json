@@ -1,0 +1,1122 @@
+{
+  "doc_id": "2월日本アクセスＣＶＳ③",
+  "form_id": "form_04",
+  "hatsu_month": "2026.02",
+  "issuer": {
+    "name": "株式会社 日本アクセス 事務管理(生鮮直轄",
+    "tel": "03-5805-8024"
+  },
+  "confirmed_retailers": {
+    "(株)ファミリーマート": {
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "basis": "cache"
+    },
+    "(株) ファミリーマート": {
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "basis": "cache"
+    }
+  },
+  "confirmed_products": {
+    "農心 辛ラーメン 120g×3": {
+      "code": "101000491",
+      "basis": "cache"
+    },
+    "農心 辛ラーメンカップ 68g": {
+      "code": "101003042",
+      "basis": "cache"
+    },
+    "農心 辛ラーメン トゥーンバ 袋 137g": {
+      "code": "101006671",
+      "basis": "cache"
+    },
+    "農心 辛ラーメン ミニカップ 49g": {
+      "code": "101002602",
+      "basis": "cache"
+    },
+    "農心 辛ラーメン 袋 120g": {
+      "code": "101000461",
+      "basis": "cache"
+    },
+    "農心 辛ラーメントゥーンバカップ 113g": {
+      "code": "101006694",
+      "basis": "cache"
+    },
+    "農心 FM事前 辛ラーメントゥーンバカップ113": {
+      "code": "101006694",
+      "basis": "cache"
+    },
+    "▷農心 辛ラーメントゥーンバカップ 113g": {
+      "code": "101006694",
+      "master_name": "辛ラーメントゥーンババケツカップ",
+      "basis": "unit_price 정규화 매칭: 제품명 '辛ラーメントゥーンバ' + 용량 113g → 제품코드 101006694"
+    },
+    "農心 FM事前 辛ラーメントゥーンバカップ 113": {
+      "code": "101006694",
+      "master_name": "辛ラーメントゥーンババケツカップ",
+      "basis": "unit_price 정규화 매칭: 제품명 '辛ラーメントゥーンバ' + 용량 113g → 제품코드 101006694 (FM사전 프로모션 표기 제거 후 매칭)"
+    }
+  },
+  "items": [
+    {
+      "row_id": "p002:k1565614:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565614",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメン 120g×3",
+      "columns": {
+        "入数": 12,
+        "数量": 111,
+        "未収条件": 137.0,
+        "金額": 15207,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメン 120g×3",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101000491"
+    },
+    {
+      "row_id": "p002:k1565614:r01",
+      "jisho": "R営業東北",
+      "kanri_no": "1565614",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメンカップ 68g",
+      "columns": {
+        "入数": 24,
+        "数量": 1032,
+        "未収条件": 3.7,
+        "金額": 3819,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメンカップ 68g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101003042"
+    },
+    {
+      "row_id": "p002:k1565614:r02",
+      "jisho": "R営業東北",
+      "kanri_no": "1565614",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメン トゥーンバ 袋 137g",
+      "columns": {
+        "入数": 40,
+        "数量": 315,
+        "未収条件": 19.0,
+        "金額": 5985,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメン トゥーンバ 袋 137g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006671"
+    },
+    {
+      "row_id": "p002:k1565615:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565615",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメン ミニカップ 49g",
+      "columns": {
+        "入数": 24,
+        "数量": 120,
+        "未収条件": 10.0,
+        "金額": 1200,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメン ミニカップ 49g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101002602"
+    },
+    {
+      "row_id": "p002:k1565615:r01",
+      "jisho": "R営業東北",
+      "kanri_no": "1565615",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメン 袋 120g",
+      "columns": {
+        "入数": 60,
+        "数量": 1475,
+        "未収条件": 42.0,
+        "金額": 61950,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメン 袋 120g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101000461"
+    },
+    {
+      "row_id": "p002:k1565616:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565616",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメントゥーンバカップ 113g",
+      "columns": {
+        "入数": 24,
+        "数量": 1092,
+        "未収条件": 12.5,
+        "金額": 13650,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメントゥーンバカップ 113g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006694"
+    },
+    {
+      "row_id": "p002:k1565616:r01",
+      "jisho": "R営業東北",
+      "kanri_no": "1565616",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 FM事前 辛ラーメントゥーンバカップ113",
+      "columns": {
+        "入数": 24,
+        "数量": 2160,
+        "未収条件": 12.5,
+        "金額": 27000,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 FM事前 辛ラーメントゥーンバカップ113",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006694"
+    },
+    {
+      "row_id": "p002:k1565617:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565617",
+      "condition_type": "原価引き条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメン 袋 120g",
+      "columns": {
+        "入数": 60,
+        "数量": 20,
+        "未収条件": 14.16,
+        "金額": 284,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメン 袋 120g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101000461"
+    },
+    {
+      "row_id": "p002:k1565617:r01",
+      "jisho": "R営業東北",
+      "kanri_no": "1565617",
+      "condition_type": "原価引き条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメンカップ 68g",
+      "columns": {
+        "入数": 24,
+        "数量": 24,
+        "未収条件": 19.1,
+        "金額": 459,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメンカップ 68g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101003042"
+    },
+    {
+      "row_id": "p002:k1565617:r02",
+      "jisho": "R営業東北",
+      "kanri_no": "1565617",
+      "condition_type": "原価引き条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメントゥーンバカップ 113g",
+      "columns": {
+        "入数": 24,
+        "数量": 852,
+        "未収条件": 44.44,
+        "金額": 37863,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメントゥーンバカップ 113g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006694"
+    },
+    {
+      "row_id": "p002:k1565618:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565618",
+      "condition_type": "導入条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 FM事前 辛ラーメントゥーンバカップ113",
+      "columns": {
+        "入数": 24,
+        "数量": 2160,
+        "未収条件": 47.14,
+        "金額": 102471,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 FM事前 辛ラーメントゥーンバカップ113",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006694"
+    },
+    {
+      "row_id": "p002:k1565619:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565619",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメン 120g×3",
+      "columns": {
+        "入数": 12,
+        "数量": 21,
+        "未収条件": 137.0,
+        "金額": 2877,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメン 120g×3",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101000491"
+    },
+    {
+      "row_id": "p002:k1565619:r01",
+      "jisho": "R営業東北",
+      "kanri_no": "1565619",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメンカップ 68g",
+      "columns": {
+        "入数": 24,
+        "数量": 228,
+        "未収条件": 3.7,
+        "金額": 844,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメンカップ 68g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101003042"
+    },
+    {
+      "row_id": "p002:k1565619:r02",
+      "jisho": "R営業東北",
+      "kanri_no": "1565619",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメン トゥーンバ 袋 137g",
+      "columns": {
+        "入数": 40,
+        "数量": 65,
+        "未収条件": 19.0,
+        "金額": 1235,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメン トゥーンバ 袋 137g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006671"
+    },
+    {
+      "row_id": "p002:k1565620:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565620",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメン ミニカップ 49g",
+      "columns": {
+        "入数": 24,
+        "数量": 18,
+        "未収条件": 10.0,
+        "金額": 180,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメン ミニカップ 49g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101002602"
+    },
+    {
+      "row_id": "p002:k1565620:r01",
+      "jisho": "R営業東北",
+      "kanri_no": "1565620",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメン 袋 120g",
+      "columns": {
+        "入数": 60,
+        "数量": 275,
+        "未収条件": 42.0,
+        "金額": 11550,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメン 袋 120g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101000461"
+    },
+    {
+      "row_id": "p002:k1565621:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565621",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメントゥーンバカップ 113g",
+      "columns": {
+        "入数": 24,
+        "数量": 276,
+        "未収条件": 12.5,
+        "金額": 3450,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメントゥーンバカップ 113g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006694"
+    },
+    {
+      "row_id": "p002:k1565621:r01",
+      "jisho": "R営業東北",
+      "kanri_no": "1565621",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 FM事前 辛ラーメントゥーンバカップ113",
+      "columns": {
+        "入数": 24,
+        "数量": 1068,
+        "未収条件": 12.5,
+        "金額": 13350,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 FM事前 辛ラーメントゥーンバカップ113",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006694"
+    },
+    {
+      "row_id": "p002:k1565622:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565622",
+      "condition_type": "原価引き条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメン 袋 120g",
+      "columns": {
+        "入数": 60,
+        "数量": 60,
+        "未収条件": 14.16,
+        "金額": 850,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメン 袋 120g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101000461"
+    },
+    {
+      "row_id": "p002:k1565622:r01",
+      "jisho": "R営業東北",
+      "kanri_no": "1565622",
+      "condition_type": "原価引き条件",
+      "customer": "(株) ファミリーマート",
+      "product": "▷農心 辛ラーメントゥーンバカップ 113g",
+      "columns": {
+        "入数": 24,
+        "数量": 240,
+        "未収条件": 44.44,
+        "金額": 10666,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "▷農心 辛ラーメントゥーンバカップ 113g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006694"
+    },
+    {
+      "row_id": "p002:k1565623:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565623",
+      "condition_type": "導入条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 FM事前 辛ラーメントゥーンバカップ113",
+      "columns": {
+        "入数": 24,
+        "数量": 1068,
+        "未収条件": 47.44,
+        "金額": 50666,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 FM事前 辛ラーメントゥーンバカップ113",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006694"
+    },
+    {
+      "row_id": "p002:k1565624:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565624",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメン 120g×3",
+      "columns": {
+        "入数": 12,
+        "数量": 36,
+        "未収条件": 137.0,
+        "金額": 4932,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメン 120g×3",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101000491"
+    },
+    {
+      "row_id": "p002:k1565624:r01",
+      "jisho": "R営業東北",
+      "kanri_no": "1565624",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメンカップ 68g",
+      "columns": {
+        "入数": 24,
+        "数量": 468,
+        "未収条件": 3.7,
+        "金額": 1732,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメンカップ 68g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101003042"
+    },
+    {
+      "row_id": "p002:k1565624:r02",
+      "jisho": "R営業東北",
+      "kanri_no": "1565624",
+      "condition_type": "定番条件",
+      "customer": "(株) ファミリーマート",
+      "product": "農心 辛ラーメン トゥーンバ 袋 137g",
+      "columns": {
+        "入数": 40,
+        "数量": 150,
+        "未収条件": 19.0,
+        "金額": 2850,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        2
+      ],
+      "customer_ocr": "(株) ファミリーマート",
+      "product_ocr": "農心 辛ラーメン トゥーンバ 袋 137g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006671"
+    },
+    {
+      "row_id": "p003:k1565625:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565625",
+      "condition_type": "定番条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 辛ラーメン ミニカップ 49g",
+      "columns": {
+        "入数": 24,
+        "数量": 102,
+        "未収条件": 10.0,
+        "金額": 1020,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 辛ラーメン ミニカップ 49g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101002602"
+    },
+    {
+      "row_id": "p003:k1565625:r01",
+      "jisho": "R営業東北",
+      "kanri_no": "1565625",
+      "condition_type": "定番条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 辛ラーメン 袋 120g",
+      "columns": {
+        "入数": 60,
+        "数量": 930,
+        "未収条件": 42.0,
+        "金額": 39060,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 辛ラーメン 袋 120g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101000461"
+    },
+    {
+      "row_id": "p003:k1565626:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565626",
+      "condition_type": "定番条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 辛ラーメントゥーンバカップ 113g",
+      "columns": {
+        "入数": 24,
+        "数量": 456,
+        "未収条件": 12.5,
+        "金額": 5700,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 辛ラーメントゥーンバカップ 113g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006694"
+    },
+    {
+      "row_id": "p003:k1565626:r01",
+      "jisho": "R営業東北",
+      "kanri_no": "1565626",
+      "condition_type": "定番条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 FM事前 辛ラーメントゥーンバカップ 113",
+      "columns": {
+        "入数": 24,
+        "数量": 1836,
+        "未収条件": 12.5,
+        "金額": 22950,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 FM事前 辛ラーメントゥーンバカップ 113",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006694"
+    },
+    {
+      "row_id": "p003:k1565627:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565627",
+      "condition_type": "原価引き条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 辛ラーメン 袋 120g",
+      "columns": {
+        "入数": 60,
+        "数量": 80,
+        "未収条件": 14.16,
+        "金額": 1133,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 辛ラーメン 袋 120g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101000461"
+    },
+    {
+      "row_id": "p003:k1565627:r01",
+      "jisho": "R営業東北",
+      "kanri_no": "1565627",
+      "condition_type": "原価引き条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 辛ラーメンカップ 68g",
+      "columns": {
+        "入数": 24,
+        "数量": 60,
+        "未収条件": 19.1,
+        "金額": 1146,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 辛ラーメンカップ 68g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101003042"
+    },
+    {
+      "row_id": "p003:k1565627:r02",
+      "jisho": "R営業東北",
+      "kanri_no": "1565627",
+      "condition_type": "原価引き条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 辛ラーメントゥーンバカップ 113g",
+      "columns": {
+        "入数": 24,
+        "数量": 408,
+        "未収条件": 44.44,
+        "金額": 18132,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 辛ラーメントゥーンバカップ 113g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006694"
+    },
+    {
+      "row_id": "p003:k1565628:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565628",
+      "condition_type": "導入条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 FM事前 辛ラーメントゥーンバカップ 113",
+      "columns": {
+        "入数": 24,
+        "数量": 1836,
+        "未収条件": 47.44,
+        "金額": 87100,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 FM事前 辛ラーメントゥーンバカップ 113",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006694"
+    },
+    {
+      "row_id": "p003:k1565629:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565629",
+      "condition_type": "定番条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 辛ラーメン 120g×3",
+      "columns": {
+        "入数": 12,
+        "数量": 69,
+        "未収条件": 137.0,
+        "金額": 9453,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 辛ラーメン 120g×3",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101000491"
+    },
+    {
+      "row_id": "p003:k1565629:r01",
+      "jisho": "R営業東北",
+      "kanri_no": "1565629",
+      "condition_type": "定番条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 辛ラーメンカップ 68g",
+      "columns": {
+        "入数": 24,
+        "数量": 204,
+        "未収条件": 3.7,
+        "金額": 755,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 辛ラーメンカップ 68g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101003042"
+    },
+    {
+      "row_id": "p003:k1565629:r02",
+      "jisho": "R営業東北",
+      "kanri_no": "1565629",
+      "condition_type": "定番条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 辛ラーメン トゥーンバ 袋 137g",
+      "columns": {
+        "入数": 40,
+        "数量": 185,
+        "未収条件": 19.0,
+        "金額": 3515,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 辛ラーメン トゥーンバ 袋 137g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006671"
+    },
+    {
+      "row_id": "p003:k1565630:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565630",
+      "condition_type": "定番条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 辛ラーメン ミニカップ 49g",
+      "columns": {
+        "入数": 24,
+        "数量": 48,
+        "未収条件": 10.0,
+        "金額": 480,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 辛ラーメン ミニカップ 49g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101002602"
+    },
+    {
+      "row_id": "p003:k1565630:r01",
+      "jisho": "R営業東北",
+      "kanri_no": "1565630",
+      "condition_type": "定番条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 辛ラーメン 袋 120g",
+      "columns": {
+        "入数": 60,
+        "数量": 580,
+        "未収条件": 42.0,
+        "金額": 24360,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 辛ラーメン 袋 120g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101000461"
+    },
+    {
+      "row_id": "p003:k1565631:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565631",
+      "condition_type": "定番条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 辛ラーメントゥーンバカップ 113g",
+      "columns": {
+        "入数": 24,
+        "数量": 311,
+        "未収条件": 12.5,
+        "金額": 3888,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 辛ラーメントゥーンバカップ 113g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006694"
+    },
+    {
+      "row_id": "p003:k1565631:r01",
+      "jisho": "R営業東北",
+      "kanri_no": "1565631",
+      "condition_type": "定番条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 FM事前 辛ラーメントゥーンバカップ 113",
+      "columns": {
+        "入数": 24,
+        "数量": 2148,
+        "未収条件": 12.5,
+        "金額": 26850,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 FM事前 辛ラーメントゥーンバカップ 113",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006694"
+    },
+    {
+      "row_id": "p003:k1565632:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565632",
+      "condition_type": "原価引き条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 辛ラーメン 袋 120g",
+      "columns": {
+        "入数": 60,
+        "数量": 35,
+        "未収条件": 14.16,
+        "金額": 496,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 辛ラーメン 袋 120g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101000461"
+    },
+    {
+      "row_id": "p003:k1565632:r01",
+      "jisho": "R営業東北",
+      "kanri_no": "1565632",
+      "condition_type": "原価引き条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 辛ラーメントゥーンバカップ 113g",
+      "columns": {
+        "入数": 24,
+        "数量": 263,
+        "未収条件": 44.44,
+        "金額": 11688,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 辛ラーメントゥーンバカップ 113g",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006694"
+    },
+    {
+      "row_id": "p003:k1565633:r00",
+      "jisho": "R営業東北",
+      "kanri_no": "1565633",
+      "condition_type": "導入条件",
+      "customer": "(株)ファミリーマート",
+      "product": "農心 FM事前 辛ラーメントゥーンバカップ 113",
+      "columns": {
+        "入数": 24,
+        "数量": 2148,
+        "未収条件": 47.44,
+        "金額": 101902,
+        "備考": ""
+      },
+      "item_type": "条件",
+      "source_pages": [
+        3
+      ],
+      "customer_ocr": "(株)ファミリーマート",
+      "product_ocr": "農心 FM事前 辛ラーメントゥーンバカップ 113",
+      "retailer_code": "6003788",
+      "dist_code": "1303568",
+      "unconfirmed": false,
+      "product_code": "101006694"
+    }
+  ],
+  "cover_totals": {
+    "本体合計金額": 734698,
+    "消費税金額": 58776,
+    "合計ご請求金額": 793174,
+    "税率": "8.00%",
+    "入出荷支店別": {
+      "R営業東北": 734698
+    }
+  }
+}
