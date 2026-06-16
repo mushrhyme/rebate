@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 import { CheckCircle2, AlertTriangle, Download, Loader2, ArrowLeft, ArrowRight, Pencil, Search, X, ChevronDown } from 'lucide-react'
 import { PdfViewer } from '../components/PdfViewer'
-import { api, type Phase4Result, type Phase4Row, type RateSummary, type User, type ReviewRecord, type RetailerResult, type DistResult, type ProductResult, type BundleInfo, type BundleXv, type CrossValidation, type XvCustomer, type XvRow } from '../api/client'
+import { api, type Phase4Result, type Phase4Row, type RateSummary, type User, type ReviewRecord, type RetailerResult, type DistResult, type ProductResult, type BundleInfo, type BundleXv, type CrossValidation, type XvCustomer, type XvRow, type ProductAggregateGroup } from '../api/client'
 
 function fmt(v: number | null | undefined): string {
   if (v == null) return '—'
@@ -822,6 +822,12 @@ export function Results() {
   const showSections = new Set(result.show_sections ?? ['rate_summary', 'xv', 'retailer'])
   const aggregateLabel = result.aggregate_label ?? '소매처별 집계'
 
+  // 제품별 집계 이중조건 분해 (form_types.json product_aggregate 있는 양식만)
+  // (jisho, customer_ocr, product_code) → 분해 그룹. 키맵으로 제품 행에 매칭.
+  const prodAgg = result.product_aggregate ?? null
+  const aggMap = new Map<string, ProductAggregateGroup>()
+  if (prodAgg) for (const g of prodAgg.groups) aggMap.set(`${g.jisho} ${g.customer} ${g.product_code}`, g)
+
   const activeXv: typeof result.xv =
     selectedBundle != null && result.bundle_xv
       ? (result.bundle_xv.find((b: BundleXv) => b.bundle_idx === selectedBundle)?.xv ?? result.xv)
@@ -1396,7 +1402,10 @@ export function Results() {
                           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
                             <thead>
                               <tr style={{ color: 'var(--text-3)' }}>
-                                {(['조건', '수량', '금액'] as const).map((h, i) => (
+                                {(prodAgg
+                                  ? ['조건/제품', '수량', ...prodAgg.condition_columns, '금액']
+                                  : ['조건', '수량', '금액']
+                                ).map((h, i, arr) => (
                                   <th key={h} style={{
                                     padding: i === 0 ? '4px 4px' : '4px 8px',
                                     fontWeight: 600, fontSize: 10,
@@ -1404,16 +1413,20 @@ export function Results() {
                                     letterSpacing: '0.04em',
                                     borderBottom: '1px solid var(--border)',
                                     whiteSpace: 'nowrap',
-                                  }}>{h}</th>
+                                  }}>{i === 0 ? '' : (i === arr.length - 1 ? '금액' : h)}</th>
                                 ))}
                               </tr>
                             </thead>
                             <tbody>
-                              {products.map(({ pk, productCode, productOcr, productName, prodSubtotal, hasWarn, conditionGroups }) => (
-                                <>
+                              {products.map(({ pk, productCode, productOcr, productName, prodSubtotal, hasWarn, conditionGroups }) => {
+                                // product_aggregate가 있으면 분해 행(동적 컬럼), 없으면 기존 condition_type 집계
+                                const agg = prodAgg ? aggMap.get(`${jisho} ${custName} ${productCode}`) : undefined
+                                const colCount = prodAgg ? 2 + prodAgg.condition_columns.length + 1 : 3
+                                return (
+                                <React.Fragment key={pk}>
                                   {/* 제품 헤더 행 */}
-                                  <tr key={`${pk}_h`} style={{ borderTop: '1px solid #f1f3f5' }}>
-                                    <td colSpan={2} style={{ padding: '5px 4px', fontWeight: 600 }}>
+                                  <tr style={{ borderTop: '1px solid #f1f3f5' }}>
+                                    <td colSpan={colCount - 1} style={{ padding: '5px 4px', fontWeight: 600 }}>
                                       {hasWarn && <AlertTriangle size={10} color="#c4622c" style={{ marginRight: 4, verticalAlign: 'middle' }} />}
                                       <span style={{ color: 'var(--text-1)' }}>{productOcr || productName || '—'}</span>
                                       {productCode && <span style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text-3)', marginLeft: 6 }}>{productCode}</span>}
@@ -1426,16 +1439,30 @@ export function Results() {
                                       {prodSubtotal.toLocaleString()}
                                     </td>
                                   </tr>
-                                  {/* condition_type별 집계 행 */}
-                                  {conditionGroups.map(({ conditionType, qty, amount, hasWarn: cWarn }) => (
-                                    <tr key={conditionType} style={{ background: cWarn ? '#fff8e1' : 'transparent' }}>
-                                      <td style={{ padding: '3px 4px 3px 12px', color: 'var(--text-2)' }}>{conditionType}</td>
-                                      <td style={{ padding: '3px 8px', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text-2)' }}>{qty.toLocaleString()}</td>
-                                      <td style={{ padding: '3px 0', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text-1)' }}>{amount.toLocaleString()}</td>
-                                    </tr>
-                                  ))}
-                                </>
-                              ))}
+                                  {/* 분해 행 (product_aggregate) 또는 condition_type별 집계 행 (기존) */}
+                                  {prodAgg && agg
+                                    ? agg.rows.map((r, ri) => (
+                                        <tr key={ri}>
+                                          <td style={{ padding: '3px 4px 3px 12px', color: 'var(--text-3)', fontSize: 10 }}>·</td>
+                                          <td style={{ padding: '3px 8px', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text-2)' }}>{r.qty.toLocaleString()}</td>
+                                          {prodAgg.condition_columns.map(c => (
+                                            <td key={c} style={{ padding: '3px 8px', textAlign: 'right', fontFamily: 'var(--mono)', color: r.units[c] != null ? 'var(--text-2)' : 'var(--text-3)' }}>
+                                              {r.units[c] != null ? r.units[c].toLocaleString() : ''}
+                                            </td>
+                                          ))}
+                                          <td style={{ padding: '3px 0', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text-1)' }}>{r.amount.toLocaleString()}</td>
+                                        </tr>
+                                      ))
+                                    : conditionGroups.map(({ conditionType, qty, amount, hasWarn: cWarn }) => (
+                                        <tr key={conditionType} style={{ background: cWarn ? '#fff8e1' : 'transparent' }}>
+                                          <td style={{ padding: '3px 4px 3px 12px', color: 'var(--text-2)' }}>{conditionType}</td>
+                                          <td style={{ padding: '3px 8px', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text-2)' }}>{qty.toLocaleString()}</td>
+                                          <td style={{ padding: '3px 0', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text-1)' }}>{amount.toLocaleString()}</td>
+                                        </tr>
+                                      ))}
+                                </React.Fragment>
+                                )
+                              })}
                             </tbody>
                           </table>
                         </div>

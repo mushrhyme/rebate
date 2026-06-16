@@ -430,6 +430,29 @@ export interface BundleXv {
   xv: CrossValidation[]
 }
 
+export interface ProductAggregateRow {
+  qty: number
+  units: Record<string, number>   // condition_type → 적용 단가
+  amount: number
+}
+
+export interface ProductAggregateGroup {
+  jisho: string
+  customer: string
+  product_code: string
+  product_name: string
+  rows: ProductAggregateRow[]
+  total_qty: number
+  total_amount: number
+}
+
+export interface ProductAggregate {
+  base_condition: string
+  condition_columns: string[]      // 동적 조건 컬럼 (定番이 맨 앞)
+  groups: ProductAggregateGroup[]
+  warnings: string[]
+}
+
 export interface Phase4Result {
   doc_id: string
   form_id: string
@@ -441,6 +464,7 @@ export interface Phase4Result {
   bundle_xv?: BundleXv[]
   show_sections?: string[]
   aggregate_label?: string
+  product_aggregate?: ProductAggregate | null
 }
 
 export interface XvAmounts {

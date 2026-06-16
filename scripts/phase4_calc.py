@@ -531,6 +531,118 @@ def calc_cross_validation(
     return xv
 
 
+# ── 제품별 집계: 이중조건 수량 분해 (form_types.json product_aggregate) ──────────
+def build_product_aggregate(items_in: list, form_cfg: dict) -> Optional[dict]:
+    """이중·삼중조건을 제품 단위로 집계해 '실제 물량 그룹'으로 분해한다.
+
+    배경(form_04 등): 청구서는 定番/原価引き/導入 조건을 별도 행으로 적지만, 추가조건
+    (原価引き·導入)은 定番 물량의 부분집합이라 단순 합산하면 이중계산이 된다.
+    제품 단위로 모은 뒤 定番 총수량에서 각 추가조건 수량을 빼 '실제 물량 그룹'을 만든다:
+      - 추가조건 c 그룹: 수량 q_c, 적용단가 {定番, c}, 금액 = q_c*定番단가 + c조건 원본금액
+      - 定番만 그룹: (定番 총수량 − Σq_c), 금액 = 수량 * 定番단가
+    定番단가는 定番 행들의 가중평균(금액합/수량합)이라 행마다 단가가 달라도 정확하다.
+
+    form_cfg["product_aggregate"] = {"base_condition": "定番条件"} 가 있을 때만 동작.
+    없으면 None (이 양식은 기존 집계 방식 유지).
+
+    그룹핑 키는 프론트 집계 탭과 동일: (jisho, customer_ocr, product_code).
+    반환 구조는 docs/output-format.md '제품별 집계(분해)' 참조.
+    """
+    cfg = form_cfg.get("product_aggregate")
+    if not cfg:
+        return None
+    base_type = cfg.get("base_condition", "定番条件")
+    qty_field = cfg.get("qty_field", "数量")
+    unit_field = cfg.get("unit_field", "未収条件")
+    amount_field = cfg.get("amount_field", "金額")
+
+    # (jisho, customer_ocr, product_code) → condition_type → 누적
+    groups: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    for it in items_in:
+        cols = it.get("columns", {})
+        ctype = it.get("condition_type") or ""
+        if not ctype:
+            continue
+        pcode = it.get("product_code") or it.get("product_ocr") or ""
+        key = (it.get("jisho", ""), it.get("customer_ocr") or it.get("customer", ""), pcode)
+        if key not in groups:
+            groups[key] = {
+                "_meta": {
+                    "jisho": it.get("jisho", ""),
+                    "customer": it.get("customer_ocr") or it.get("customer", ""),
+                    "product_code": pcode,
+                    "product_name": it.get("product", "") or it.get("product_ocr", ""),
+                },
+                "conds": {},  # ctype -> {"qty":, "amount":}
+            }
+            order.append(key)
+        c = groups[key]["conds"].setdefault(ctype, {"qty": 0.0, "amount": 0.0})
+        c["qty"]    += to_f(cols.get(qty_field, 0), 0) or 0
+        c["amount"] += to_f(cols.get(amount_field, 0), 0) or 0
+
+    # 등장한 condition_type을 컬럼 순서로 (base 먼저, 나머지는 첫 등장 순)
+    seen_cols: list[str] = []
+    for key in order:
+        for ct in groups[key]["conds"]:
+            if ct not in seen_cols:
+                seen_cols.append(ct)
+    condition_columns = ([base_type] if base_type in seen_cols else []) + \
+                        [c for c in seen_cols if c != base_type]
+
+    out_groups = []
+    warnings: list[str] = []
+    for key in order:
+        g = groups[key]
+        conds = g["conds"]
+        base = conds.get(base_type)
+        if not base or base["qty"] <= 0:
+            continue  # 定番 없는 그룹은 분해 대상 아님
+        base_qty = base["qty"]
+        base_amount = base["amount"]            # 定番 원본 총금액 (정확)
+        base_unit_disp = round(base_amount / base_qty, 2) if base_qty else 0.0
+        extras = [(ct, v) for ct, v in conds.items() if ct != base_type]
+        extra_qty_sum = sum(v["qty"] for _, v in extras)
+        base_only_qty = base_qty - extra_qty_sum
+
+        rows = []
+        for ct, v in extras:
+            q = v["qty"]
+            # 금액 = 그 물량의 定番분(定番 총금액을 수량 비율로 배분) + 추가조건 원본 금액
+            base_share = base_amount * (q / base_qty) if base_qty else 0.0
+            rows.append({
+                "qty": _num_out(q),
+                "units": {base_type: base_unit_disp, ct: round((v["amount"] / q) if q else 0.0, 2)},
+                "amount": round(base_share + v["amount"], 2),
+            })
+        if base_only_qty > 0.0001:
+            rows.append({
+                "qty": _num_out(base_only_qty),
+                "units": {base_type: base_unit_disp},
+                "amount": round(base_amount * (base_only_qty / base_qty), 2),
+            })
+        elif base_only_qty < -0.0001:
+            warnings.append(
+                f"{g['_meta']['product_name']}: 추가조건 합({extra_qty_sum})이 定番({base['qty']}) 초과 — 분해 음수"
+            )
+
+        total_qty = sum(r["qty"] for r in rows)
+        total_amount = round(sum(r["amount"] for r in rows), 2)
+        out_groups.append({**g["_meta"], "rows": rows, "total_qty": total_qty, "total_amount": total_amount})
+
+    return {
+        "base_condition": base_type,
+        "condition_columns": condition_columns,
+        "groups": out_groups,
+        "warnings": warnings,
+    }
+
+
+def _num_out(v: float):
+    """정수면 int, 아니면 소수 2자리."""
+    return int(v) if abs(v - round(v)) < 1e-9 else round(v, 2)
+
+
 # ── 메인 처리 로직 ────────────────────────────────────────────────────────────
 def run(doc_id, save=False, summary_only=False, base_dir=None):
     """
@@ -922,6 +1034,10 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
             payload["show_sections"] = form_cfg["show_sections"]
         if form_cfg.get("aggregate_label"):
             payload["aggregate_label"] = form_cfg["aggregate_label"]
+        # 제품별 집계 이중조건 분해 (form_types.json product_aggregate 있을 때만)
+        _prod_agg = build_product_aggregate(items_in, form_cfg)
+        if _prod_agg:
+            payload["product_aggregate"] = _prod_agg
         if bundles_info:
             payload["bundles"] = [
                 {"bundle_idx": b["bundle_idx"], "page_range": b["page_range"], "cover_page": b["cover_page"]}

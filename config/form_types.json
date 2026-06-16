@@ -113,6 +113,12 @@
     "cover_totals": {
       "breakdown_key": "入出荷支店別"
     },
+    "product_aggregate": {
+      "base_condition": "定番条件",
+      "qty_field": "数量",
+      "unit_field": "未収条件",
+      "amount_field": "金額"
+    },
     "cross_validation": [
       {
         "type": "cover_honbai_vs_detail",
