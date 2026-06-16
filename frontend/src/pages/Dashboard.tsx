@@ -1088,7 +1088,9 @@ export function Dashboard() {
                 {/* 양식 */}
                 <span style={{ fontSize: 12, color: 'var(--text-2)', display: 'inline-flex', alignItems: 'center', gap: 4 }} title={doc.form_id ?? undefined}>
                   {doc.form_id ? (formMap[doc.form_id] ?? doc.form_id) : '—'}
-                  {doc.stale_rules === true && (
+                  {/* 규칙 변경됨 배지: 양식 컬럼(90px)에 안 맞아 상태 컬럼으로 오버플로(겹침) —
+                     레이아웃 재설계(컬럼 폭/배지 위치) 후 복원. 정보성 배지라 기능 영향 없음. */}
+                  {false && doc.stale_rules === true && (
                     <span
                       title="분석 이후 양식 규칙(MD/수식)이 변경되었습니다. 재분석을 권장합니다."
                       style={{
