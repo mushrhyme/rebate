@@ -88,3 +88,7 @@ tests/fixtures/regression/**/phase4_output.json
 
 # DSL 검증 게이트 골든 (로컬 extracted 산물 — 재생성 가능)
 tests/fixtures/dsl_gate/
+
+# DSL 동결 산물 (로컬 — 백업·변경이력)
+config/.form_types_backups/
+config/form_types_changelog.jsonl

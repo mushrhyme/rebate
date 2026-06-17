@@ -68,6 +68,38 @@ def _load_key() -> str:
     raise SystemExit("ANTHROPIC_API_KEY 없음")
 
 
+def compile_product_aggregate(rule: str, cols_l: list[str], conds_l: list[str]) -> tuple[dict, str]:
+    """자연어 규칙 → product_aggregate 설정(dict) + 근거. P2/P3 공용 컴파일 함수."""
+    import anthropic
+    client = anthropic.Anthropic(api_key=_load_key())
+    user = (
+        f"규칙:\n{rule}\n\n"
+        f"사용 가능 컬럼(columns 키): {cols_l}\n"
+        f"등장 조건타입: {conds_l}\n\n"
+        "위 규칙을 product_aggregate 설정으로 컴파일해 emit_product_aggregate 도구로 출력하라."
+    )
+    resp = client.messages.create(
+        model=MODEL, max_tokens=1024, system=SYSTEM,
+        tools=[EMIT_TOOL], tool_choice={"type": "tool", "name": "emit_product_aggregate"},
+        messages=[{"role": "user", "content": user}],
+    )
+    config = next((b.input for b in resp.content if b.type == "tool_use"), None)
+    if not config:
+        raise RuntimeError("컴파일 실패 — tool_use 출력 없음")
+    reasoning = config.pop("reasoning", "")
+    return config, reasoning
+
+
+def _grounding(items: list) -> tuple[list[str], list[str]]:
+    cols: set[str] = set()
+    conds: set[str] = set()
+    for it in items:
+        cols |= set(it.get("columns", {}).keys())
+        if it.get("condition_type"):
+            conds.add(it["condition_type"])
+    return sorted(cols), sorted(conds)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--doc", required=True)
@@ -80,15 +112,7 @@ def main() -> int:
         print("문서 못 찾음:", args.doc); return 2
     items = json.loads((docdir / "phase3_output.json").read_text(encoding="utf-8")).get("items", [])
 
-    # grounding: 실제 컬럼·조건타입
-    cols: set[str] = set()
-    conds: set[str] = set()
-    for it in items:
-        cols |= set(it.get("columns", {}).keys())
-        if it.get("condition_type"):
-            conds.add(it["condition_type"])
-    cols_l = sorted(cols)
-    conds_l = sorted(conds)
+    cols_l, conds_l = _grounding(items)
 
     print("=" * 72)
     print("입력 자연어 규칙:")
@@ -97,23 +121,7 @@ def main() -> int:
     print(f"grounding — 컬럼: {cols_l}")
     print("=" * 72)
 
-    import anthropic
-    client = anthropic.Anthropic(api_key=_load_key())
-    user = (
-        f"규칙:\n{args.rule}\n\n"
-        f"사용 가능 컬럼(columns 키): {cols_l}\n"
-        f"등장 조건타입: {conds_l}\n\n"
-        "위 규칙을 product_aggregate 설정으로 컴파일해 emit_product_aggregate 도구로 출력하라."
-    )
-    resp = client.messages.create(
-        model=MODEL, max_tokens=1024, system=SYSTEM,
-        tools=[EMIT_TOOL], tool_choice={"type": "tool", "name": "emit_product_aggregate"},
-        messages=[{"role": "user", "content": user}],
-    )
-    config = next((b.input for b in resp.content if b.type == "tool_use"), None)
-    if not config:
-        print("컴파일 실패 — tool_use 출력 없음"); return 1
-    reasoning = config.pop("reasoning", "")
+    config, reasoning = compile_product_aggregate(args.rule, cols_l, conds_l)
 
     print("\n[컴파일 결과] product_aggregate 설정:")
     print(json.dumps(config, ensure_ascii=False, indent=2))
