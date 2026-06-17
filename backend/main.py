@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .core.stall_guard import reset_stalled_on_startup, stall_watcher
-from .api.routes import auth, documents, mappings, forms, search, form_manage, reviews, sap, admin_retail, usage
+from .api.routes import auth, documents, mappings, forms, search, form_manage, reviews, sap, admin_retail, usage, dsl
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -94,6 +94,7 @@ app.include_router(reviews.router)
 app.include_router(sap.router)
 app.include_router(admin_retail.router)
 app.include_router(usage.router)
+app.include_router(dsl.router)
 
 
 @app.get("/health")

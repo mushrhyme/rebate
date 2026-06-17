@@ -68,10 +68,11 @@ def _load_key() -> str:
     raise SystemExit("ANTHROPIC_API_KEY 없음")
 
 
-def compile_product_aggregate(rule: str, cols_l: list[str], conds_l: list[str]) -> tuple[dict, str]:
+def compile_product_aggregate(rule: str, cols_l: list[str], conds_l: list[str],
+                              api_key: str | None = None) -> tuple[dict, str]:
     """자연어 규칙 → product_aggregate 설정(dict) + 근거. P2/P3 공용 컴파일 함수."""
     import anthropic
-    client = anthropic.Anthropic(api_key=_load_key())
+    client = anthropic.Anthropic(api_key=api_key or _load_key())
     user = (
         f"규칙:\n{rule}\n\n"
         f"사용 가능 컬럼(columns 키): {cols_l}\n"
