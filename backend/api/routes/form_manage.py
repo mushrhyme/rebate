@@ -236,13 +236,14 @@ async def apply(body: ChatRequest, user: dict = Depends(get_current_user)):
                 "saved_at": datetime.now(timezone.utc).isoformat(),
             })
 
-            # MD 저장 → S3 미러 (배포 가드 기준점) + form_types.json 자동 동기화
-            from .forms import mirror_form_md, schedule_auto_sync
+            # MD 저장 → S3 미러 (배포 가드 기준점).
+            # config(form_types.json) 반영은 자동이 아니라 '미리보기 확인 후'로 게이트한다
+            # (POST /forms/{id}/preview → /commit). 현업이 결과를 보고 승인해야 반영됨.
+            from .forms import mirror_form_md
             await asyncio.to_thread(mirror_form_md, body.form_id, updated)
-            schedule_auto_sync(body.form_id)
 
             tbd_count = len(re.findall(r"\bTBD\b", updated))
-            yield f"data: {json.dumps({'type': 'done', 'tbd_count': tbd_count, 'content_hash': new_hash, 'auto_sync': 'started'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'tbd_count': tbd_count, 'content_hash': new_hash, 'auto_sync': 'gated'})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 

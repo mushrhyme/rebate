@@ -654,7 +654,7 @@ def _num_out(v: float):
 
 
 # ── 메인 처리 로직 ────────────────────────────────────────────────────────────
-def run(doc_id, save=False, summary_only=False, base_dir=None):
+def run(doc_id, save=False, summary_only=False, base_dir=None, return_payload=False):
     """
     phase3_output.json을 읽어 NET 계산·교차검증·출력을 수행한다.
     base_dir: 테스트 시 임시 디렉토리 경로를 주입할 수 있음 (기본값: BASE)
@@ -1022,39 +1022,40 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
         "total_ex": int(detail_ex),
     }
 
+    # payload는 항상 조립한다(save=False여도 return_payload로 미리보기에 쓰임). 쓰기만 save로 가른다.
+    out_path = doc_dir / "phase4_output.json"
+    _internal = {"_kin_gaku", "_zei_rate", "_flag"}
+    def _export(r):
+        out = {}
+        for k, v in r.items():
+            if k in _internal:
+                continue
+            out[k[1:] if k.startswith("_") else k] = v
+        return out
+    payload = {
+        "doc_id":  doc_id,
+        "form_id": form_id,
+        "xv":      [{"label": l, "expected": e, "actual": a, "ok": ok, "xv_type": "simple"}
+                    for l, e, a, ok in xv],
+        "rows":    [_export(r) for r in rows_out],
+        "summary": summary,
+    }
+    if form_cfg.get("show_sections"):
+        payload["show_sections"] = form_cfg["show_sections"]
+    if form_cfg.get("aggregate_label"):
+        payload["aggregate_label"] = form_cfg["aggregate_label"]
+    # 제품별 집계 이중조건 분해 (form_types.json product_aggregate 있을 때만)
+    _prod_agg = build_product_aggregate(items_in, form_cfg)
+    if _prod_agg:
+        payload["product_aggregate"] = _prod_agg
+    if bundles_info:
+        payload["bundles"] = [
+            {"bundle_idx": b["bundle_idx"], "page_range": b["page_range"], "cover_page": b["cover_page"]}
+            for b in bundles_info
+        ]
+    if bundle_xv_list:
+        payload["bundle_xv"] = bundle_xv_list
     if save:
-        out_path = doc_dir / "phase4_output.json"
-        _internal = {"_kin_gaku", "_zei_rate", "_flag"}
-        def _export(r):
-            out = {}
-            for k, v in r.items():
-                if k in _internal:
-                    continue
-                out[k[1:] if k.startswith("_") else k] = v
-            return out
-        payload = {
-            "doc_id":  doc_id,
-            "form_id": form_id,
-            "xv":      [{"label": l, "expected": e, "actual": a, "ok": ok, "xv_type": "simple"}
-                        for l, e, a, ok in xv],
-            "rows":    [_export(r) for r in rows_out],
-            "summary": summary,
-        }
-        if form_cfg.get("show_sections"):
-            payload["show_sections"] = form_cfg["show_sections"]
-        if form_cfg.get("aggregate_label"):
-            payload["aggregate_label"] = form_cfg["aggregate_label"]
-        # 제품별 집계 이중조건 분해 (form_types.json product_aggregate 있을 때만)
-        _prod_agg = build_product_aggregate(items_in, form_cfg)
-        if _prod_agg:
-            payload["product_aggregate"] = _prod_agg
-        if bundles_info:
-            payload["bundles"] = [
-                {"bundle_idx": b["bundle_idx"], "page_range": b["page_range"], "cover_page": b["cover_page"]}
-                for b in bundles_info
-            ]
-        if bundle_xv_list:
-            payload["bundle_xv"] = bundle_xv_list
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         print(f"\n  → {out_path} 저장 완료")
@@ -1072,6 +1073,9 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
     _ph["duration_sec"] = _duration
     _timing_path.write_text(json.dumps(_td, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n  [Phase 4 실행 시간: {_duration}초]")
+
+    if return_payload:
+        return payload
 
     return rows_out, xv
 

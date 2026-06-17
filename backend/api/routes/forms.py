@@ -508,6 +508,131 @@ async def sync_form_config(form_id: str, user: dict = Depends(get_current_user))
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── 미리보기/커밋 (Form 관리: md 수정 → 반영 전 샘플 재계산 확인) ───────────────
+async def _md_to_config(form_id: str) -> tuple[dict, str]:
+    """form_XX.md → Claude 파싱 → config 항목(dict). 쓰지 않는다 (md_content 동반)."""
+    import json as _json
+    settings = get_settings()
+    md_path = settings.form_definitions_dir / f"{form_id}.md"
+    if not md_path.exists():
+        raise FileNotFoundError(f"양식 없음: {form_id}")
+    md_content = md_path.read_text(encoding="utf-8")
+    ft_path = settings.workspace_root / "config" / "form_types.json"
+    form_types = _json.loads(ft_path.read_text(encoding="utf-8")) if ft_path.exists() else {}
+    current_entry = form_types.get(form_id, {})
+    skill_path = settings.workspace_root / ".claude" / "skills" / "sync-form-config" / "SKILL.md"
+    skill_content = skill_path.read_text(encoding="utf-8") if skill_path.exists() else ""
+    prompt = f"""아래 sync-form-config 파싱 규칙(Step 2 전체)에 따라 form 정의 MD를 분석하고,
+form_types.json의 해당 항목을 JSON으로만 반환하세요.
+JSON만 출력하세요 (마크다운 코드블록 없이, 설명 없이, 오직 JSON 객체만).
+Step 3(파일 저장)과 Step 4(변경 내역 보고)는 백엔드가 처리하므로 생략합니다.
+파싱할 수 없는 항목(⚠️)은 아래 [현재 form_types.json 항목]의 기존 값을 그대로 유지하세요.
+
+## sync-form-config 파싱 규칙
+{skill_content}
+
+## 현재 form_types.json 항목 (참고용 — 파싱 불가 항목은 이 값 유지)
+{_json.dumps(current_entry, ensure_ascii=False, indent=2)}
+
+## {form_id}.md
+{md_content}"""
+    client = _anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    def _call() -> str:
+        resp = client.messages.create(
+            model="claude-sonnet-4-6", max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text.strip()
+    raw = await asyncio.to_thread(_call)
+    raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
+    try:
+        new_entry = _json.loads(raw)
+    except Exception:
+        raise ValueError(f"Claude 응답 파싱 실패: {raw[:200]}")
+    return new_entry, md_content
+
+
+def _recompute_sample(form_id: str, entry: dict, doc_id: str) -> dict:
+    """주어진 config(entry)로 샘플 doc를 재계산(쓰기 없음) → phase4 payload."""
+    import sys
+    settings = get_settings()
+    if str(settings.workspace_root) not in sys.path:
+        sys.path.insert(0, str(settings.workspace_root))
+    import scripts.phase4_calc as pc
+    saved = pc.FORM_TYPES.get(form_id)
+    try:
+        pc.FORM_TYPES[form_id] = entry
+        payload = pc.run(doc_id, save=False, return_payload=True)
+    finally:
+        if saved is not None:
+            pc.FORM_TYPES[form_id] = saved
+        else:
+            pc.FORM_TYPES.pop(form_id, None)
+    return payload
+
+
+def _config_changes(cur: dict, new: dict) -> list[dict]:
+    keys = sorted(set(cur) | set(new))
+    return [{"field": k, "from": cur.get(k), "to": new.get(k)} for k in keys if cur.get(k) != new.get(k)]
+
+
+class PreviewBody(BaseModel):
+    doc_id: str
+
+
+@router.post("/{form_id}/preview")
+async def preview_form_change(form_id: str, body: PreviewBody, user: dict = Depends(get_current_user)):
+    """현행 md 기준 config를 (쓰지 않고) 만들어 샘플 doc 재계산 → 결과 미리보기."""
+    import json as _json
+    try:
+        new_entry, _ = await _md_to_config(form_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="양식 없음")
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    settings = get_settings()
+    ft_path = settings.workspace_root / "config" / "form_types.json"
+    cur_entry = (_json.loads(ft_path.read_text(encoding="utf-8")).get(form_id, {})
+                 if ft_path.exists() else {})
+    try:
+        result = await asyncio.to_thread(_recompute_sample, form_id, new_entry, body.doc_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"샘플 재계산 실패: {type(e).__name__}: {e}")
+    return {"result": result, "config_changes": _config_changes(cur_entry, new_entry), "new_entry": new_entry}
+
+
+class CommitBody(BaseModel):
+    config: dict
+
+
+@router.post("/{form_id}/commit")
+async def commit_form_config(form_id: str, body: CommitBody, user: dict = Depends(get_current_user)):
+    """미리보기에서 확인한 config를 form_types.json에 반영(동결). md 재파싱 없이 그대로 쓴다."""
+    import json as _json
+    settings = get_settings()
+    ft_path = settings.workspace_root / "config" / "form_types.json"
+    new_entry = body.config
+    async with _form_types_lock:
+        form_types = _json.loads(ft_path.read_text(encoding="utf-8")) if ft_path.exists() else {}
+        fresh_current = form_types.get(form_id, {})
+        prev_ra = fresh_current.get("row_anchor") or {}
+        new_ra = new_entry.get("row_anchor")
+        if isinstance(new_ra, dict) and "recovery_cell_map" in prev_ra and "recovery_cell_map" not in new_ra:
+            new_ra["recovery_cell_map"] = prev_ra["recovery_cell_map"]
+        changes = [k for k in new_entry if new_entry.get(k) != fresh_current.get(k)]
+        merged = {**form_types, form_id: new_entry}
+        try:
+            _validate_form_types_schema(merged, settings)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"스키마 검증 실패: {e}")
+        form_types[form_id] = new_entry
+        text = _json.dumps(form_types, ensure_ascii=False, indent=2)
+        ft_path.write_text(text, encoding="utf-8")
+        await asyncio.to_thread(_mirror_to_s3, "config/form_types.json", text)
+    return {"ok": True, "form_id": form_id, "changes": changes,
+            "message": "config 반영 완료 — 문서 재분석 시 적용됩니다."}
+
+
 class PatchFormBody(BaseModel):
     content: str
 
