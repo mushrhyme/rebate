@@ -52,6 +52,14 @@ with open(BASE / "config" / "tax_rules.json", encoding="utf-8") as _f:
     TAX_RULES: dict = json.load(_f)
 _RATE_8:  float = TAX_RULES["bracket_rates"]["8"]
 _RATE_10: float = TAX_RULES["bracket_rates"]["10"]
+# 세율 구간 임계값·반올림 정책도 tax_rules.json 단일 출처에서 (코드 매직 리터럴 제거)
+_BRACKET_THRESHOLD: int = TAX_RULES.get("bracket_threshold", 10)
+_TAX_ROUNDING: str = TAX_RULES.get("consumption_tax_rounding", "floor")
+_TAX_ROUND_FN = {
+    "floor": math.floor,
+    "ceil":  math.ceil,
+    "round": lambda x: int(round(x)),
+}.get(_TAX_ROUNDING, math.floor)
 
 # ── 헬퍼 ─────────────────────────────────────────────────────────────────────
 def to_f(v, default=None):
@@ -382,7 +390,7 @@ def print_summary_rate_then_customer(rows_out, summary_totals, cover_totals, cov
             merged_svkey[norm] = _find_summary_val(ckey, summary_totals)
         merged_sums[norm]  += r["_kin_gaku"]
         _rm = re.search(r"(\d+)", r.get("_zei_rate") or "")
-        if _rm and int(_rm.group(1)) >= 10:
+        if _rm and int(_rm.group(1)) >= _BRACKET_THRESHOLD:
             merged_tax10[norm] += r["_kin_gaku"]
         else:
             merged_tax8[norm]  += r["_kin_gaku"]
@@ -391,8 +399,8 @@ def print_summary_rate_then_customer(rows_out, summary_totals, cover_totals, cov
     print(f"  {'得意先名':<44} {'Detail+税(税込)':>16} {'Summary(税込)':>14} 일치")
     print(f"  {'─'*86}")
     for norm in merged_order:
-        t8  = math.floor(merged_tax8[norm]  * _RATE_8)
-        t10 = math.floor(merged_tax10[norm] * _RATE_10)
+        t8  = _TAX_ROUND_FN(merged_tax8[norm]  * _RATE_8)
+        t10 = _TAX_ROUND_FN(merged_tax10[norm] * _RATE_10)
         ck_incl = merged_sums[norm] + t8 + t10
         sv = merged_svkey[norm]
         if sv is not None:
@@ -518,7 +526,7 @@ def calc_cross_validation(
                     merged_svkey[norm] = _find_summary_val(ckey, summary_totals)
                 merged_sums[norm] += r["_kin_gaku"]
                 _rm = re.search(r"(\d+)", r.get("_zei_rate") or "")
-                if _rm and int(_rm.group(1)) >= 10:
+                if _rm and int(_rm.group(1)) >= _BRACKET_THRESHOLD:
                     merged_tax10[norm] += r["_kin_gaku"]
                 else:
                     merged_tax8[norm]  += r["_kin_gaku"]
