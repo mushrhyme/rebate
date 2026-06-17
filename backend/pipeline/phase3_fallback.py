@@ -90,6 +90,7 @@ def _get_global_tool_use_sem(capacity: int) -> asyncio.Semaphore:
         _GLOBAL_TOOL_USE_SEM_CAPACITY = effective
     return _GLOBAL_TOOL_USE_SEM
 
+from ..core import dist_cache_key
 from ..core.config import get_settings
 from ..experiments.batch_tool_use_experiment import (
     SCENARIO_SUCCESS,
@@ -1214,12 +1215,8 @@ async def _execute_success_path(
     ocr_dist_path = mappings_dir / "ocr_dist.csv"
     cached_dist: dict = {}
     for _row in _read_csv(ocr_dist_path):
-        # (form_id, issuer_fingerprint, retailer_code, jisho) 4튜플 — jisho 없는 구 행은 ""
-        _k = (
-            _row.get("form_id", ""), _row.get("issuer_fingerprint", ""),
-            _row.get("retailer_code", ""), _row.get("jisho", ""),
-        )
-        cached_dist[_k] = _row.get("dist_code", "")
+        # 복합키는 dist_cache_key 단일 출처에서 — 빌드·조회·쓰기 경로 드리프트 방지
+        cached_dist[dist_cache_key.key_from_mapping(_row)] = _row.get("dist_code", "")
 
     # ── issuer 추출 ──────────────────────────────────────────────────────────
     issuer: dict = {}

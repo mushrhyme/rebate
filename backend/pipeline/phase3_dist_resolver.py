@@ -198,9 +198,13 @@ def build_dist_resolution_from_cache(
             reason="retailer_code가 비어 있음",
         )
 
-    # ① 캐시 조회 — (form_id, issuer_fingerprint, retailer_code, jisho) 4튜플 키.
-    # 같은 소매처라도 jisho(入出荷支店 등)가 다르면 판매처가 갈리므로 jisho 포함.
-    cache_key = (form_id, issuer_fingerprint, retailer_code, jisho)
+    # ① 캐시 조회 — 복합키는 dist_cache_key 단일 출처에서(빌드·쓰기 경로와 동일 스키마).
+    # 같은 소매처라도 jisho(入出荷支店 등)가 다르면 판매처가 갈리므로 차원에 포함.
+    from ..core.dist_cache_key import key_from_mapping
+    cache_key = key_from_mapping({
+        "form_id": form_id, "issuer_fingerprint": issuer_fingerprint,
+        "retailer_code": retailer_code, "jisho": jisho,
+    })
     if cache_key in cached_dist:
         return DistResolution(
             dist_code=cached_dist[cache_key],

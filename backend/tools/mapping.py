@@ -224,9 +224,13 @@ def _upsert_dist_cache_row(
     """ocr_dist.csv 복합키(form_id, issuer_fingerprint, retailer_code, jisho) upsert.
 
     jisho는 入出荷支店 등 그룹 식별 필드 값이다. 같은 소매처라도 jisho가 다르면
-    판매처가 갈리므로 캐시 키에 포함한다. jisho 미사용 양식은 ""로 동작(기존과 동일)."""
-    headers = ["form_id", "issuer_fingerprint", "retailer_code", "jisho", "dist_code", "dist_name"]
-    new_row = [form_id, issuer_fingerprint, retailer_code, jisho, dist_code, dist_name]
+    판매처가 갈리므로 캐시 키에 포함한다. jisho 미사용 양식은 ""로 동작(기존과 동일).
+
+    헤더·복합키 스키마는 dist_cache_key 단일 출처에서 가져온다(빌드·조회 경로와 동일)."""
+    from ..core.dist_cache_key import CACHE_HEADERS as headers, KEY_INDICES, row_from_mapping
+    keymap = {"form_id": form_id, "issuer_fingerprint": issuer_fingerprint,
+              "retailer_code": retailer_code, "jisho": jisho}
+    new_row = row_from_mapping(keymap, dist_code, dist_name)
     rows: list[list[str]] = []
     if path.exists() and path.stat().st_size > 0:
         try:
@@ -236,8 +240,7 @@ def _upsert_dist_cache_row(
             pass
     updated = False
     for i, row in enumerate(rows):
-        if (len(row) >= 4 and row[0] == form_id and row[1] == issuer_fingerprint
-                and row[2] == retailer_code and row[3] == jisho):
+        if len(row) >= len(KEY_INDICES) and all(row[k] == new_row[k] for k in KEY_INDICES):
             rows[i] = new_row
             updated = True
             break
@@ -346,13 +349,10 @@ async def confirm_mapping(
                 raise ValueError(
                     f"confirm_mapping(dist)에 필요한 context 키가 없음: {sorted(_missing)}"
                 )
-            row = [
-                context["form_id"], context["issuer_fingerprint"],
-                context["retailer_code"], context.get("jisho", ""),
-                confirmed_code, context.get("dist_name", ""),
-            ]
+            from ..core.dist_cache_key import KEY_INDICES, row_from_mapping
+            row = row_from_mapping(context, confirmed_code, context.get("dist_name", ""))
             if store:
-                await asyncio.to_thread(store.upsert_row, "ocr_dist.csv", [0, 1, 2, 3], row)
+                await asyncio.to_thread(store.upsert_row, "ocr_dist.csv", KEY_INDICES, row)
             else:
                 cache_path = mappings_dir / "ocr_dist.csv"
                 async with _get_csv_lock(cache_path):

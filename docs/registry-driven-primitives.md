@@ -110,16 +110,16 @@ def _subset_subtract(groups, cfg): ...   # 현 build_product_aggregate 본문을
 
 phase3는 키를 코드 상수가 아니라 `key_fields`로 조립: `key = tuple(item[f] for f in key_fields)`. **세 번째 차원(채널·계절 등) 추가 = `key_fields`에 한 줄(T1).**
 
-### 4.3 솔직한 걸림돌 — 캐시 스키마 (이 축의 실제 비용)
+### 4.3 P2 구현 시 드러난 현실 — 진짜 문제는 "드리프트"였다
 
-현 `ocr_dist` 시트는 고정 키 컬럼. 차원이 가변이면 두 가지 선택:
+설계 단계에선 캐시 합성키 마이그레이션(B-1)을 비용으로 봤다. 구현하며 코드를 보니 현실은 달랐다:
 
-| 방식 | 내용 | 트레이드오프 |
-|---|---|---|
-| **B-1 합성키 컬럼** | `key`(필드를 구분자로 join) + `value` 2열 고정 | 시트 1회 마이그레이션. 차원 추가 시 스키마 불변(권장) |
-| **B-2 가변 컬럼** | 차원마다 실제 컬럼 | 사람이 읽기 쉬움. 차원 추가마다 시트 스키마 변경(현 방식의 연장) |
+- `ocr_dist` 시트는 **이미 jisho 컬럼을 가진 이산 컬럼 스키마**다(`form_id, issuer_fingerprint, retailer_code, jisho, dist_code, dist_name`). 현업이 jisho를 추가한 그 작업으로 스키마는 이미 N-컬럼 형태였다. → **합성키 마이그레이션 불필요.**
+- 진짜 문제는 **키가 세 곳(빌드·조회·쓰기)에 각자 하드코딩**돼 있어 드리프트가 났다는 것: 파일 I/O 조회 경로는 `(form_id, issuer_fp, retailer_code)` 3튜플(jisho 무시), 운영 preloaded 경로와 쓰기 경로는 4튜플. jisho 추가가 일부 경로에만 반영된 흔적.
 
-> **결정 필요 R-B.** B-1 합성키 권장(차원 추가를 진짜 "설정 한 줄"로 만드는 유일한 길). 단 기존 `ocr_dist` 1회 변환 스크립트 + SheetsStore reader 수정 필요. **이 축은 P2(축 A 검증 후)로 미룬다.**
+> **결정 D3 (R-B 대체).** 합성키(B-1) 대신 **키 스키마 단일 출처 모듈**([backend/core/dist_cache_key.py](../backend/core/dist_cache_key.py))을 도입. `CONTEXT_FIELDS`(form_id·issuer_fp) + `DIMENSION_FIELDS`(retailer_code·jisho)로 키·헤더·인덱스를 한 곳에서 정의하고, 세 경로 모두 여기서 받아 쓴다. 차원 추가 = `DIMENSION_FIELDS` 한 줄 + 시트 컬럼 + (그 차원 순회 plumbing). 앞 둘은 자동 일관 적용, 셋째(plumbing)가 차원별 본질 비용(T3).
+
+**솔직한 경계:** "현업이 설정 한 줄로 새 차원"까지는 못 간다 — `DIMENSION_FIELDS`는 코드 상수(한 줄)고, 새 차원 값을 items에 채워 순회하는 plumbing은 여전히 개발 작업이다. 다만 **키 스키마가 단 한 곳**이 되어 드리프트(이번 3/4튜플 버그)가 구조적으로 불가능해졌고, 차원 추가의 표면적이 최소화됐다. 파일 I/O 레거시 헬퍼(`resolve_dist_code_for_retailer`, 테스트 전용)는 자체 3필드 매치를 유지(운영 무관).
 
 ---
 
@@ -144,7 +144,7 @@ phase3는 키를 코드 상수가 아니라 `key_fields`로 조립: `key = tuple
 |---|---|---|---|
 | **P0 (이 문서)** | 설계 합의 + architecture.md §7 의사결정 기록 | — | ⏳ |
 | **P1. 축 A 레지스트리** | `aggregate_strategies.py`(register/get_strategy + `subset_subtract`) + `build_product_aggregate`를 그룹핑·표시스펙 오케스트레이터로 축소(분해는 전략 위임). form_04 config에 `"strategy":"subset_subtract"` 명시(무손실). schema에 `ProductAggregate` 정의. 골든 7 + 회귀 그린, 잘못된 전략명은 get_strategy가 명확히 차단 | 낮음(출력 계산만) | ✅ 2026-06-17 |
-| **P2. 축 B 차원 선언** | `dist_mapping.key_fields` + 합성키 캐시(B-1) + ocr_dist 변환 스크립트 | 중(매핑·시트) | ⏭ |
+| **P2. 축 B 차원 선언** | (B-1 합성키 대신) 키 스키마 단일 출처 `backend/core/dist_cache_key.py` — 빌드·조회·쓰기 세 경로를 통일, 3/4튜플 드리프트 제거. 차원 추가 = `DIMENSION_FIELDS` 한 줄 + 시트 컬럼(+plumbing). 계약 테스트 4 + 기존 dist 212 그린 | 중(매핑·시트) → 무손실 | ✅ 2026-06-17 |
 | **P3. config 스키마·sync 연계** | `form_types.schema.json`에 `strategy` enum·`key_fields` 추가. sync-form-config가 신규 필드 보존·검증 | 낮음 | ⏭ |
 
 **P1 먼저인 이유:** 자기완결적(행 데이터·시트 무관), 위험 낮음, 레지스트리 패턴을 싸게 검증. 통과하면 그 틀을 축 B에 그대로 적용.

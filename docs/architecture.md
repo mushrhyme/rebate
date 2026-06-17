@@ -420,7 +420,9 @@ Python 백엔드의 병렬화는 `asyncio`(`orchestrator.py`)가 담당. Claude 
 
 | 연산 레지스트리 P1 구현 (2026-06-17) | 축A(집계/분해 전략) 레지스트리화: `scripts/aggregate_strategies.py` 신규(register/get_strategy + `subset_subtract` 전략 = 기존 이중조건 분해 로직 이관). `build_product_aggregate`는 그룹핑·display_columns 생성 + 전략 디스패치만 하는 오케스트레이터로 축소(`if form_id` 분기 없음 유지). form_04 config `product_aggregate.strategy:"subset_subtract"` 명시, form_types.schema.json `ProductAggregate` 정의 추가 | 분해 알고리즘이 phase4_calc에 하드코딩 | 무손실 이전 — 골든 7 + 회귀 그린(730 passed, 유일 실패는 무관한 기존 phase3 retailer smoke). 전략명은 런타임 get_strategy가 단일 출처로 검증(미등록 시 명확 차단). 같은 분해 쓰는 새 양식 = config 한 줄(T1). 다음: P2 축B(조회 차원, 캐시 합성키) |
 
-**Last Updated:** 2026-06-17 (연산 레지스트리 P1 — 집계/분해 전략 레지스트리화, form_04 무손실 이전)
+| 연산 레지스트리 P2 구현 (2026-06-17) | 축B(조회/매핑 차원) dist 캐시 키 스키마 단일 출처화: `backend/core/dist_cache_key.py` 신규(CONTEXT_FIELDS·DIMENSION_FIELDS·CACHE_HEADERS·KEY_INDICES·key_from_mapping·row_from_mapping). 빌드(phase3_fallback)·조회(phase3_dist_resolver preloaded)·쓰기(tools/mapping confirm_mapping·_upsert_dist_cache_row) 세 경로가 키를 각자 하드코딩하던 것을 단일 출처로 통일 | dist 캐시 키가 3곳에 하드코딩 → 3튜플(파일I/O 조회)/4튜플(운영·쓰기) 드리프트(jisho 추가가 일부만 반영) | 무손실(계약 테스트 4 + dist 212 + 전체 730 그린, 유일 실패는 무관 기존 smoke). ocr_dist 시트는 이미 jisho 이산 컬럼 보유 → 합성키 마이그레이션 불필요, 진짜 문제는 드리프트였음. 새 차원 추가 = DIMENSION_FIELDS 한 줄 + 시트 컬럼 +(순회 plumbing=차원별 본질 T3비용). 키 스키마 단일화로 드리프트 구조적 차단 |
+
+**Last Updated:** 2026-06-17 (연산 레지스트리 P1·P2 — 집계/분해 전략 레지스트리화 + dist 캐시 키 단일 출처화)
 
 ---
 
