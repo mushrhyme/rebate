@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 
 BASE = Path(__file__).parent.parent
+if str(BASE) not in sys.path:
+    sys.path.insert(0, str(BASE))  # 스크립트 직접 실행 시 `scripts.*` 임포트 가능하게
 FORM_DEFS_DIR = BASE / "form_definitions"
 OUTPUT_PATH = BASE / "config" / "form_types.json"
 SCHEMA_PATH = BASE / "config" / "form_types.schema.json"
@@ -106,14 +108,35 @@ def serialize(forms: dict) -> str:
     return json.dumps(forms, ensure_ascii=False, indent=2)
 
 
-def main() -> int:
+def render_block(obj: dict) -> str:
+    """[config] 블록 JSON 직렬화 (블록 형식 — ensure_ascii=False, indent=2)."""
+    return json.dumps(obj, ensure_ascii=False, indent=2)
+
+
+def replace_config_block(md_text: str, new_obj: dict, source: str) -> str:
+    """form_XX.md의 [config] 블록 JSON을 new_obj로 교체한 MD 텍스트를 반환한다.
+
+    json 펜스 내부(정본 JSON span)만 정확히 치환한다 — 산문·블록 헤더는 불변.
+    블록이 없으면 BuildError.
+
+    '정본 갱신' 경로(dsl_apply 등)가 form_types.json을 직접 쓰지 않고 이 함수로
+    블록을 갱신한 뒤 build로 재생성하게 하기 위함이다(단일 소스 유지).
+    """
+    m = _CONFIG_BLOCK_RE.search(md_text)
+    if m is None:
+        raise BuildError(f"{source}: [config] 블록이 없어 갱신할 수 없습니다.")
+    start, end = m.span(1)
+    return md_text[:start] + render_block(new_obj) + md_text[end:]
+
+
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--check",
         action="store_true",
         help="빌드 결과가 현 config/form_types.json과 동일한지만 검사 (쓰지 않음)",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     try:
         forms = build_forms()
@@ -138,6 +161,22 @@ def main() -> int:
 
     OUTPUT_PATH.write_text(rendered, encoding="utf-8")
     print(f"[build_form_types] {len(forms)}개 양식 → {OUTPUT_PATH.relative_to(BASE)}")
+
+    # 사람이 읽는 "실행 규칙" 섹션을 블록에서 렌더해 form_XX.md에 주입(멱등).
+    # → 산문 규칙이 손글씨가 아니라 블록 생성물이 되어 드리프트가 불가능.
+    from scripts.render_form_prose import inject_before_config
+    injected = 0
+    for form_id, entry in forms.items():
+        md_path = FORM_DEFS_DIR / f"{form_id}.md"
+        if not md_path.exists():
+            continue
+        md = md_path.read_text(encoding="utf-8")
+        new_md = inject_before_config(md, entry)
+        if new_md != md:
+            md_path.write_text(new_md, encoding="utf-8")
+            injected += 1
+    if injected:
+        print(f"[build_form_types] {injected}개 form_XX.md에 실행 규칙 섹션 갱신")
     return 0
 
 
