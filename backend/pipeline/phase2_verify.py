@@ -260,7 +260,11 @@ def _recover_from_anchor(
 
     line  = anchor['raw_row']
     cells = [c.strip() for c in line.split('|')]
-    product_idx = int(cell_map.get('product', 1))
+    # 상품 컬럼 위치: anchor가 페이지 헤더에서 탐지한 값을 우선 사용(넓은 헤더 페이지는
+    # 선행 컬럼만큼 밀려 있음). 나머지 cell_map 인덱스는 그 차이(offset)만큼 보정한다.
+    base_product = int(cell_map.get('product', 1))
+    product_idx  = int(anchor.get('product_cell', base_product))
+    offset       = product_idx - base_product
     if len(cells) <= product_idx:
         return None
 
@@ -277,10 +281,12 @@ def _recover_from_anchor(
         return int(s2) if s2.isdigit() else None
 
     nyusuu_idx = cell_map.get('nyusuu')
+    if nyusuu_idx is not None:
+        nyusuu_idx = int(nyusuu_idx) + offset
     nyusuu = _si(cells[nyusuu_idx]) if nyusuu_idx is not None and len(cells) > nyusuu_idx else None
 
     qty = None
-    qty_idx = int(cell_map.get('qty', product_idx + 2))
+    qty_idx = int(cell_map['qty']) + offset if cell_map.get('qty') is not None else product_idx + 2
     for c in cells[qty_idx:]:
         if '個' in c:
             qty = _si(c)
