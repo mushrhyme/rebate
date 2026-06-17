@@ -76,3 +76,18 @@ def test_broken_block_raises():
     bad = "## [config] x\n\n```json\n{ not valid json }\n```\n"
     with pytest.raises(bft.BuildError):
         bft.extract_config_block(bad, "form_bad.md")
+
+
+def test_replace_config_block_swaps_json_keeps_prose():
+    """채팅→블록 경로의 핵심: 블록 JSON만 교체하고 산문·헤더는 보존."""
+    md = ("# t\n\n## 식별 패턴\nABC\n\n## [config] 실행 설정\n\n"
+          "```json\n{\n  \"label\": \"old\"\n}\n```\n\n끝줄\n")
+    new = bft.replace_config_block(md, {"label": "new", "x": 1}, "t.md")
+    assert bft.extract_config_block(new, "t.md") == {"label": "new", "x": 1}
+    assert "## 식별 패턴" in new and "ABC" in new and "끝줄" in new  # 산문 보존
+    assert "## [config] 실행 설정" in new  # 헤더 보존
+
+
+def test_replace_config_block_no_block_raises():
+    with pytest.raises(bft.BuildError):
+        bft.replace_config_block("# t\n블록 없음\n", {"a": 1}, "t.md")

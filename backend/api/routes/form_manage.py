@@ -135,6 +135,82 @@ def _to_claude_messages(messages: list[ChatMessage]) -> list[dict]:
     return result
 
 
+_RULES_SYSTEM_TMPL = """\
+당신은 form_XX.md의 [config] 실행 블록(JSON)을 편집하는 전문가입니다.
+실행 규칙(NET 수식·교차검증·집계·출력)의 **정본은 이 블록**이며, 사람이 읽는 문장은 블록에서 자동 생성됩니다.
+
+현재 {form_id} 블록:
+<block>
+{block_json}
+</block>
+
+## 출력 규칙
+- 사용자 대화에서 **합의된 변경만** 반영해 **전체 블록 JSON 한 개**를 출력합니다.
+- JSON 객체만 출력합니다 (마크다운 코드펜스·설명 없이).
+- 회계 규칙을 임의로 추측하지 않습니다. 불확실하면 기존 값을 유지합니다.
+- 아래 **허용 어휘 밖**(새 교차검증 종류·연산·집계 전략)이 필요하면 만들지 말고, 그 부분은 기존 값을 유지한 채
+  변경하지 마세요. (그런 변경은 개발(T3)이 필요합니다.)
+
+## 허용 어휘
+- NET 수식 연산: `+` `-` `*` `/` 와 괄호. 변수는 `shikiri`(仕切)·`teiban`(定番)·블록의 vars/computed_vars만.
+- 교차검증 type: {cv_types}
+- 집계 전략: {strategies}\
+"""
+
+
+@router.post("/apply-rules")
+async def apply_rules(body: ChatRequest, user: dict = Depends(get_current_user)):
+    """채팅 자연어 → [config] 블록을 **직접** 갱신 (step 3, 산문→구조 재파싱 제거).
+
+    Claude가 (현재 블록 + 허용 어휘 + 대화)로 새 블록 JSON을 만들고,
+    forms.apply_block_update가 스키마 검증 후 블록 교체 + build로 json·문장 재생성한다.
+    """
+    settings = get_settings()
+    form_path = settings.form_definitions_dir / f"{body.form_id}.md"
+    if not form_path.exists():
+        raise HTTPException(status_code=404, detail="양식 없음")
+
+    # 현재 블록 + 엔진 허용 어휘 로드 (verify_form_wiring 단일 출처)
+    import sys
+    root = str(settings.workspace_root)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from scripts.build_form_types import extract_config_block
+    from scripts.verify_form_wiring import engine_cross_validation_types, AGGREGATE_STRATEGIES
+
+    md_content = form_path.read_text(encoding="utf-8")
+    cur_block = extract_config_block(md_content, f"{body.form_id}.md") or {}
+    system = _RULES_SYSTEM_TMPL.format(
+        form_id=body.form_id,
+        block_json=json.dumps(cur_block, ensure_ascii=False, indent=2),
+        cv_types=", ".join(sorted(engine_cross_validation_types())),
+        strategies=", ".join(sorted(AGGREGATE_STRATEGIES)),
+    )
+
+    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    resp = await client.messages.create(
+        model=_MODEL, max_tokens=4096, system=system,
+        messages=_to_claude_messages(body.messages),
+    )
+    raw = resp.content[0].text.strip()
+    raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
+    try:
+        new_block = json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=422, detail=f"블록 JSON 파싱 실패: {raw[:200]}")
+    if not isinstance(new_block, dict):
+        raise HTTPException(status_code=422, detail="블록이 JSON 객체가 아닙니다.")
+
+    from .forms import apply_block_update
+    try:
+        result = await asyncio.to_thread(apply_block_update, body.form_id, new_block)
+    except ValueError as e:        # 스키마 위반
+        raise HTTPException(status_code=400, detail=f"스키마 검증 실패(반영 안 함): {e}")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="양식 없음")
+    return result
+
+
 @router.post("/chat")
 async def chat(body: ChatRequest, user: dict = Depends(get_current_user)):
     """변경 제안을 스트리밍으로 반환합니다."""
@@ -219,6 +295,27 @@ async def apply(body: ChatRequest, user: dict = Depends(get_current_user)):
                 lines = updated.splitlines()
                 end = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
                 updated = "\n".join(lines[1:end])
+
+            # 정본 보호(step 3): 산문 편집은 [config] 블록을 절대 바꾸지 않는다.
+            # Claude의 전체 재생성이 블록을 변형·누락했어도 원본 블록을 강제 복원한다.
+            # 실행 규칙 변경은 /apply-rules(채팅→블록) 경로로만.
+            try:
+                import sys as _sys
+                _root = str(settings.workspace_root)
+                if _root not in _sys.path:
+                    _sys.path.insert(0, _root)
+                from scripts.build_form_types import (
+                    extract_config_block as _xb, replace_config_block as _rb,
+                )
+                _old = _xb(current_content, f"{body.form_id}.md")
+                if _old is not None:
+                    if _xb(updated, f"{body.form_id}.md") is not None:
+                        updated = _rb(updated, _old, f"{body.form_id}.md")
+                    else:
+                        updated = (updated.rstrip() + "\n\n---\n\n## [config] 실행 설정\n\n```json\n"
+                                   + json.dumps(_old, ensure_ascii=False, indent=2) + "\n```\n")
+            except Exception:
+                pass
 
             form_path.with_suffix(".md.bak").write_text(current_content, encoding="utf-8")
             form_path.write_text(updated, encoding="utf-8")

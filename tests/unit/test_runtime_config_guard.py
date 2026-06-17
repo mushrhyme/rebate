@@ -255,26 +255,26 @@ class TestAutoConfigBlock:
         await forms.run_form_sync("form_a")  # 2차: 산문 무변경
         assert calls == [], "산문이 그대로인데 Claude가 다시 호출됨 (block-first 실패)"
 
-    async def test_auto_block_regenerated_on_prose_change(self, tmp_path, monkeypatch):
-        """자동 블록 양식의 산문이 바뀌면 재동기화가 블록을 재생성한다 (현업은 산문만 만지면 됨)."""
+    async def test_block_first_ignores_prose_change(self, tmp_path, monkeypatch):
+        """정본 통일(step 3): 블록이 생긴 뒤엔 산문을 고쳐도 재파싱하지 않는다(block-first).
+
+        규칙 변경은 채팅→블록(apply_block_update) 경로로 한다 — 산문→구조 재파싱이 표준 경로에서 사라짐.
+        """
         workspace, _, _ = _make_sync_env(tmp_path, monkeypatch, {
             "form_a": json.dumps({"label": "구버전"}),
         })
         md_path = workspace / "form_definitions" / "form_a.md"
         md_path.write_text("# form_a 정의\n\n## 식별 패턴\nABC\n", encoding="utf-8")
-        await forms.run_form_sync("form_a")
+        await forms.run_form_sync("form_a")  # 블록 없음 → 1회 파싱으로 블록 생성(구버전)
 
-        # 산문 변경 + Claude가 새 값 반환하도록 교체
+        # 산문 변경 + Claude가 호출되면 실패
         md = md_path.read_text(encoding="utf-8")
         md_path.write_text(md.replace("ABC", "ABC 변경됨"), encoding="utf-8")
-        def _new(model, max_tokens, messages):
-            block = MagicMock(); block.text = json.dumps({"label": "신버전"})
-            resp = MagicMock(); resp.content = [block]; return resp
-        monkeypatch.setattr(forms._anthropic.Anthropic.return_value.messages, "create", _new)
-
+        calls = _count_claude_calls(monkeypatch)
         await forms.run_form_sync("form_a")
+        assert calls == [], "블록 있는데 산문 변경으로 재파싱됨 — 정본 통일(block-first) 위반"
         written = json.loads((workspace / "config" / "form_types.json").read_text(encoding="utf-8"))
-        assert written["form_a"] == {"label": "신버전"}, "산문 변경이 반영되지 않음"
+        assert written["form_a"] == {"label": "구버전"}, "block-first가 아님(산문 재파싱됨)"
 
     async def test_sync_output_key_order_matches_build_sort(self, tmp_path, monkeypatch):
         """동기화가 새 양식을 추가해도 키 순서가 form_id 정렬이라 build --check와 어긋나지 않는다.

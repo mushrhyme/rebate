@@ -19,6 +19,8 @@ router = APIRouter(prefix="/api/v3/forms", tags=["forms"])
 log = logging.getLogger(__name__)
 
 _TBD_RE = re.compile(r"\bTBD\b")
+# 자동 생성 실행 규칙 섹션(블록에서 렌더) — prose-sha·블록 재작성 시 산문에서 제외한다.
+_AUTO_RULES_RE = re.compile(r"<!-- BEGIN auto-rules.*?<!-- END auto-rules -->\s*", re.DOTALL)
 
 # form_types.json read-merge-write 직렬화 — 동시 sync 시 늦게 끝난 쪽이
 # 먼저 끝난 쪽의 변경을 통째로 덮어쓰는 lost-update 방지
@@ -386,9 +388,27 @@ def _extract_config_block(md_content: str, form_id: str):
 # 손으로 만든 정본 블록(form_01/04)과 구분: 자동 블록은 마커 주석을 달고 prose-sha로
 # 산문 변경을 감지한다. 산문이 바뀌면 재생성, 손 블록은 절대 산문에서 덮어쓰지 않는다.
 
+def _render_auto_rules(entry: dict) -> str:
+    """블록 → 사람이 읽는 실행 규칙 섹션(자동). scripts/render_form_prose 단일 출처."""
+    import sys
+    root = str(get_settings().workspace_root)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from scripts.render_form_prose import render_rules
+        return render_rules(entry)
+    except Exception as e:
+        log.warning("[render] 실행 규칙 렌더 실패(생략): %s", e)
+        return ""
+
+
 def _prose_only(md_content: str) -> str:
-    """[config] 섹션을 제거한 산문 부분 (prose-sha·블록 재작성 공통 기준)."""
-    head = md_content.split("## [config]", 1)[0].rstrip()
+    """[config] 섹션·자동 규칙 섹션을 제거한 *손으로 쓴 산문* (prose-sha·블록 재작성 공통 기준).
+
+    자동 규칙 섹션은 블록 생성물이므로 산문 변경 감지(prose-sha)에서 제외한다.
+    """
+    md = _AUTO_RULES_RE.sub("", md_content)
+    head = md.split("## [config]", 1)[0].rstrip()
     if head.endswith("---"):
         head = head[:-3].rstrip()
     return head
@@ -416,14 +436,15 @@ def _write_auto_block(md_content: str, entry: dict, prose_sha: str) -> str:
     import json as _json
     block = _json.dumps(entry, ensure_ascii=False, indent=2)
     prose = _prose_only(md_content)
-    section = (
-        "\n\n---\n\n"
+    auto = _render_auto_rules(entry)            # 블록 → 사람이 읽는 실행 규칙(자동)
+    auto_part = (auto.rstrip() + "\n\n") if auto else ""
+    config_section = (
         "## [config] 실행 설정 (자동 생성 — 산문에서 빌드, 직접 편집 금지)\n\n"
         f"<!-- config-block: auto; prose-sha: {prose_sha} -->\n"
         "> 이 블록은 동기화 시 산문에서 자동 생성됩니다. 직접 고치지 말고 위 산문을 수정한 뒤 동기화하세요.\n\n"
         f"```json\n{block}\n```\n"
     )
-    return prose + section
+    return prose + "\n\n---\n\n" + auto_part + config_section
 
 
 async def _claude_parse_md_to_entry(form_id: str, md_content: str, current_entry: dict, settings) -> dict:
@@ -539,6 +560,45 @@ def _run_wiring_check(form_id: str) -> dict:
     return result
 
 
+def apply_block_update(form_id: str, new_block: dict) -> dict:
+    """[config] 블록을 새 구조로 교체하고 json·auto-rules를 재생성한다 (결정적, LLM 없음).
+
+    채팅→블록 경로(step 3)의 커밋 단계. form_types.json을 직접 쓰지 않고 블록을
+    정본으로 갱신한 뒤 build로 재생성한다(단일 소스). 스키마 검증 통과 시에만 파일을 쓴다.
+    Raises: FileNotFoundError, ValueError(스키마 위반), BuildError.
+    """
+    import sys
+    import json as _json
+    settings = get_settings()
+    root = Path(str(settings.workspace_root)).resolve()
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    md_path = settings.form_definitions_dir / f"{form_id}.md"
+    if not md_path.exists():
+        raise FileNotFoundError(f"양식 없음: {form_id}")
+
+    # 1) 스키마 검증 — 파일 쓰기 전에. 잘못된 블록은 디스크에 들어가지 않는다.
+    ft_path = root / "config" / "form_types.json"
+    form_types = _json.loads(ft_path.read_text(encoding="utf-8")) if ft_path.exists() else {}
+    merged = {**form_types, form_id: new_block}
+    _validate_form_types_schema(merged, settings)
+
+    # 2) 블록만 교체(산문·헤더 불변) → 3) build로 json 재생성 + auto-rules 재렌더(단일 소스)
+    from scripts.build_form_types import replace_config_block, main as build_main
+    md = md_path.read_text(encoding="utf-8")
+    md_path.write_text(replace_config_block(md, new_block, f"{form_id}.md"), encoding="utf-8")
+    if build_main([]) != 0:
+        raise RuntimeError("build_form_types 실패 — 블록 갱신 확인 필요")
+
+    # 4) 미러(블록 포함 MD + json) → 5) 와이어링 점검
+    final_md = md_path.read_text(encoding="utf-8")
+    mirror_form_md(form_id, final_md)
+    _mirror_to_s3("config/form_types.json", ft_path.read_text(encoding="utf-8"))
+    wiring = _run_wiring_check(form_id)
+    log.info("[block-update] %s 블록 갱신 완료", form_id)
+    return {"ok": True, "form_id": form_id, "wiring": wiring}
+
+
 async def run_form_sync(form_id: str) -> dict:
     """form_XX.md → config/form_types.json 동기화 (블록 우선 결정적 추출 + 스키마 검증 게이트).
 
@@ -570,23 +630,20 @@ async def _run_form_sync_inner(form_id: str) -> dict:
     form_types: dict = _json.loads(form_types_path.read_text(encoding="utf-8")) if form_types_path.exists() else {}
     current_entry = form_types.get(form_id, {})
 
-    # Literate config — 블록 처리 정책:
-    #  · 손 정본 블록(form_01/04 등, auto 마커 없음) → 산문 재파싱 금지, block-first (개발자 튜닝 보존).
-    #  · 자동 블록(UI 동기화가 만든 것) → 산문이 정본. 산문이 바뀌면(prose-sha 불일치) 재생성.
-    #  · 블록 없음(신규) → 산문 파싱 후 자동 블록 생성 → 개발자 손 안 타게.
+    # 정본 통일(step 3): [config] 블록이 있으면 *항상* 그것이 정본(block-first). 산문에서 재파싱하지 않는다.
+    #  · 모든 양식 동일 — "산문이 정본"인 양식은 더 이상 없다(드리프트·비일관 제거).
+    #  · 블록이 없을 때만(cold-start 직후) 레거시 산문 파싱으로 1회 블록을 만든다.
+    #  · 규칙 변경은 채팅→블록(apply_block_update) 경로로 한다 — 산문→구조 재파싱이 표준 경로에서 사라짐.
     block_entry = _extract_config_block(md_content, form_id)
-    is_auto, stored_sha = _block_is_auto(md_content)
     cur_prose_sha = _prose_sha(md_content)
-    regenerate = block_entry is None or (is_auto and stored_sha != cur_prose_sha)
-
-    if block_entry is not None and not regenerate:
+    if block_entry is not None:
         new_entry = block_entry
         generated_block = False
-        log.info("[sync] %s [config] 블록 사용 — 결정적 추출 (LLM 생략)", form_id)
+        log.info("[sync] %s [config] 블록 정본 사용 (block-first)", form_id)
     else:
         new_entry = await _claude_parse_md_to_entry(form_id, md_content, current_entry, settings)
         generated_block = True
-        log.info("[sync] %s 산문 파싱 → [config] 자동 블록 생성/갱신", form_id)
+        log.info("[sync] %s 블록 없음 → 산문 1회 파싱으로 블록 생성", form_id)
 
     # 병합·검증·쓰기만 직렬화 (Claude 폴백 시 호출은 위에서 이미 락 밖에서 끝남)
     async with _form_types_lock:
@@ -694,11 +751,9 @@ async def _md_to_config(form_id: str) -> tuple[dict, str]:
     form_types = _json.loads(ft_path.read_text(encoding="utf-8")) if ft_path.exists() else {}
     current_entry = form_types.get(form_id, {})
 
-    # Literate config: 손 블록·최신 자동 블록이면 결정적 추출, 산문 변경된 자동 블록·신규는 재파싱.
+    # 정본 통일: 블록이 있으면 항상 그것이 정본(block-first). 없을 때만 산문 1회 파싱.
     block_entry = _extract_config_block(md_content, form_id)
-    is_auto, stored_sha = _block_is_auto(md_content)
-    regenerate = block_entry is None or (is_auto and stored_sha != _prose_sha(md_content))
-    if block_entry is not None and not regenerate:
+    if block_entry is not None:
         return block_entry, md_content
     new_entry = await _claude_parse_md_to_entry(form_id, md_content, current_entry, settings)
     return new_entry, md_content
