@@ -120,6 +120,14 @@
       "unit_field": "未収条件",
       "amount_field": "金額"
     },
+    "dist_overrides": [
+      {
+        "when": {
+          "jisho": "CVS営業部"
+        },
+        "pick_candidate_name_contains": "広域リテール"
+      }
+    ],
     "cross_validation": [
       {
         "type": "cover_honbai_vs_detail",

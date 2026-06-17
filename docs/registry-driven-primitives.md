@@ -123,6 +123,40 @@ phase3는 키를 코드 상수가 아니라 `key_fields`로 조립: `key = tuple
 
 ---
 
+## 4-C. 축 C — 조건부 override (S6) — 진단으로 발견된 세 번째 축
+
+`/diagnose` 전수조사 결과, 현업이 "신라면→000"처럼 상상하던 **조건부 override(S6: 술어 → 값)** 모양이 사실 **form_04에 이미 실재**하고 있었다 — 단지 form md 산문 + LLM 프롬프트에 하드코딩된 채로:
+
+- "jisho=CVS営業部 → 특정 판매처 강제" (판매처 1:N override)
+- "条件 타입만 제품매핑" (이건 이미 `item_type` 기반 결정적이라 제외)
+
+### 4-C.1 진짜 문제 — 비결정적이었다
+
+판매처 jisho override는 결정적 코드가 **없었다.** form_md를 dist 1:N Claude 프롬프트에 통째로 주입해 **LLM이 후보 중 고르게** 하고 있었다 — 즉 (a) 1:N 모호 케이스에서만 (b) LLM 판단으로 (c) 비결정적. 회계 매핑이 이런 식이면 재현성 원칙에 위배된다.
+
+### 4-C.2 결정 D4 — 결정적 override primitive
+
+> 양식이 선언한 규칙으로 1:N 후보를 **코드가 결정적으로** 고른다. LLM을 대체(재현성↑).
+
+config([form_types.json](../config/form_types.json) form_04):
+```json
+"dist_overrides": [
+  { "when": { "jisho": "CVS営業部" },
+    "pick_candidate_name_contains": "広域リテール" }
+]
+```
+- `when`: item 필드 → 값 **정확 일치**(AND). 임의 표현식 없음(결정적·감사가능).
+- 액션: `pick_candidate_name_contains`(후보명 부분일치 유일후보) 또는 `dist_code`(코드 유일후보).
+- 구현: [backend/pipeline/dist_overrides.py](../backend/pipeline/dist_overrides.py) `resolve_dist_override`, [phase3_dist_resolver.py](../backend/pipeline/phase3_dist_resolver.py) 1:N 분기 단일 훅.
+
+### 4-C.3 안전 — 폴백 우선 + 기본 OFF
+
+매칭 실패·**모호(0개·2개+ 일치)면 None** → 기존 LLM 경로로 폴백. override는 *확실할 때만* 개입하고 애매하면 추측 안 한다. `dist_overrides` 미선언 양식은 항상 무동작 → **form_01 등 무영향(기본 OFF).** 최악=기존 동작, 최선=결정적 확정.
+
+> **확장점(향후):** 술어에 `product`를 넣으면 "신라면→000"이 그대로 동작한다. 지금은 form_04에 실재하는 jisho 기반 규칙만 wire(추측 금지). 같은 모양이라 product 추가는 술어 dict에 필드 하나.
+
+---
+
 ## 5. 안전망 — nl-to-dsl 게이트 재사용 (재발명 금지)
 
 두 축 모두 [nl-to-dsl-pipeline.md](nl-to-dsl-pipeline.md) §6 게이트에 그대로 얹는다:

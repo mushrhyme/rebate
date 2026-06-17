@@ -276,6 +276,33 @@ class TestBuildFromCache:
         result = build_dist_resolution_from_cache("R001", {}, rows)
         assert result.basis == "not_found"
 
+    def test_1ton_override_resolves_deterministically(self):
+        """1:N이라도 dist_overrides 규칙이 매칭되면 LLM 없이 결정적 확정 (basis=override)."""
+        rows = [
+            {"소매처코드": "R001", "소매처명": "テスト", "판매처코드": "D100", "판매처명": "広域リテール本部"},
+            {"소매처코드": "R001", "소매처명": "テスト", "판매처코드": "D200", "판매처명": "東北支店"},
+        ]
+        overrides = [{"when": {"jisho": "CVS営業部"}, "pick_candidate_name_contains": "広域リテール"}]
+        result = build_dist_resolution_from_cache(
+            "R001", {}, rows, jisho="CVS営業部", overrides=overrides,
+        )
+        assert result.basis              == "override"
+        assert result.dist_code          == "D100"
+        assert result.needs_confirmation is False
+
+    def test_1ton_override_no_match_falls_back_to_confirmation(self):
+        """override 미매칭(다른 jisho)이면 기존대로 needs_confirmation (안전 폴백)."""
+        rows = [
+            {"소매처코드": "R001", "소매처명": "テスト", "판매처코드": "D100", "판매처명": "広域リテール本部"},
+            {"소매처코드": "R001", "소매처명": "テスト", "판매처코드": "D200", "판매처명": "東北支店"},
+        ]
+        overrides = [{"when": {"jisho": "CVS営業部"}, "pick_candidate_name_contains": "広域リテール"}]
+        result = build_dist_resolution_from_cache(
+            "R001", {}, rows, jisho="R営業東北", overrides=overrides,
+        )
+        assert result.needs_confirmation is True
+        assert result.basis              == "needs_confirmation"
+
     def test_no_file_io(self):
         """build_dist_resolution_from_cache는 파일을 열지 않는다."""
         with patch("builtins.open", side_effect=RuntimeError("파일 I/O 금지")) as mock_open:

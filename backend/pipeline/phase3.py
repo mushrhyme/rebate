@@ -115,6 +115,24 @@ def get_dist_group_field(form_id: str) -> str | None:
     return None
 
 
+def get_dist_overrides(form_id: str) -> list[dict]:
+    """판매처(dist) 조건부 override 규칙을 form_types.json에서 조회한다.
+
+    config/form_types.json[form_id].dist_overrides 배열을 반환한다(없으면 []).
+    1:N 모호 케이스에서 LLM 대신 결정적으로 후보를 고르는 규칙 — dist_overrides.py 참조.
+    미선언 양식은 [] → override 미적용(기존 동작)."""
+    settings = get_settings()
+    path = settings.workspace_root / "config" / "form_types.json"
+    if not path.exists():
+        return []
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8")).get(form_id, {})
+    except (json.JSONDecodeError, OSError):
+        return []
+    rules = cfg.get("dist_overrides")
+    return rules if isinstance(rules, list) else []
+
+
 def build_jisho_by_customer(
     items: list[dict], unique_customers: list[str], dist_group_field: str | None,
 ) -> dict[str, list[str]]:

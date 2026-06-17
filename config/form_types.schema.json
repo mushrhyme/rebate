@@ -25,6 +25,10 @@
         "summary": { "type": "string" },
         "summary_cover_keys": { "type": "object" },
         "product_aggregate": { "$ref": "#/definitions/ProductAggregate" },
+        "dist_overrides": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/DistOverride" }
+        },
         "qty_field": {
           "oneOf": [
             { "type": "string" },
@@ -150,6 +154,30 @@
         "amount_field": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": true
+    },
+    "DistOverride": {
+      "type": "object",
+      "description": "판매처 1:N 모호 케이스를 결정적으로 고르는 조건부 규칙(S6). dist_overrides.py가 적용. when 술어 일치 시 액션으로 후보 선택. 모호하면 폴백(LLM).",
+      "required": ["when"],
+      "properties": {
+        "when": {
+          "type": "object",
+          "description": "item 필드 → 값의 정확 일치(AND). 예: {\"jisho\": \"CVS営業部\"}",
+          "minProperties": 1,
+          "additionalProperties": { "type": "string" }
+        },
+        "pick_candidate_name_contains": {
+          "type": "string",
+          "minLength": 1,
+          "description": "후보 dist_name에 이 문자열을 포함하는 유일 후보 선택"
+        },
+        "dist_code": {
+          "type": "string",
+          "minLength": 1,
+          "description": "후보 중 이 dist_code를 가진 유일 후보 선택"
+        }
+      },
+      "additionalProperties": false
     },
     "PreprocessRule": {
       "type": "object",

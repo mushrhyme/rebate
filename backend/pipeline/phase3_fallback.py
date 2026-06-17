@@ -105,6 +105,7 @@ from .phase3 import (
     _parse_fingerprint_fields,
     build_jisho_by_customer,
     get_dist_group_field,
+    get_dist_overrides,
     run_phase3,
 )
 from .phase3_dist_resolver import DistResolution, build_dist_resolution_from_cache
@@ -851,6 +852,7 @@ def _batch_result_to_retailer_decisions(
     retail_user_rows: list[dict],
     jisho_by_customer: dict[str, list[str]],
     customer_page: dict | None = None,
+    dist_overrides: list[dict] | None = None,
 ) -> tuple[list[RetailerMappingDecision], dict[tuple[str, str], DistResolution], list[dict]]:
     """RetailerBatchResult 목록을 RetailerMappingDecision 목록으로 변환한다.
 
@@ -884,6 +886,7 @@ def _batch_result_to_retailer_decisions(
             dist_res = build_dist_resolution_from_cache(
                 retailer_code, cached_dist, retail_user_rows,
                 form_id=form_id, issuer_fingerprint=issuer_fingerprint, jisho=_jisho,
+                overrides=dist_overrides,
             )
             dist_resolutions[(r.ocr_name, _jisho)] = dist_res
             if dist_res.needs_confirmation:
@@ -1248,6 +1251,7 @@ async def _execute_success_path(
 
     # ── 판매처(dist) 확정 단위: (소매처 × jisho) ──────────────────────────────
     _dist_group_field = get_dist_group_field(form_id)
+    _dist_overrides = get_dist_overrides(form_id)   # 1:N 결정적 override 규칙(미선언 시 [])
     _unique_customers = list({_i.get("customer", "") for _i in _items if _i.get("customer")})
     jisho_by_customer = build_jisho_by_customer(_items, _unique_customers, _dist_group_field)
 
@@ -1271,6 +1275,7 @@ async def _execute_success_path(
             retail_user_rows=retail_user_rows,
             jisho_by_customer=jisho_by_customer,
             customer_page=customer_page,
+            dist_overrides=_dist_overrides,
         )
     else:
         retailer_decisions = []

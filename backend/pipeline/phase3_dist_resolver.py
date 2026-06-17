@@ -36,6 +36,7 @@ __all__ = [
 
 _BASIS_CACHE        = "cache"        # ocr_dist.csv 캐시 히트
 _BASIS_AUTO_1TO1    = "auto_1_to_1"  # retail_user.csv 1:1 자동 확정
+_BASIS_OVERRIDE     = "override"     # 1:N → dist_overrides 규칙으로 결정적 확정
 _BASIS_CONFIRMATION = "needs_confirmation"  # 1:N, 사용자/Claude 결정 필요
 _BASIS_NOT_FOUND    = "not_found"    # retail_user.csv에 해당 소매처코드 없음
 
@@ -174,6 +175,7 @@ def build_dist_resolution_from_cache(
     form_id: str = "",
     issuer_fingerprint: str = "",
     jisho: str = "",
+    overrides: list[dict] | None = None,
 ) -> DistResolution:
     """미리 로드된 캐시·CSV 데이터로 dist 결정 (파일 I/O 없음 버전).
 
@@ -228,6 +230,22 @@ def build_dist_resolution_from_cache(
         )
 
     if len(candidates) > 1:
+        # 1:N 모호 — 양식이 선언한 조건부 override로 결정적으로 고를 수 있으면 LLM 건너뜀.
+        # override 미선언/매칭실패/모호면 None → 기존대로 needs_confirmation(LLM/사용자).
+        from .dist_overrides import resolve_dist_override
+        picked = resolve_dist_override(
+            candidates,
+            {"retailer_code": retailer_code, "jisho": jisho},
+            overrides,
+        )
+        if picked is not None:
+            return DistResolution(
+                dist_code=picked["dist_code"],
+                basis=_BASIS_OVERRIDE,
+                candidates=candidates,
+                needs_confirmation=False,
+                reason=f"dist_overrides 규칙 적용: {picked.get('rule', {}).get('when')}",
+            )
         return DistResolution(
             dist_code=None,
             basis=_BASIS_CONFIRMATION,
