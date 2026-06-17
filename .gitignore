@@ -85,3 +85,6 @@ mappings/ocr_retailer.csv
 # 번들은 입력(phase2/phase3)·마스터만 — run 부산물은 추적 제외
 tests/fixtures/regression/**/timing.json
 tests/fixtures/regression/**/phase4_output.json
+
+# DSL 검증 게이트 골든 (로컬 extracted 산물 — 재생성 가능)
+tests/fixtures/dsl_gate/
