@@ -17,6 +17,7 @@
       ]
     },
     "bara_source": "by_unit",
+    "case_unit": "CS",
     "qty_field": [
       "数量",
       "請求計上数量"

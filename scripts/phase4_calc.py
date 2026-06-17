@@ -262,7 +262,7 @@ def calc_net(form_id, cols, shikiri, teiban_joken=0.0):
     if formula == "subtract_conditions":
         c1 = to_f(cols.get(net_cfg["c1"],  0), 0)
         c2 = to_f(cols.get(net_cfg.get("c2") or "", 0), 0)
-        if net_cfg.get("cs_divide_by_case_qty") and cols.get("数量単位") == "CS":
+        if net_cfg.get("cs_divide_by_case_qty") and cols.get("数量単位") == cfg.get("case_unit", "CS"):
             case_qty = to_f(cols.get("ケース入数", 0), 0)
             if case_qty > 0:
                 return shikiri - (c1 + c2) / case_qty
@@ -793,6 +793,7 @@ def run(doc_id, save=False, summary_only=False, base_dir=None, return_payload=Fa
         zei_rate = cols.get("消費税率", "")
 
         bara_source = form_cfg.get("bara_source", "by_unit")
+        case_unit = form_cfg.get("case_unit", "CS")   # ケース 단위 표기 — config 정본(기본 "CS")
         if bara_source == "null":
             keesu = booru = 0
             bara = None
@@ -802,8 +803,8 @@ def run(doc_id, save=False, summary_only=False, base_dir=None, return_payload=Fa
             keesu = booru = 0
             bara = int(to_f(cols.get(col_name, 0), 0))
             kosuu_kei = bara
-        else:  # "by_unit" — 数量単位=CS/個 분기 (form_01)
-            if unit_val == "CS":
+        else:  # "by_unit" — 数量単位=ケース단위/그외 분기 (form_01)
+            if unit_val == case_unit:
                 keesu, booru = int(qty), 0
                 bara = 0
                 _iru = keesu_iru or case_qty

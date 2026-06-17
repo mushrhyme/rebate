@@ -266,6 +266,28 @@ aggregate_label: 소매처별 집계
 
 ---
 
+<!-- BEGIN auto-rules (블록에서 생성 — 직접 수정 금지) -->
+
+## 실행 규칙 (블록에서 자동 생성 · 직접 편집 금지)
+
+**NET 계산**
+
+- NET = 仕切 − discount
+  - 변수: `c1` = 条件, `c2` = (없음), `discount` = c1 + c2
+  - NET 계산 없음: 円
+
+**교차검증**
+
+- Cover(税抜合計) vs Detail(税抜) [販促金請求 8%対象 税抜, 販促金請求 10%対象 税抜]
+- 得意先 {key}
+
+**출력 섹션**: 교차검증
+
+**집계 라벨**: 소매처별 집계
+
+<!-- END auto-rules -->
+
+
 ## [config] 실행 설정 (정본 · build_form_types.py가 읽음)
 
 > 이 블록이 이 양식의 **유일한 실행 정본**이다. `config/form_types.json`은 여기서 빌드된 생성물이다.
@@ -291,6 +313,7 @@ aggregate_label: 소매처별 집계
     ]
   },
   "bara_source": "by_unit",
+  "case_unit": "CS",
   "qty_field": [
     "数量",
     "請求計上数量"
