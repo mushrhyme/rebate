@@ -11,7 +11,6 @@
 | form_02 | (미등록) |
 | form_03 | [form_03.md](form_03.md) |
 | form_04 | [form_04.md](form_04.md) |
-| form_05 | (미등록) |
 
 ## 양식 식별 방법
 
