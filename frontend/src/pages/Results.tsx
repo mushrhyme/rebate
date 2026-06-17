@@ -826,7 +826,7 @@ export function Results() {
   // (jisho, customer_ocr, product_code) → 분해 그룹. 키맵으로 제품 행에 매칭.
   const prodAgg = result.product_aggregate ?? null
   const aggMap = new Map<string, ProductAggregateGroup>()
-  if (prodAgg) for (const g of prodAgg.groups) aggMap.set(`${g.jisho} ${g.customer} ${g.product_code}`, g)
+  if (prodAgg) for (const g of prodAgg.groups) aggMap.set(`${g.jisho} ${g.customer} ${g.product_code}`, g)
 
   const activeXv: typeof result.xv =
     selectedBundle != null && result.bundle_xv
