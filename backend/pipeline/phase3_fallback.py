@@ -116,6 +116,37 @@ from .phase3_tool_result_adapter import (
 log = logging.getLogger(__name__)
 
 _PRODUCT_PROMPT_CACHE: tuple[float, str] | None = None  # (mtime, prompt)
+_DIST_PROMPT_CACHE: tuple[float, str] | None = None      # (mtime, template)
+
+
+def _get_dist_prompt_template() -> str:
+    """docs/phase3-dist-mapping-prompt.md '## 프롬프트' 코드펜스를 템플릿으로 사용.
+
+    판매처(dist) 1:N 결정 프롬프트. {{...}} 토큰은 _run_single_dist_mapping이 치환한다.
+    mtime 기반 캐시 — md 수정 시 재시작 없이 다음 호출부터 반영.
+    파일·섹션 없음은 명시적 오류 (조용한 인라인 fallback 금지).
+    """
+    global _DIST_PROMPT_CACHE
+    path = get_settings().workspace_root / "docs" / "phase3-dist-mapping-prompt.md"
+    mtime = path.stat().st_mtime  # 파일 없으면 FileNotFoundError
+    if _DIST_PROMPT_CACHE is not None and _DIST_PROMPT_CACHE[0] == mtime:
+        return _DIST_PROMPT_CACHE[1]
+    raw = path.read_text(encoding="utf-8")
+    m = re.search(r'## 프롬프트\s*\n+```[^\n]*\n', raw)
+    if not m:
+        raise RuntimeError(
+            "docs/phase3-dist-mapping-prompt.md에 '## 프롬프트' 코드펜스가 없음 — "
+            "판매처 1:N 결정 프롬프트를 로드할 수 없습니다."
+        )
+    start = m.end()
+    close = raw.rfind('\n```')
+    template = (raw[start:close] if close > start else raw[start:]).strip()
+    log.info(
+        "dist tool-use 프롬프트 템플릿 로드 — '## 프롬프트' 코드펜스 %d자 "
+        "(phase3-dist-mapping-prompt.md mtime=%.0f)", len(template), mtime,
+    )
+    _DIST_PROMPT_CACHE = (mtime, template)
+    return template
 
 
 def _get_product_system_prompt() -> str:
@@ -935,37 +966,25 @@ async def _run_single_dist_mapping(
         for i, c in enumerate(candidates)
     )
 
-    # 양식 정의(form_XX.md)의 "판매처 결정 규칙"을 그대로 주입한다.
-    # 이게 있어야 jisho(入出荷支店)↔판매처 대응 같은 양식별 업무규칙이 반영된다.
+    # 프롬프트는 docs/phase3-dist-mapping-prompt.md에서 로드 (md-driven, 레거시와 수렴).
+    # 양식 정의(form_XX.md)의 "판매처 결정 규칙"을 그대로 주입해야 jisho↔판매처 대응 같은
+    # 양식별 업무규칙이 반영된다.
     form_rule_block = (
         f"양식 정의 (판매처 결정 규칙 포함):\n\"\"\"\n{form_md}\n\"\"\"\n\n"
         if form_md else ""
     )
-    jisho_block = (
-        f"入出荷支店(jisho): {jisho}\n"
-        if jisho else ""
-    )
+    jisho_block = f"入出荷支店(jisho): {jisho}" if jisho else ""
 
     prompt = (
-        f"다음 소매처의 판매처(販売先)를 후보 목록에서 선택해라.\n\n"
-        f"{form_rule_block}"
-        f"소매처명: {ocr_name}\n"
-        f"소매처코드: {retailer_code}\n"
-        f"양식 ID: {form_id}\n"
-        f"발행처: {issuer_fingerprint or ''}\n"
-        f"{jisho_block}\n"
-        f"판매처 후보 ({len(candidates)}건):\n{candidates_str}\n\n"
-        f"처리 기준:\n"
-        f"1. 양식 정의에 \"판매처 결정 규칙\"이 있으면 그것을 최우선으로 따른다.\n"
-        f"   특히 jisho(入出荷支店) 값이 주어지면 규칙의 jisho↔판매처 대응을 먼저 적용한다.\n"
-        f"2. 규칙으로 특정 불가 시 소매처명·코드·발행처 정보로 가장 적합한 판매처를 선택한다.\n"
-        f"3. 확신이 없거나 구분이 불가능하면 \"pending\"을 선택한다.\n"
-        f"4. 최종 응답은 아래 JSON만 출력한다. 설명·markdown·code fence 금지.\n\n"
-        f"선택 케이스:\n"
-        f'{{"decision": "confirmed", "dist_code": "<후보_코드>", "reason": "<한 줄 이유>"}}\n\n'
-        f"미확정 케이스:\n"
-        f'{{"decision": "pending", "reason": "<판단 불가 이유>"}}\n\n'
-        f"주의: dist_code는 위 후보 목록에 있는 코드만 선택 가능. 회계 계산 금지."
+        _get_dist_prompt_template()
+        .replace("{{FORM_RULE_BLOCK}}", form_rule_block)
+        .replace("{{OCR_NAME}}", ocr_name)
+        .replace("{{RETAILER_CODE}}", retailer_code)
+        .replace("{{FORM_ID}}", form_id)
+        .replace("{{ISSUER}}", issuer_fingerprint or "")
+        .replace("{{JISHO_BLOCK}}", jisho_block)
+        .replace("{{N_CANDIDATES}}", str(len(candidates)))
+        .replace("{{CANDIDATES}}", candidates_str)
     )
 
     messages: list[dict] = [{"role": "user", "content": prompt}]
