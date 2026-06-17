@@ -24,6 +24,7 @@
         "aggregate_label": { "type": "string" },
         "summary": { "type": "string" },
         "summary_cover_keys": { "type": "object" },
+        "product_aggregate": { "$ref": "#/definitions/ProductAggregate" },
         "qty_field": {
           "oneOf": [
             { "type": "string" },
@@ -131,6 +132,22 @@
           "type": "array",
           "items": { "type": "string" }
         }
+      },
+      "additionalProperties": true
+    },
+    "ProductAggregate": {
+      "type": "object",
+      "description": "제품별 집계 분해 설정. strategy로 분해 알고리즘을 선택한다(scripts/aggregate_strategies.py 레지스트리). 미지정 시 subset_subtract.",
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "minLength": 1,
+          "description": "분해 전략 이름. 등록된 전략만 허용(런타임 get_strategy가 검증). 현재: subset_subtract. 새 전략은 aggregate_strategies.py에 @register로 추가."
+        },
+        "base_condition": { "type": "string", "minLength": 1 },
+        "qty_field": { "type": "string", "minLength": 1 },
+        "unit_field": { "type": "string" },
+        "amount_field": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": true
     },

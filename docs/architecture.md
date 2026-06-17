@@ -416,7 +416,11 @@ Python 백엔드의 병렬화는 `asyncio`(`orchestrator.py`)가 담당. Claude 
 
 | 제품별 집계 이중조건 분해 (2026-06-16) | DSL 어휘 확장 — `build_product_aggregate` op 추가(scripts/phase4_calc.py): 제품(jisho·customer·product_code) 단위로 定番 총수량에서 추가조건(原価引き·導入) 수량을 차감 분해, 금액은 定番 총금액을 수량 비율로 배분+추가조건 원본금액 합산(원본 총금액 보존). form_types.json `product_aggregate`(form_04) 설정으로 활성, 동적 조건 컬럼. 프론트 결과화면 '제품별 집계' 탭이 product_aggregate 있으면 동적 컬럼 분해 표시, 없으면 기존 condition_type 집계 | 청구서 조건별 행 단순 나열(이중계산) | 회계 계산은 백엔드 결정적 코드, 프론트는 표시만. 골든 단위테스트 7개(캡처 264/2352/204/2352→2352/204/60, 금액 보존). 연산 레지스트리 방식의 첫 어휘 — 같은 이중조건 패턴은 이후 다른 양식서 config로 재사용 |
 
-**Last Updated:** 2026-06-16 (제품별 집계 이중조건 수량 분해 op — DSL 어휘 확장 첫 사례)
+| 연산 레지스트리 설계 합의 (2026-06-17, 설계만) | 현업이 고른 두 축(집계/분해 전략·조회/매핑 차원)을 `if form_id` 분기 없이 **이름 붙은 전략 레지스트리 + config 선택**으로 일반화하는 설계 문서 [registry-driven-primitives.md](registry-driven-primitives.md) 작성. cross_validation이 이미 쓰는 레지스트리 패턴을 두 축에 확장. nl-to-dsl-pipeline.md의 G3(연산 어휘 확장)·T3을 구체화 | 두 축이 phase4/phase3 코드·시트 스키마에 하드코딩 | "해석기에 없던 차원도 현업이 제어" 요구의 현실적 해 = 변화의 *축*을 1회 일반화→이후 변종은 T1/T2 설정으로. 임의 코드 실행은 영구 금지(화이트리스트만). 로드맵 P1=축A 레지스트리(form_04 무손실 이전, 위험 낮음) 먼저, P2=축B 차원 선언(캐시 합성키 마이그레이션, 시트 백엔드라 비용 큼) |
+
+| 연산 레지스트리 P1 구현 (2026-06-17) | 축A(집계/분해 전략) 레지스트리화: `scripts/aggregate_strategies.py` 신규(register/get_strategy + `subset_subtract` 전략 = 기존 이중조건 분해 로직 이관). `build_product_aggregate`는 그룹핑·display_columns 생성 + 전략 디스패치만 하는 오케스트레이터로 축소(`if form_id` 분기 없음 유지). form_04 config `product_aggregate.strategy:"subset_subtract"` 명시, form_types.schema.json `ProductAggregate` 정의 추가 | 분해 알고리즘이 phase4_calc에 하드코딩 | 무손실 이전 — 골든 7 + 회귀 그린(730 passed, 유일 실패는 무관한 기존 phase3 retailer smoke). 전략명은 런타임 get_strategy가 단일 출처로 검증(미등록 시 명확 차단). 같은 분해 쓰는 새 양식 = config 한 줄(T1). 다음: P2 축B(조회 차원, 캐시 합성키) |
+
+**Last Updated:** 2026-06-17 (연산 레지스트리 P1 — 집계/분해 전략 레지스트리화, form_04 무손실 이전)
 
 ---
 

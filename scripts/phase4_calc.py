@@ -21,6 +21,8 @@ from typing import Optional
 BASE = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE))
 
+from scripts.aggregate_strategies import get_strategy  # noqa: E402  (BASE 경로 설정 후 import)
+
 
 def _get_sheets_store():
     """GOOGLE_SHEETS_MAPPINGS_ID 환경변수가 설정된 경우 SheetsStore 반환."""
@@ -555,6 +557,8 @@ def build_product_aggregate(items_in: list, form_cfg: dict) -> Optional[dict]:
     qty_field = cfg.get("qty_field", "数量")
     unit_field = cfg.get("unit_field", "未収条件")
     amount_field = cfg.get("amount_field", "金額")
+    # 분해 전략 — 레지스트리에서 이름으로 선택. 미지정이면 기존 동작(무손실 하위호환).
+    strategy_name = cfg.get("strategy", "subset_subtract")
 
     # (jisho, customer_ocr, product_code) → condition_type → 누적
     groups: dict[tuple, dict] = {}
@@ -590,42 +594,17 @@ def build_product_aggregate(items_in: list, form_cfg: dict) -> Optional[dict]:
     condition_columns = ([base_type] if base_type in seen_cols else []) + \
                         [c for c in seen_cols if c != base_type]
 
+    # 그룹별 행 분해는 전략 함수에 위임 (레지스트리). 그룹핑·표시 스펙은 여기(공통)서.
+    strategy = get_strategy(strategy_name)
     out_groups = []
     warnings: list[str] = []
     for key in order:
         g = groups[key]
-        conds = g["conds"]
-        base = conds.get(base_type)
-        if not base or base["qty"] <= 0:
-            continue  # 定番 없는 그룹은 분해 대상 아님
-        base_qty = base["qty"]
-        base_amount = base["amount"]            # 定番 원본 총금액 (정확)
-        base_unit_disp = round(base_amount / base_qty, 2) if base_qty else 0.0
-        extras = [(ct, v) for ct, v in conds.items() if ct != base_type]
-        extra_qty_sum = sum(v["qty"] for _, v in extras)
-        base_only_qty = base_qty - extra_qty_sum
-
-        rows = []
-        for ct, v in extras:
-            q = v["qty"]
-            # 금액 = 그 물량의 定番분(定番 총금액을 수량 비율로 배분) + 추가조건 원본 금액
-            base_share = base_amount * (q / base_qty) if base_qty else 0.0
-            rows.append({
-                "qty": _num_out(q),
-                "units": {base_type: base_unit_disp, ct: round((v["amount"] / q) if q else 0.0, 2)},
-                "amount": round(base_share + v["amount"], 2),
-            })
-        if base_only_qty > 0.0001:
-            rows.append({
-                "qty": _num_out(base_only_qty),
-                "units": {base_type: base_unit_disp},
-                "amount": round(base_amount * (base_only_qty / base_qty), 2),
-            })
-        elif base_only_qty < -0.0001:
-            warnings.append(
-                f"{g['_meta']['product_name']}: 추가조건 합({extra_qty_sum})이 定番({base['qty']}) 초과 — 분해 음수"
-            )
-
+        rows, warning = strategy(g["conds"], base_type)
+        if warning:
+            warnings.append(f"{g['_meta']['product_name']}: {warning}")
+        if rows is None:
+            continue  # 기준조건 없는 그룹은 분해 대상 아님
         total_qty = sum(r["qty"] for r in rows)
         total_amount = round(sum(r["amount"] for r in rows), 2)
         out_groups.append({**g["_meta"], "rows": rows, "total_qty": total_qty, "total_amount": total_amount})
@@ -646,11 +625,6 @@ def build_product_aggregate(items_in: list, form_cfg: dict) -> Optional[dict]:
         "groups": out_groups,
         "warnings": warnings,
     }
-
-
-def _num_out(v: float):
-    """정수면 int, 아니면 소수 2자리."""
-    return int(v) if abs(v - round(v)) < 1e-9 else round(v, 2)
 
 
 # ── 메인 처리 로직 ────────────────────────────────────────────────────────────
