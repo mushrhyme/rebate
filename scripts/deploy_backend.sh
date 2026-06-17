@@ -22,6 +22,20 @@ cd "$ROOT"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# 미러 도달 가능성 먼저 확인 — fetch 실패(네트워크/권한)와 "차이 없음"을 구분한다.
+# config/ 프리픽스에는 백엔드가 쓰는 users.json 등이 상존하므로, 접근 가능하면 ls가 성공한다.
+if ! aws s3 ls "s3://$BUCKET/config/" --region "$REGION" >/dev/null 2>&1; then
+  echo "⚠ S3 미러(config/)에 접근할 수 없습니다 (네트워크/권한 가능성)."
+  echo "  미러를 확인하지 못하면 '차이 없음'과 구분되지 않아 EC2 편집분을 덮어쓸 위험이 있습니다."
+  echo "  확인: aws s3 ls s3://$BUCKET/config/ --region $REGION"
+  if [ "$MODE" != "--force-local" ]; then
+    echo "  안전하게 중단합니다. 의도적으로 미러 확인 없이 배포하려면 --force-local 사용."
+    exit 1
+  fi
+  echo "  (--force-local 이므로 미러 확인 생략하고 진행)"
+fi
+
+# 개별 파일은 미러에 아직 없을 수 있으므로(최초 배포) 부재는 허용한다 — 위 ls로 도달성은 이미 확인됨.
 aws s3 cp "s3://$BUCKET/config/form_types.json" "$TMP/form_types.json" \
   --region "$REGION" >/dev/null 2>&1 || true
 aws s3 sync "s3://$BUCKET/config/form_definitions/" "$TMP/form_definitions/" \
@@ -46,15 +60,41 @@ if [ ${#DIFFS[@]} -gt 0 ]; then
   for d in "${DIFFS[@]}"; do echo "   - $d"; done
   case "$MODE" in
     --take-remote)
-      echo "▶ --take-remote: 미러 → 로컬 반영 후 배포 진행"
+      echo "▶ --take-remote: 미러 → 로컬 반영 후 git 커밋하고 배포 진행"
       [ -f "$TMP/form_types.json" ] && cp "$TMP/form_types.json" "config/form_types.json"
       if [ -d "$TMP/form_definitions" ]; then
         cp "$TMP"/form_definitions/*.md form_definitions/ 2>/dev/null || true
       fi
-      echo "   (git diff로 확인 후 커밋하세요)"
+      # git을 단일 출처로 유지 — 미러 채택분을 즉시 커밋한다.
+      # (커밋을 빠뜨리면 다른 머신/새 clone에서 로컬이 다시 stale → 사고 재발)
+      git add config/form_types.json form_definitions/*.md
+      if git diff --cached --quiet; then
+        echo "   (스테이지된 변경 없음 — 커밋 생략)"
+      else
+        git commit -m "chore: adopt EC2 runtime form edits from S3 mirror (deploy --take-remote)" \
+          || { echo "✗ 커밋 실패 — git 상태 확인 후 재시도하세요. 배포 중단."; exit 1; }
+        echo "   ✓ 미러 채택분 git 커밋 완료 (배포 후 push 권장)"
+      fi
       ;;
     --force-local)
-      echo "▶ --force-local: 로컬 우선 배포 — EC2 변경분이 덮어써집니다"
+      echo "▶ --force-local 선택됨 — 아래 EC2 런타임 편집분이 로컬로 덮어써져 영구 삭제됩니다."
+      echo "   (diff 왼쪽 = 미러/EC2 현재값, 오른쪽 = 로컬/배포본)"
+      for d in "${DIFFS[@]}"; do
+        echo "── $d ────────────────────────────────────────"
+        if [ "$d" = "config/form_types.json" ]; then
+          diff -u "$TMP/form_types.json" "config/form_types.json" || true
+        else
+          base=$(basename "$d")
+          diff -u "$TMP/form_definitions/$base" "$d" 2>/dev/null || true
+        fi
+      done
+      printf "정말 위 EC2 편집분을 버리고 로컬을 배포합니까? (yes 입력): "
+      read -r CONFIRM
+      if [ "$CONFIRM" != "yes" ]; then
+        echo "중단합니다. (미러 채택은 --take-remote)"
+        exit 1
+      fi
+      echo "▶ 확인됨 — 로컬 우선 배포 진행"
       ;;
     *)
       echo ""
