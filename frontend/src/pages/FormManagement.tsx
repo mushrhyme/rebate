@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, Send, ChevronRight, AlertCircle, Paperclip, X, Image, Save, CheckCircle, MessageSquare, Loader, RefreshCw, Trash2 } from 'lucide-react'
+import { Plus, Send, ChevronRight, AlertCircle, Paperclip, X, Image, Save, CheckCircle, MessageSquare, Loader, RefreshCw, Trash2, Zap } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useForms } from '../context/FormsContext'
@@ -54,6 +54,7 @@ export function FormManagement() {
   const [attachedImages, setAttachedImages] = useState<{ file: File; previewUrl: string }[]>([])
   const [isSending, setIsSending] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
+  const [isApplyingRules, setIsApplyingRules] = useState(false)
   const [isSaved, setIsSaved] = useState(false)
   const [savedAt, setSavedAt] = useState<Date | null>(null)
   const [isChatOpen, setIsChatOpen] = useState(false)
@@ -289,6 +290,48 @@ export function FormManagement() {
       showToast('저장 실패', false)
     } finally {
       setIsSaving(false)
+    }
+  }
+
+  // 실행 규칙(NET·교차검증·출력)을 [config] 블록에 직접 반영 (산문이 아니라 구조).
+  // 채팅 대화 → /apply-rules → Claude가 블록 갱신 → 스키마검증·build·와이어링.
+  async function handleApplyRules() {
+    if (isApplyingRules || isSaving || isSending) return
+    setIsApplyingRules(true)
+    try {
+      const apiMessages = chatHistory
+        .filter(m => !m.streaming)
+        .map(m => ({ role: m.role, content: m.text }))
+      const res = await fetch(`${BASE}/api/v3/form-manage/apply-rules`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...sessionHeaders() },
+        body: JSON.stringify({ form_id: selectedId, messages: apiMessages }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: '규칙 반영 실패' }))
+        setChatHistory(h => [...h, { role: 'assistant', text: `⚠️ 규칙 반영 실패: ${err.detail}` }])
+        showToast(err.detail ?? '규칙 반영 실패', false)
+        return
+      }
+      const data = await res.json()           // { ok, form_id, wiring }
+      const w = data.wiring ?? {}
+      const parts: string[] = ['✅ 실행 규칙(블록) 반영 완료.']
+      if (w.safe_fixed?.length) parts.push(`자동수정 ${w.safe_fixed.length}건`)
+      if (w.owner?.length) parts.push(`현업 확인 ${w.owner.length}건`)
+      if (w.dev?.length) parts.push(`개발 필요(T3) ${w.dev.length}건`)
+      setChatHistory(h => [...h, { role: 'assistant', text: parts.join(' · ') }])
+      // 블록·자동 섹션이 바뀌었으니 MD 새로고침
+      const fresh = await fetch(`${BASE}/api/v3/forms/${selectedId}`, { headers: sessionHeaders() })
+      if (fresh.ok) {
+        const fd = await fresh.json()
+        setContentByForm(prev => ({ ...prev, [selectedId]: fd.content }))
+        setHashByForm(prev => ({ ...prev, [selectedId]: fd.content_hash }))
+      }
+      showToast('규칙 반영 완료', true)
+    } catch {
+      showToast('규칙 반영 실패', false)
+    } finally {
+      setIsApplyingRules(false)
     }
   }
 
@@ -810,6 +853,23 @@ export function FormManagement() {
                 >
                   {isSaved ? <CheckCircle size={12} /> : <Save size={12} />}
                   {isSaving ? '저장 중...' : isSaved ? '저장 완료' : '저장'}
+                </button>
+                <button
+                  onClick={handleApplyRules}
+                  disabled={isApplyingRules || isSaving || isSending}
+                  title="실행 규칙(NET 수식·교차검증·출력)을 [config] 블록에 직접 반영합니다. 산문이 아니라 구조로 — 드리프트 없음."
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    padding: '6px 14px', borderRadius: 7,
+                    border: '1px solid var(--primary)',
+                    background: isApplyingRules ? '#ede9e1' : 'transparent',
+                    color: isApplyingRules ? 'var(--text-3)' : 'var(--primary)',
+                    fontSize: 12, fontWeight: 600,
+                    cursor: isApplyingRules || isSaving || isSending ? 'default' : 'pointer',
+                  }}
+                >
+                  <Zap size={12} />
+                  {isApplyingRules ? '반영 중...' : '규칙 반영'}
                 </button>
                 {isSaved && savedAt && (
                   <span style={{ fontSize: 11, color: 'var(--text-3)' }}>
