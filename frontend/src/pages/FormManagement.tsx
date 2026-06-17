@@ -4,6 +4,7 @@ import { Plus, Send, ChevronRight, AlertCircle, Paperclip, X, Image, Save, Check
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useForms } from '../context/FormsContext'
+import { FormChangePreview } from '../components/FormChangePreview'
 
 const BASE = (import.meta as any).env?.VITE_API_URL ?? ''
 
@@ -583,6 +584,7 @@ export function FormManagement() {
 
               {/* MD 렌더링 */}
               <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px', background: 'var(--bg)' }}>
+                <FormChangePreview formId={selectedId} />
                 {isLoadingContent ? (
                   <div style={{
                     display: 'flex', alignItems: 'center', justifyContent: 'center',

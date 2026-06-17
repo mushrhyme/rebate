@@ -12,7 +12,6 @@ import { Sap } from './pages/Sap'
 import { UserManagement } from './pages/UserManagement'
 import { RetailAssignment } from './pages/RetailAssignment'
 import { UsageMonitor } from './pages/UsageMonitor'
-import { DslStudio } from './pages/DslStudio'
 import { Login } from './pages/Login'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { FormsProvider } from './context/FormsContext'
@@ -65,13 +64,6 @@ function AppRoutes() {
         <ProtectedRoute>
           <AdminRoute>
             <Layout><UsageMonitor /></Layout>
-          </AdminRoute>
-        </ProtectedRoute>
-      } />
-      <Route path="/dsl-studio" element={
-        <ProtectedRoute>
-          <AdminRoute>
-            <Layout><DslStudio /></Layout>
           </AdminRoute>
         </ProtectedRoute>
       } />
