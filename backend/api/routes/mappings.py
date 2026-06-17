@@ -93,7 +93,12 @@ def _upsert_cache(doc_id: str, mapping_type: str, ocr_name: str, confirmed_code:
         elif mapping_type == "product":
             store.upsert_row("ocr_product.csv", [0], [ocr_name, confirmed_code, confirmed_name])
         elif mapping_type == "dist" and dist_rc and dist_form_id and dist_issuer_fp:
-            store.upsert_row("ocr_dist.csv", [0, 1, 2], [dist_form_id, dist_issuer_fp, dist_rc, confirmed_code, confirmed_name])
+            # ocr_dist 키에 jisho 컬럼(4번째)이 추가됨. 결과화면 remap은 소매처 단위라
+            # jisho="" 로 기록한다(레거시 granularity). 컬럼 정합성 유지가 목적.
+            store.upsert_row(
+                "ocr_dist.csv", [0, 1, 2, 3],
+                [dist_form_id, dist_issuer_fp, dist_rc, "", confirmed_code, confirmed_name],
+            )
     except Exception:
         # Sheets는 신규 문서의 1차 캐시 — 기록 실패가 묻히면 다음 분석부터 같은
         # 매핑을 다시 묻게 되므로 반드시 로그를 남긴다 (파이프라인은 계속 진행)

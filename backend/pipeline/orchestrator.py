@@ -432,6 +432,14 @@ async def _merge_confirmed_mappings(doc_id: str) -> None:
                 "basis": "user_confirmed",
             }
 
+    # 사용자가 판매처(dist)를 직접 확정한 소매처 → 해당 소매처 전체 item에 그 값을 적용.
+    # (확인 UI는 소매처 단위이므로 jisho 무차원 override가 사용자 의도)
+    user_dist_by_customer = {
+        row["ocr_name"]: row["confirmed_code"]
+        for row in rows
+        if row["mapping_type"] == "dist" and row.get("confirmed_code")
+    }
+
     # items 배열 codes 업데이트
     for item in result.get("items", []):
         ocr_customer = item.get("customer_ocr", "") or item.get("customer", "")
@@ -440,8 +448,12 @@ async def _merge_confirmed_mappings(doc_id: str) -> None:
         rc = confirmed_retailers.get(ocr_customer)
         if rc:
             item["retailer_code"] = rc.get("retailer_code", "")
-            item["dist_code"]     = rc.get("dist_code", "")
             item["unconfirmed"]   = False
+
+        # dist_code: 사용자 확정이 있으면 덮어쓰고, 없으면 phase3가 넣은 (소매처×jisho) 값 유지
+        # (retailer 단위로 덮어쓰면 같은 소매처의 jisho별 판매처가 뭉개지므로 보존한다)
+        if ocr_customer in user_dist_by_customer:
+            item["dist_code"] = user_dist_by_customer[ocr_customer]
 
         pc = confirmed_products.get(ocr_product)
         if pc:

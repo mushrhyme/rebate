@@ -99,7 +99,13 @@ from ..tools.claude_adapter import build_claude_tools, coerce_tool_arguments
 from ..tools.claude_retry import async_call_with_retry
 from ..tools.mapping import _read_csv, confirm_mapping, search_product
 from ..tools.registry import get_tool
-from .phase3 import _build_issuer_fingerprint, _parse_fingerprint_fields, run_phase3
+from .phase3 import (
+    _build_issuer_fingerprint,
+    _parse_fingerprint_fields,
+    build_jisho_by_customer,
+    get_dist_group_field,
+    run_phase3,
+)
 from .phase3_dist_resolver import DistResolution, build_dist_resolution_from_cache
 from .phase3_tool_result_adapter import (
     ProductMappingDecision,
@@ -811,14 +817,18 @@ def _batch_result_to_retailer_decisions(
     issuer_fingerprint: str,
     cached_dist: dict,
     retail_user_rows: list[dict],
+    jisho_by_customer: dict[str, list[str]],
     customer_page: dict | None = None,
-) -> tuple[list[RetailerMappingDecision], dict[str, DistResolution], list[dict]]:
+) -> tuple[list[RetailerMappingDecision], dict[tuple[str, str], DistResolution], list[dict]]:
     """RetailerBatchResult 목록을 RetailerMappingDecision 목록으로 변환한다.
+
+    판매처(dist)는 (소매처 × jisho) 단위로 결정한다 — 같은 소매처라도 入出荷支店이
+    다르면 판매처가 갈리므로. dist_resolutions 키는 (ocr_name, jisho) 튜플이다.
 
     파일 I/O 없음 — pre-load된 cached_dist / retail_user_rows를 사용.
     """
     decisions: list[RetailerMappingDecision] = []
-    dist_resolutions: dict[str, DistResolution] = {}
+    dist_resolutions: dict[tuple[str, str], DistResolution] = {}
     dist_pending: list[dict] = []
 
     for r in per_retailer:
@@ -835,26 +845,29 @@ def _batch_result_to_retailer_decisions(
         basis = lb if lb in {"cache", "bracket_code", "exact_match"} else "tool_use"
 
         retailer_code = r.confirmed_code
-        dist_res = build_dist_resolution_from_cache(
-            retailer_code, cached_dist, retail_user_rows,
-            form_id=form_id, issuer_fingerprint=issuer_fingerprint,
-        )
-        dist_resolutions[r.ocr_name] = dist_res
-
-        if dist_res.needs_confirmation:
-            dist_pending.append({
-                "mapping_type": "dist", "ocrName": r.ocr_name,
-                "retailer_code": retailer_code,   # dist 1:N Tool Use에서 컨텍스트로 사용
-                "candidates": dist_res.candidates,
-                "page_number": (customer_page or {}).get(r.ocr_name),
-            })
-            dist_code = ""
-        else:
-            dist_code = dist_res.dist_code or ""
+        # RetailerMappingDecision.dist_code는 jisho 무차원 호환용 — 첫 확정 jisho 값을 best-effort로.
+        # 실제 item별 dist는 confirmed_dist[(ocr_name, jisho)]로 적용된다.
+        primary_dist = ""
+        for _jisho in jisho_by_customer.get(r.ocr_name, [""]):
+            dist_res = build_dist_resolution_from_cache(
+                retailer_code, cached_dist, retail_user_rows,
+                form_id=form_id, issuer_fingerprint=issuer_fingerprint, jisho=_jisho,
+            )
+            dist_resolutions[(r.ocr_name, _jisho)] = dist_res
+            if dist_res.needs_confirmation:
+                dist_pending.append({
+                    "mapping_type": "dist", "ocrName": r.ocr_name,
+                    "retailer_code": retailer_code,   # dist 1:N Tool Use에서 컨텍스트로 사용
+                    "jisho": _jisho,                  # 어느 入出荷支店에 대한 결정인지
+                    "candidates": dist_res.candidates,
+                    "page_number": (customer_page or {}).get(r.ocr_name),
+                })
+            elif dist_res.dist_code and not primary_dist:
+                primary_dist = dist_res.dist_code
 
         decisions.append(RetailerMappingDecision(
             ocr_name=r.ocr_name, retailer_code=retailer_code,
-            dist_code=dist_code, basis=basis, confidence=1.0,
+            dist_code=primary_dist, basis=basis, confidence=1.0,
         ))
 
     return decisions, dist_resolutions, dist_pending
@@ -898,6 +911,8 @@ async def _run_single_dist_mapping(
     form_id: str,
     issuer_fingerprint: str,
     retailer_name: str = "",
+    jisho: str = "",
+    form_md: str = "",
     client: Any,
     model: str = _TOOL_USE_MODEL,
     _token_acc: ToolUseTokenStats | None = None,
@@ -920,17 +935,32 @@ async def _run_single_dist_mapping(
         for i, c in enumerate(candidates)
     )
 
+    # 양식 정의(form_XX.md)의 "판매처 결정 규칙"을 그대로 주입한다.
+    # 이게 있어야 jisho(入出荷支店)↔판매처 대응 같은 양식별 업무규칙이 반영된다.
+    form_rule_block = (
+        f"양식 정의 (판매처 결정 규칙 포함):\n\"\"\"\n{form_md}\n\"\"\"\n\n"
+        if form_md else ""
+    )
+    jisho_block = (
+        f"入出荷支店(jisho): {jisho}\n"
+        if jisho else ""
+    )
+
     prompt = (
         f"다음 소매처의 판매처(販売先)를 후보 목록에서 선택해라.\n\n"
+        f"{form_rule_block}"
         f"소매처명: {ocr_name}\n"
         f"소매처코드: {retailer_code}\n"
         f"양식 ID: {form_id}\n"
-        f"발행처: {issuer_fingerprint or ''}\n\n"
+        f"발행처: {issuer_fingerprint or ''}\n"
+        f"{jisho_block}\n"
         f"판매처 후보 ({len(candidates)}건):\n{candidates_str}\n\n"
         f"처리 기준:\n"
-        f"1. 소매처명·코드·발행처 정보를 기반으로 가장 적합한 판매처를 선택한다.\n"
-        f"2. 확신이 없거나 구분이 불가능하면 \"pending\"을 선택한다.\n"
-        f"3. 최종 응답은 아래 JSON만 출력한다. 설명·markdown·code fence 금지.\n\n"
+        f"1. 양식 정의에 \"판매처 결정 규칙\"이 있으면 그것을 최우선으로 따른다.\n"
+        f"   특히 jisho(入出荷支店) 값이 주어지면 규칙의 jisho↔판매처 대응을 먼저 적용한다.\n"
+        f"2. 규칙으로 특정 불가 시 소매처명·코드·발행처 정보로 가장 적합한 판매처를 선택한다.\n"
+        f"3. 확신이 없거나 구분이 불가능하면 \"pending\"을 선택한다.\n"
+        f"4. 최종 응답은 아래 JSON만 출력한다. 설명·markdown·code fence 금지.\n\n"
         f"선택 케이스:\n"
         f'{{"decision": "confirmed", "dist_code": "<후보_코드>", "reason": "<한 줄 이유>"}}\n\n'
         f"미확정 케이스:\n"
@@ -1041,17 +1071,19 @@ async def _build_dist_decisions_with_tool_use(
     issuer_fingerprint: str,
     retail_user_rows: list[dict],
     dist_client: Any,
+    form_md: str = "",
     model: str = _TOOL_USE_MODEL,
     concurrency: int = 1,
     _token_acc: ToolUseTokenStats | None = None,
-) -> "tuple[dict[str, DistResolution], list[dict]]":
+) -> "tuple[dict[tuple[str, str], DistResolution], list[dict]]":
     """dist_pending의 1:N 항목들을 Claude Tool Use로 결정한다.
 
-    dist_pending: [{"mapping_type":"dist","ocrName":str,"candidates":[...],"page_number":int|None}]
+    dist_pending: [{"mapping_type":"dist","ocrName":str,"jisho":str,"candidates":[...],"page_number":int|None}]
+    항목은 (소매처 × jisho) 단위다 — 같은 소매처라도 jisho가 다르면 별개 항목.
 
     반환:
-      (resolved: {ocr_name: DistResolution},  # tool_use 또는 needs_confirmation
-       remaining_pending: [dict])              # 여전히 pending인 항목
+      (resolved: {(ocr_name, jisho): DistResolution},  # tool_use 또는 needs_confirmation
+       remaining_pending: [dict])                       # 여전히 pending인 항목
     """
     from .phase3_dist_resolver import DistResolution
 
@@ -1066,11 +1098,10 @@ async def _build_dist_decisions_with_tool_use(
 
     _sem = asyncio.Semaphore(max(1, concurrency))
 
-    async def _resolve_one(item: dict) -> "tuple[str, DistResolution | None]":
+    async def _resolve_one(item: dict) -> "tuple[tuple[str, str], DistResolution | None]":
         ocr_name   = item.get("ocrName", "")
+        jisho      = item.get("jisho", "")
         candidates = item.get("candidates", [])
-        # retailer_code: dist_pending에 저장 안 됨 → ocr_name을 key로만 사용
-        # context에서 가져올 수 없으므로 "" 사용 (Claude는 ocr_name과 issuer_fingerprint 활용)
         retailer_code = item.get("retailer_code", "")
         retailer_name = retailer_name_by_code.get(retailer_code, "")
 
@@ -1084,6 +1115,8 @@ async def _build_dist_decisions_with_tool_use(
                     form_id=form_id,
                     issuer_fingerprint=issuer_fingerprint,
                     retailer_name=retailer_name,
+                    jisho=jisho,
+                    form_md=form_md,
                     client=dist_client,
                     model=model,
                     _token_acc=local_acc,
@@ -1104,26 +1137,27 @@ async def _build_dist_decisions_with_tool_use(
                 _token_acc.dist_cache_creation_tokens += local_acc.dist_cache_creation_tokens
                 _token_acc.dist_api_calls             += local_acc.dist_api_calls
 
-        return ocr_name, res
+        return (ocr_name, jisho), res
 
     tasks = [_resolve_one(item) for item in dist_pending]
     raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    resolved:          dict[str, "DistResolution"] = {}
-    remaining_pending: list[dict]                   = []
+    resolved:          dict[tuple[str, str], "DistResolution"] = {}
+    remaining_pending: list[dict]                              = []
 
     for idx, item in enumerate(dist_pending):
         ocr_name = item.get("ocrName", "")
+        jisho    = item.get("jisho", "")
         task_result = raw_results[idx]
 
         if isinstance(task_result, BaseException):
-            log.warning("[dist_tool_use] '%s': 예외 발생 → pending 유지: %s",
-                        ocr_name, task_result)
+            log.warning("[dist_tool_use] '%s' (jisho=%s): 예외 발생 → pending 유지: %s",
+                        ocr_name, jisho, task_result)
             remaining_pending.append(item)
             continue
 
         _, res = task_result
-        resolved[ocr_name] = res
+        resolved[(ocr_name, jisho)] = res
         if res.needs_confirmation:
             # Claude가 pending 선택 → pending 유지
             remaining_pending.append(item)
@@ -1161,7 +1195,11 @@ async def _execute_success_path(
     ocr_dist_path = mappings_dir / "ocr_dist.csv"
     cached_dist: dict = {}
     for _row in _read_csv(ocr_dist_path):
-        _k = (_row.get("form_id", ""), _row.get("issuer_fingerprint", ""), _row.get("retailer_code", ""))
+        # (form_id, issuer_fingerprint, retailer_code, jisho) 4튜플 — jisho 없는 구 행은 ""
+        _k = (
+            _row.get("form_id", ""), _row.get("issuer_fingerprint", ""),
+            _row.get("retailer_code", ""), _row.get("jisho", ""),
+        )
         cached_dist[_k] = _row.get("dist_code", "")
 
     # ── issuer 추출 ──────────────────────────────────────────────────────────
@@ -1192,6 +1230,11 @@ async def _execute_success_path(
         if _p and _p not in product_page:
             product_page[_p] = _pg
 
+    # ── 판매처(dist) 확정 단위: (소매처 × jisho) ──────────────────────────────
+    _dist_group_field = get_dist_group_field(form_id)
+    _unique_customers = list({_i.get("customer", "") for _i in _items if _i.get("customer")})
+    jisho_by_customer = build_jisho_by_customer(_items, _unique_customers, _dist_group_field)
+
     # ── Retailer token usage 누적 (batch_result.stats에서) ────────────────────
     # success path에서만 호출됨. fallback 시는 exception.partial_token_stats 경로를 사용.
     if batch_result is not None and _token_acc is not None:
@@ -1210,11 +1253,12 @@ async def _execute_success_path(
             issuer_fingerprint=issuer_fingerprint,
             cached_dist=cached_dist,
             retail_user_rows=retail_user_rows,
+            jisho_by_customer=jisho_by_customer,
             customer_page=customer_page,
         )
     else:
         retailer_decisions = []
-        dist_resolutions: dict[str, DistResolution] = {}
+        dist_resolutions: dict[tuple[str, str], DistResolution] = {}
         dist_pending: list[dict] = []
 
     # ── Dist 1:N Tool Use (후보 2건 이상 → Claude 판단) ─────────────────────────
@@ -1225,18 +1269,25 @@ async def _execute_success_path(
             issuer_fingerprint=issuer_fingerprint,
             retail_user_rows=retail_user_rows,
             dist_client=product_client,
+            form_md=form_md,
             model=model,
             concurrency=concurrency,
             _token_acc=_token_acc,
         )
-        # dist_resolutions 업데이트 (tool_use 확정 또는 needs_confirmation 유지)
+        # dist_resolutions 업데이트 (tool_use 확정 또는 needs_confirmation 유지) — (ocr, jisho) 키
         dist_resolutions.update(dist_updates)
-        # retailer_decisions의 dist_code를 확정값으로 반영
+        # retailer_decisions의 dist_code(호환 필드)를 best-effort로 반영
         from dataclasses import replace as _dc_replace
         for i, rd in enumerate(retailer_decisions):
-            new_res = dist_updates.get(rd.ocr_name)
-            if new_res and new_res.dist_code:
-                retailer_decisions[i] = _dc_replace(rd, dist_code=new_res.dist_code)
+            if rd.dist_code:
+                continue
+            _conf = next(
+                (res.dist_code for (ocr, _j), res in dist_updates.items()
+                 if ocr == rd.ocr_name and res.dist_code),
+                "",
+            )
+            if _conf:
+                retailer_decisions[i] = _dc_replace(rd, dist_code=_conf)
         log.info(
             "[%s] Dist 1:N Tool Use 완료 — 확정=%d건, pending=%d건",
             doc_id,
@@ -1263,14 +1314,32 @@ async def _execute_success_path(
             product_page=product_page,
         )
 
+    # ── 판매처 확정 맵 (소매처 × jisho) → item별 dist 적용에 사용 ──────────────
+    confirmed_dist: dict[tuple[str, str], dict] = {}
+    for (_ocr, _j), _res in dist_resolutions.items():
+        if _res.dist_code and _res.basis in {"cache", "auto_1_to_1", "tool_use"}:
+            confirmed_dist[(_ocr, _j)] = {
+                "dist_code": _res.dist_code,
+                "dist_name": dist_name_by_code.get(_res.dist_code, ""),
+            }
+
     # ── phase3 output 조립 ────────────────────────────────────────────────────
     result, pending = convert_tool_use_result_to_phase3_output(
         doc_id=doc_id, form_id=form_id, hatsu_month=hatsu_month,
         issuer=issuer, phase2_result=phase2_result,
         retailer_decisions=retailer_decisions,
         product_decisions=product_decisions,
+        confirmed_dist=confirmed_dist,
+        dist_group_field=_dist_group_field,
     )
-    pending.extend(dist_pending)
+    # dist pending은 (소매처×jisho) 단위로 누적됐을 수 있음 — UI는 소매처 단위라 ocr_name으로 dedup
+    _seen_dist_pending: set[str] = set()
+    for _p in dist_pending:
+        _o = _p.get("ocrName", "")
+        if _o in _seen_dist_pending:
+            continue
+        _seen_dist_pending.add(_o)
+        pending.append(_p)
 
     # ── phase3_output.json 저장 ────────────────────────────────────────────────
     try:
@@ -1282,7 +1351,11 @@ async def _execute_success_path(
         raise ToolUseDispatchError(f"phase3_output.json 저장 실패: {exc}") from exc
 
     # ── confirm_mapping ────────────────────────────────────────────────────────
+    # 소매처코드 확정 기록
+    _retailer_code_by_ocr: dict[str, str] = {}
     for rd in retailer_decisions:
+        if rd.retailer_code:
+            _retailer_code_by_ocr[rd.ocr_name] = rd.retailer_code
         if rd.retailer_code and rd.basis in {"bracket_code", "exact_match", "tool_use"}:
             await confirm_mapping(
                 mapping_type="retailer", ocr_name=rd.ocr_name,
@@ -1290,15 +1363,17 @@ async def _execute_success_path(
                 context={"retailer_name": retailer_name_by_code.get(rd.retailer_code, "")},
                 mappings_dir=mappings_dir,
             )
-        dist_res = dist_resolutions.get(rd.ocr_name)
-        # auto_1_to_1 또는 tool_use(Claude 확정) 모두 저장
-        if dist_res and dist_res.basis in {"auto_1_to_1", "tool_use"} and dist_res.dist_code:
+    # 판매처 확정 기록 — (소매처 × jisho) 단위. auto_1_to_1 / tool_use 만 캐시 저장
+    # (cache basis는 이미 캐시에 있으므로 재기록 불필요)
+    for (_ocr, _jisho), dist_res in dist_resolutions.items():
+        if dist_res.basis in {"auto_1_to_1", "tool_use"} and dist_res.dist_code:
             await confirm_mapping(
-                mapping_type="dist", ocr_name=rd.ocr_name,
+                mapping_type="dist", ocr_name=_ocr,
                 confirmed_code=dist_res.dist_code,
                 context={
                     "form_id": form_id, "issuer_fingerprint": issuer_fingerprint,
-                    "retailer_code": rd.retailer_code,
+                    "retailer_code": _retailer_code_by_ocr.get(_ocr, ""),
+                    "jisho": _jisho,
                     "dist_name": dist_name_by_code.get(dist_res.dist_code, ""),
                 },
                 mappings_dir=mappings_dir,

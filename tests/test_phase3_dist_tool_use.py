@@ -263,7 +263,8 @@ class TestBuildDistDecisions:
             )
 
         assert len(resolved) == 2
-        assert resolved["テスト店A"].basis == "tool_use"
+        # resolved 키는 (ocr_name, jisho) — 이 pending은 jisho 없음 → ""
+        assert resolved[("テスト店A", "")].basis == "tool_use"
         assert len(remaining) == 0
 
     async def test_partial_pending_stays_in_remaining(self, tmp_path):
@@ -284,8 +285,8 @@ class TestBuildDistDecisions:
                 dist_client=MagicMock(), model="m",
             )
 
-        assert resolved["テスト店A"].basis == "tool_use"
-        assert resolved["テスト店B"].needs_confirmation is True
+        assert resolved[("テスト店A", "")].basis == "tool_use"
+        assert resolved[("テスト店B", "")].needs_confirmation is True
         assert len(remaining) == 1
         assert remaining[0]["ocrName"] == "テスト店B"
 
@@ -307,7 +308,7 @@ class TestBuildDistDecisions:
                 dist_client=MagicMock(), model="m",
             )
 
-        assert list(resolved.keys()) == ["テスト店A", "テスト店B"]
+        assert list(resolved.keys()) == [("テスト店A", ""), ("テスト店B", "")]
 
     async def test_token_acc_accumulated_from_all_calls(self, tmp_path):
         """모든 dist 호출 token이 _token_acc에 합산된다."""
@@ -590,6 +591,7 @@ class TestDistPendingRetailerCode:
             per_retailer,
             form_id="form_01", issuer_fingerprint="fp",
             cached_dist={}, retail_user_rows=retail_user_rows,
+            jisho_by_customer={"テスト店": [""]},
         )
 
         assert len(dist_pending) == 1

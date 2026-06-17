@@ -248,7 +248,8 @@ def _write_mapping_cache(
                     )
                     rc = (p3.get("confirmed_retailers", {}).get(ocr_name) or {}).get("retailer_code", "")
                     if rc and form_id and issuer_fp:
-                        store.append_row("ocr_dist.csv", [form_id, issuer_fp, rc, confirmed_code, confirmed_name])
+                        # ocr_dist 키에 jisho 컬럼(4번째) 추가됨 → jisho="" 로 컬럼 정합성 유지
+                        store.append_row("ocr_dist.csv", [form_id, issuer_fp, rc, "", confirmed_code, confirmed_name])
             except Exception:
                 pass
     except Exception:

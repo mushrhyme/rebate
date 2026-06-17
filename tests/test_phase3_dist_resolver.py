@@ -228,14 +228,27 @@ class TestNoFileWriting:
 
 class TestBuildFromCache:
     def test_cache_hit(self):
-        """pre-loaded 캐시 딕셔너리에서 캐시 히트."""
-        cached = {("form_01", "fp1", "R001"): "D999"}
+        """pre-loaded 캐시 딕셔너리에서 캐시 히트. 키는 (form_id, fp, retailer_code, jisho) 4튜플."""
+        cached = {("form_01", "fp1", "R001", ""): "D999"}
         result = build_dist_resolution_from_cache(
             "R001", cached, [],
             form_id="form_01", issuer_fingerprint="fp1"
         )
         assert result.basis     == "cache"
         assert result.dist_code == "D999"
+
+    def test_cache_hit_jisho_specific(self):
+        """같은 소매처라도 jisho가 다르면 다른 판매처를 반환한다."""
+        cached = {
+            ("form_04", "fp1", "R001", "CVS営業部"): "D100",
+            ("form_04", "fp1", "R001", "R営業東北"): "D200",
+        }
+        r1 = build_dist_resolution_from_cache(
+            "R001", cached, [], form_id="form_04", issuer_fingerprint="fp1", jisho="CVS営業部")
+        r2 = build_dist_resolution_from_cache(
+            "R001", cached, [], form_id="form_04", issuer_fingerprint="fp1", jisho="R営業東北")
+        assert r1.dist_code == "D100"
+        assert r2.dist_code == "D200"
 
     def test_1to1_from_rows(self):
         """pre-loaded retail_user rows에서 1:1 자동 확정."""

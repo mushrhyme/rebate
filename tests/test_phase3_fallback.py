@@ -578,6 +578,7 @@ class TestSuccessPathDetail:
             per_retailer,
             form_id="form_01", issuer_fingerprint="fp1",
             cached_dist={}, retail_user_rows=[],
+            jisho_by_customer={},
         )
         assert len(decisions) == 1
         assert decisions[0].retailer_code == "R001"
@@ -599,6 +600,7 @@ class TestSuccessPathDetail:
             per_retailer,
             form_id="form_01", issuer_fingerprint="fp1",
             cached_dist={}, retail_user_rows=[],
+            jisho_by_customer={},
         )
         assert decisions[0].retailer_code is None
         assert decisions[0].basis         == "not_found"
@@ -629,10 +631,11 @@ class TestSuccessPathDetail:
             per_retailer,
             form_id="form_01", issuer_fingerprint="fp1",
             cached_dist={}, retail_user_rows=retail_user_rows,
+            jisho_by_customer={"テスト店": [""]},
         )
         assert decisions[0].dist_code == "D001"
         assert len(dist_pending) == 0
-        assert dist_resolutions["テスト店"].basis == "auto_1_to_1"
+        assert dist_resolutions[("テスト店", "")].basis == "auto_1_to_1"
 
     def test_dist_1ton_creates_pending_no_fallback(self, tmp_path):
         """retail_user.csv에 1:N → dist pending, fallback 아님."""
@@ -664,6 +667,7 @@ class TestSuccessPathDetail:
             per_retailer,
             form_id="form_01", issuer_fingerprint="fp1",
             cached_dist={}, retail_user_rows=retail_user_rows,
+            jisho_by_customer={"テスト店": [""]},
         )
         # dist_code는 비어 있지만 retailer_code는 확정
         assert decisions[0].retailer_code == "R001"

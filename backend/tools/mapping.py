@@ -219,11 +219,14 @@ def _upsert_cache_row(
 
 def _upsert_dist_cache_row(
     path: Path, form_id: str, issuer_fingerprint: str,
-    retailer_code: str, dist_code: str, dist_name: str = "",
+    retailer_code: str, dist_code: str, dist_name: str = "", jisho: str = "",
 ) -> None:
-    """ocr_dist.csv 복합키(form_id, issuer_fingerprint, retailer_code) upsert."""
-    headers = ["form_id", "issuer_fingerprint", "retailer_code", "dist_code", "dist_name"]
-    new_row = [form_id, issuer_fingerprint, retailer_code, dist_code, dist_name]
+    """ocr_dist.csv 복합키(form_id, issuer_fingerprint, retailer_code, jisho) upsert.
+
+    jisho는 入出荷支店 등 그룹 식별 필드 값이다. 같은 소매처라도 jisho가 다르면
+    판매처가 갈리므로 캐시 키에 포함한다. jisho 미사용 양식은 ""로 동작(기존과 동일)."""
+    headers = ["form_id", "issuer_fingerprint", "retailer_code", "jisho", "dist_code", "dist_name"]
+    new_row = [form_id, issuer_fingerprint, retailer_code, jisho, dist_code, dist_name]
     rows: list[list[str]] = []
     if path.exists() and path.stat().st_size > 0:
         try:
@@ -233,7 +236,8 @@ def _upsert_dist_cache_row(
             pass
     updated = False
     for i, row in enumerate(rows):
-        if len(row) >= 3 and row[0] == form_id and row[1] == issuer_fingerprint and row[2] == retailer_code:
+        if (len(row) >= 4 and row[0] == form_id and row[1] == issuer_fingerprint
+                and row[2] == retailer_code and row[3] == jisho):
             rows[i] = new_row
             updated = True
             break
@@ -283,7 +287,7 @@ async def confirm_mapping(
     mapping_type별 저장 대상:
       "retailer" → mappings/ocr_retailer.csv  (키: ocr_name)
       "product"  → mappings/ocr_product.csv   (키: ocr_name)
-      "dist"     → mappings/ocr_dist.csv      (키: form_id + issuer_fingerprint + retailer_code)
+      "dist"     → mappings/ocr_dist.csv      (키: form_id + issuer_fingerprint + retailer_code + jisho)
 
     Args:
         mapping_type:   저장 대상 종류
@@ -293,7 +297,7 @@ async def confirm_mapping(
             retailer → {"retailer_name": str}  (선택)
             product  → {"product_name": str}   (선택)
             dist     → 필수: "form_id", "issuer_fingerprint", "retailer_code"
-                       선택: "dist_name"
+                       선택: "dist_name", "jisho" (그룹 식별 필드 값, 미지정 시 "")
         mappings_dir:   mappings/ 디렉토리 경로
 
     Returns:
@@ -344,17 +348,19 @@ async def confirm_mapping(
                 )
             row = [
                 context["form_id"], context["issuer_fingerprint"],
-                context["retailer_code"], confirmed_code, context.get("dist_name", ""),
+                context["retailer_code"], context.get("jisho", ""),
+                confirmed_code, context.get("dist_name", ""),
             ]
             if store:
-                await asyncio.to_thread(store.upsert_row, "ocr_dist.csv", [0, 1, 2], row)
+                await asyncio.to_thread(store.upsert_row, "ocr_dist.csv", [0, 1, 2, 3], row)
             else:
                 cache_path = mappings_dir / "ocr_dist.csv"
                 async with _get_csv_lock(cache_path):
                     await asyncio.to_thread(
                         _upsert_dist_cache_row, cache_path,
                         context["form_id"], context["issuer_fingerprint"],
-                        context["retailer_code"], confirmed_code, context.get("dist_name", ""),
+                        context["retailer_code"], confirmed_code,
+                        context.get("dist_name", ""), context.get("jisho", ""),
                     )
         else:
             raise ValueError(f"알 수 없는 mapping_type: {mapping_type!r}")

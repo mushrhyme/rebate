@@ -173,6 +173,7 @@ def build_dist_resolution_from_cache(
     *,
     form_id: str = "",
     issuer_fingerprint: str = "",
+    jisho: str = "",
 ) -> DistResolution:
     """미리 로드된 캐시·CSV 데이터로 dist 결정 (파일 I/O 없음 버전).
 
@@ -181,7 +182,7 @@ def build_dist_resolution_from_cache(
 
     Args:
         retailer_code:      확정된 소매처코드
-        cached_dist:        ocr_dist.csv → {(form_id, issuer_fp, retailer_code): dist_code}
+        cached_dist:        ocr_dist.csv → {(form_id, issuer_fp, retailer_code, jisho): dist_code}
         retail_user_rows:   retail_user.csv 전체 행 목록
         form_id:            양식 ID
         issuer_fingerprint: 발행처 지문
@@ -197,8 +198,9 @@ def build_dist_resolution_from_cache(
             reason="retailer_code가 비어 있음",
         )
 
-    # ① 캐시 조회
-    cache_key = (form_id, issuer_fingerprint, retailer_code)
+    # ① 캐시 조회 — (form_id, issuer_fingerprint, retailer_code, jisho) 4튜플 키.
+    # 같은 소매처라도 jisho(入出荷支店 등)가 다르면 판매처가 갈리므로 jisho 포함.
+    cache_key = (form_id, issuer_fingerprint, retailer_code, jisho)
     if cache_key in cached_dist:
         return DistResolution(
             dist_code=cached_dist[cache_key],

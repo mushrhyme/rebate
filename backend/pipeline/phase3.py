@@ -35,13 +35,19 @@ _SYSTEM_PROMPT_CACHE: tuple[float, str] | None = None  # (mtime, prompt)
 # ── 캐시 로더 ─────────────────────────────────────────────────────────────────
 
 def _load_dist_cache(path: Path) -> dict[tuple, str]:
-    """(form_id, issuer_fingerprint, retailer_code) → dist_code
+    """(form_id, issuer_fingerprint, retailer_code, jisho) → dist_code
+
+    같은 소매처라도 jisho(入出荷支店 등 그룹 식별 필드)가 다르면 판매처가 갈리므로
+    캐시 키에 jisho를 포함한다. jisho 컬럼이 없는 구(舊) 캐시 행은 jisho=""로 로드된다.
 
     path.exists() 선차단 금지 — _read_csv가 Sheets 우선 조회하므로
     로컬 파일이 없어도(Sheets 운영 모드) 캐시를 읽어야 한다."""
     result = {}
     for r in _read_csv(path):
-        key = (r.get("form_id", ""), r.get("issuer_fingerprint", ""), r.get("retailer_code", ""))
+        key = (
+            r.get("form_id", ""), r.get("issuer_fingerprint", ""),
+            r.get("retailer_code", ""), r.get("jisho", ""),
+        )
         result[key] = r.get("dist_code", "")
     return result
 
@@ -86,6 +92,47 @@ def _parse_fingerprint_fields(form_md: str) -> list[str]:
 def _build_issuer_fingerprint(issuer: dict, fields: list[str]) -> str:
     """fingerprint_fields에 해당하는 issuer 값을 '|' 구분자로 연결."""
     return "|".join(issuer.get(f, "") for f in fields)
+
+
+def get_dist_group_field(form_id: str) -> str | None:
+    """판매처(dist) 확정 단위가 되는 그룹 식별 필드명을 form_types.json에서 조회한다.
+
+    config/form_types.json의 cross_validation 중 type=="cover_breakdown_vs_detail"의
+    detail_group_field를 반환한다. 없으면 None (jisho 미사용 양식 → 소매처당 판매처 1개).
+
+    legacy run_phase3 / Tool Use 경로 / orchestrator가 동일 기준을 쓰도록 공유한다."""
+    settings = get_settings()
+    path = settings.workspace_root / "config" / "form_types.json"
+    if not path.exists():
+        return None
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8")).get(form_id, {})
+    except (json.JSONDecodeError, OSError):
+        return None
+    for xv in cfg.get("cross_validation", []):
+        if xv.get("type") == "cover_breakdown_vs_detail":
+            return xv.get("detail_group_field")
+    return None
+
+
+def build_jisho_by_customer(
+    items: list[dict], unique_customers: list[str], dist_group_field: str | None,
+) -> dict[str, list[str]]:
+    """소매처별 jisho 값 목록을 만든다 (판매처 확정 단위).
+
+    dist_group_field가 없으면 모든 소매처가 [""] → 소매처당 판매처 1개(기존 동작)."""
+    out: dict[str, list[str]] = {}
+    for i in items:
+        c = i.get("customer", "")
+        if not c:
+            continue
+        jv = i.get(dist_group_field, "") if dist_group_field else ""
+        out.setdefault(c, [])
+        if jv not in out[c]:
+            out[c].append(jv)
+    for c in unique_customers:
+        out.setdefault(c, [""])
+    return out
 
 
 # ── 시스템 프롬프트 ────────────────────────────────────────────────────────────
@@ -254,9 +301,17 @@ def _apply_mappings(
     items: list[dict],
     confirmed_retailers: dict[str, dict],
     confirmed_products: dict[str, dict],
+    confirmed_dist: dict[tuple[str, str], dict] | None = None,
+    dist_group_field: str | None = None,
 ) -> list[dict]:
     """phase2 items에 retailer_code / dist_code / product_code 쓰기.
-    item_type은 Phase 2가 확정해서 넘겨주므로 읽기만 한다."""
+    item_type은 Phase 2가 확정해서 넘겨주므로 읽기만 한다.
+
+    판매처(dist) 결정 방식:
+      - confirmed_dist 제공 시: (소매처, jisho) 단위로 각 item의 jisho 값으로 조회.
+        jisho 미사용 양식은 dist_group_field=None → 키가 (소매처, "")로 통일.
+      - confirmed_dist 미제공 시(레거시 호출): confirmed_retailers의 dist_code 사용
+        (소매처 단위 — Tool Use adapter 등 아직 jisho 비대응 경로 호환)."""
     out = []
     for item in items:
         i = dict(item)
@@ -268,7 +323,11 @@ def _apply_mappings(
 
         rc = confirmed_retailers.get(ocr_customer, {})
         i["retailer_code"] = rc.get("retailer_code", "")
-        i["dist_code"]     = rc.get("dist_code", "")
+        if confirmed_dist is not None:
+            _jisho = i.get(dist_group_field, "") if dist_group_field else ""
+            i["dist_code"] = confirmed_dist.get((ocr_customer, _jisho), {}).get("dist_code", "")
+        else:
+            i["dist_code"] = rc.get("dist_code", "")
         i["unconfirmed"]   = not bool(rc.get("retailer_code"))
 
         pc = confirmed_products.get(ocr_product, {})
@@ -319,15 +378,7 @@ async def run_phase3(
 
     # form_types.json에서 1:N 판매처 결정 시 사용할 그룹 식별 필드명 조회
     # cross_validation의 cover_breakdown_vs_detail 타입에 detail_group_field가 정의된 양식만 해당
-    _form_types_path = settings.workspace_root / "config" / "form_types.json"
-    _dist_group_field: str | None = None
-    if _form_types_path.exists():
-        import json as _json_tmp
-        _form_cfg = _json_tmp.loads(_form_types_path.read_text(encoding="utf-8")).get(form_id, {})
-        for _xv in _form_cfg.get("cross_validation", []):
-            if _xv.get("type") == "cover_breakdown_vs_detail":
-                _dist_group_field = _xv.get("detail_group_field")
-                break
+    _dist_group_field: str | None = get_dist_group_field(form_id)
 
     items = phase2_result.get("items", [])
 
@@ -339,6 +390,12 @@ async def run_phase3(
             break
 
     unique_retailers = list({i["customer"] for i in items if i.get("customer")})
+
+    # 소매처별 jisho(그룹 식별 필드) 값 목록 — 판매처(dist) 확정 단위.
+    # 같은 소매처라도 jisho가 다르면 판매처가 갈리므로 (소매처 × jisho)로 매핑한다.
+    # _dist_group_field가 없는(=jisho 미사용) 양식은 모든 소매처가 [""] → 기존과 동일하게
+    # 소매처당 판매처 1개로 동작한다.
+    jisho_by_customer = build_jisho_by_customer(items, unique_retailers, _dist_group_field)
     # 첫 등장 item_type 보존 (동일 OCR명 복수 타입 시 마지막값 overwrite 방지)
     product_type_map: dict[str, str] = {}
     for i in items:
@@ -401,11 +458,10 @@ async def run_phase3(
 
         if result.basis in ("cache", "bracket_code", "exact_match"):
             retailer_code = result.retailer_code
-            dist_key = (form_id, issuer_fingerprint, retailer_code)
-            dist_code = cache_d.get(dist_key, "")
+            # 판매처(dist)는 (소매처 × jisho) 단위라 여기서 확정하지 않고,
+            # 아래 _resolve_dist_for() 패스에서 jisho별로 일괄 처리한다.
             confirmed_retailers[name] = {
                 "retailer_code": retailer_code,
-                "dist_code":     dist_code,
                 "basis":         result.basis,
             }
             if result.basis in ("bracket_code", "exact_match"):
@@ -416,19 +472,6 @@ async def run_phase3(
                     context={"retailer_name": retailer_name_by_code.get(retailer_code, "")},
                     mappings_dir=mappings_dir,
                 )
-                if dist_code:
-                    await confirm_mapping(
-                        mapping_type="dist",
-                        ocr_name=name,
-                        confirmed_code=dist_code,
-                        context={
-                            "form_id": form_id,
-                            "issuer_fingerprint": issuer_fingerprint,
-                            "retailer_code": retailer_code,
-                            "dist_name": dist_name_by_code.get(dist_code, ""),
-                        },
-                        mappings_dir=mappings_dir,
-                    )
 
     # ── ① 제품 캐시 조회 (search_product: 캐시→유사도 후보) ─────────────────
     confirmed_products: dict[str, dict] = {}
@@ -442,61 +485,92 @@ async def run_phase3(
     # ── pending은 아래 dist 루프에서도 사용하므로 여기서 초기화 ─────────────────
     pending: list[dict] = []
 
-    # dist 캐시 미스 처리: Python이 1:1 케이스를 먼저 자동 확정
-    # 1:N 케이스만 Claude에 넘기되, 후보 목록을 미리 추려서 전달
+    # 판매처(dist) 확정 상태: (소매처 OCR명, jisho) → {dist_code, dist_name}
+    confirmed_dist: dict[tuple[str, str], dict] = {}
+    # 1:N 모호 케이스 중 Claude에 넘길 (소매처 × jisho) 항목
     cached_retailers_needing_dist: list[dict] = []
+    # dist pending은 UI에서 (mapping_type, ocr_name) 단위로 표시되므로 소매처당 1회만 등록
+    dist_pending_emitted: set[str] = set()
 
-    for _name in unique_retailers:
-        if _name not in confirmed_retailers or confirmed_retailers[_name].get("dist_code"):
-            continue
-        _rc = confirmed_retailers[_name]["retailer_code"]
+    async def _resolve_dist_for(_name: str, *, allow_claude: bool) -> None:
+        """소매처 _name의 jisho별 판매처를 확정한다.
+
+        우선순위: ① 캐시 히트 → ② 후보 1건 자동확정 → ③ 후보 복수(1:N):
+        allow_claude면 Claude 위임 목록에 적재, 아니면 pending → ④ 후보 0건 pending.
+        같은 소매처라도 jisho가 다르면 각각 독립적으로 판매처를 정한다."""
+        info = confirmed_retailers.get(_name)
+        if not info:
+            return
+        _rc = info.get("retailer_code", "")
+        if not _rc:
+            return
         _candidates = dist_candidates_by_retailer.get(_rc, [])
-        if len(_candidates) == 1:
-            # 1:1 → Python 자동 확정 + 캐시 저장
-            _dc = _candidates[0]["dist_code"]
-            _dn = _candidates[0]["dist_name"]
-            confirmed_retailers[_name]["dist_code"] = _dc
-            await confirm_mapping(
-                mapping_type="dist",
-                ocr_name=_name,
-                confirmed_code=_dc,
-                context={
-                    "form_id": form_id,
-                    "issuer_fingerprint": issuer_fingerprint,
-                    "retailer_code": _rc,
-                    "dist_name": _dn,
-                },
-                mappings_dir=mappings_dir,
-            )
-        elif len(_candidates) > 1:
-            # 1:N → Claude가 판단 (후보 목록 + 그룹 식별 필드 값 포함)
-            # 그룹 식별 필드: form_types.json cross_validation의 detail_group_field에서 동적 조회
-            # issuer보다 직접적인 근거 — form별 필드명이 다르므로 값만 수집
-            _jisho_values: list[str] = []
-            if _dist_group_field:
-                _jisho_values = list({
-                    item.get(_dist_group_field, "")
-                    for item in items
-                    if item.get("customer") == _name and item.get(_dist_group_field)
-                })
-            cached_retailers_needing_dist.append({
-                "ocr_name":     _name,
-                "retailer_code": _rc,
-                "candidates":   _candidates,
-                **({"jisho_values": _jisho_values} if _jisho_values else {}),
-            })
-        else:
-            # 0건 → retail_user.csv에 해당 소매처코드 행 없음 (판매처코드 정의 미비)
-            log.warning(
-                "[%s] dist NOT_FOUND — 소매처 '%s' (코드 %s)에 대한 판매처 후보가 retail_user.csv에 없음",
-                "phase3", _name, _rc,
-            )
-            pending.append({
-                "mapping_type": "dist",
-                "ocrName": _name,
-                "candidates": [],
-                "page_number": customer_page.get(_name),
-            })
+        for _jisho in jisho_by_customer.get(_name, [""]):
+            if (_name, _jisho) in confirmed_dist:
+                continue
+            # ① 캐시 히트 (이미 확정된 값이므로 재기록 불필요)
+            _cached = cache_d.get((form_id, issuer_fingerprint, _rc, _jisho), "")
+            if _cached:
+                confirmed_dist[(_name, _jisho)] = {
+                    "dist_code": _cached,
+                    "dist_name": dist_name_by_code.get(_cached, ""),
+                }
+                continue
+            # ② 후보 1건 → Python 자동 확정 + 캐시 저장
+            if len(_candidates) == 1:
+                _dc = _candidates[0]["dist_code"]
+                _dn = _candidates[0]["dist_name"]
+                confirmed_dist[(_name, _jisho)] = {"dist_code": _dc, "dist_name": _dn}
+                await confirm_mapping(
+                    mapping_type="dist",
+                    ocr_name=_name,
+                    confirmed_code=_dc,
+                    context={
+                        "form_id": form_id,
+                        "issuer_fingerprint": issuer_fingerprint,
+                        "retailer_code": _rc,
+                        "jisho": _jisho,
+                        "dist_name": _dn,
+                    },
+                    mappings_dir=mappings_dir,
+                )
+            # ③ 후보 복수(1:N)
+            elif len(_candidates) > 1:
+                if allow_claude:
+                    cached_retailers_needing_dist.append({
+                        "ocr_name":     _name,
+                        "retailer_code": _rc,
+                        "candidates":   _candidates,
+                        **({"jisho": _jisho} if _jisho else {}),
+                    })
+                elif _name not in dist_pending_emitted:
+                    dist_pending_emitted.add(_name)
+                    pending.append({
+                        "mapping_type": "dist",
+                        "ocrName": _name,
+                        "candidates": _candidates,
+                        "page_number": customer_page.get(_name),
+                    })
+            # ④ 후보 0건 → retail_user.csv에 해당 소매처코드 행 없음
+            else:
+                log.warning(
+                    "[%s] dist NOT_FOUND — 소매처 '%s' (코드 %s)에 대한 판매처 후보가 retail_user.csv에 없음",
+                    "phase3", _name, _rc,
+                )
+                if _name not in dist_pending_emitted:
+                    dist_pending_emitted.add(_name)
+                    pending.append({
+                        "mapping_type": "dist",
+                        "ocrName": _name,
+                        "candidates": [],
+                        "page_number": customer_page.get(_name),
+                    })
+
+    # 캐시 히트 소매처의 판매처를 jisho별로 선처리 (1:N은 Claude 위임 목록에 적재)
+    for _name in unique_retailers:
+        if _name in confirmed_retailers:
+            await _resolve_dist_for(_name, allow_claude=True)
+
     miss_products = [
         {"product": n, "item_type": product_type_map.get(n, "条件")}
         for n in unique_products
@@ -547,13 +621,11 @@ async def run_phase3(
                     and _code_in_master(m["retailer_code"], valid_retailer_codes,
                                         kind="retailer", ocr_name=ocr)):
                 retailer_code = m["retailer_code"]
-                dist_code     = m.get("dist_code", "")
-                if dist_code and not _code_in_master(dist_code, valid_dist_codes,
-                                                     kind="dist", ocr_name=ocr):
-                    dist_code = ""
+                # 판매처(dist)는 아래 post-Claude _resolve_dist_for() 패스에서 jisho별로
+                # 확정한다. retailers[] 응답의 단일 dist_code는 다(多)-jisho를 표현할 수
+                # 없으므로 여기서 쓰지 않는다.
                 confirmed_retailers[ocr] = {
                     "retailer_code": retailer_code,
-                    "dist_code":     dist_code,
                     "basis":         m.get("basis", "claude"),
                 }
                 await confirm_mapping(
@@ -563,19 +635,6 @@ async def run_phase3(
                     context={"retailer_name": retailer_name_by_code.get(retailer_code, "")},
                     mappings_dir=mappings_dir,
                 )
-                if dist_code:
-                    await confirm_mapping(
-                        mapping_type="dist",
-                        ocr_name=ocr,
-                        confirmed_code=dist_code,
-                        context={
-                            "form_id": form_id,
-                            "issuer_fingerprint": issuer_fingerprint,
-                            "retailer_code": retailer_code,
-                            "dist_name": dist_name_by_code.get(dist_code, ""),
-                        },
-                        mappings_dir=mappings_dir,
-                    )
             else:
                 pending.append({
                     "mapping_type": "retailer",
@@ -593,17 +652,21 @@ async def run_phase3(
                     "page_number":  customer_page.get(n),
                 })
 
-        # dist_only 처리 (소매처는 캐시됐고 dist만 결정)
+        # dist_only 처리 (소매처는 캐시됐고 dist만 결정) — (소매처 × jisho) 단위
         for m in r_result.get("dist_only", []):
             ocr = m.get("ocr_name", "")
             if not ocr or ocr not in confirmed_retailers:
                 continue
+            _jisho = m.get("jisho", "")
             if (m.get("confidence") == "high" and m.get("dist_code")
                     and _code_in_master(m["dist_code"], valid_dist_codes,
                                         kind="dist", ocr_name=ocr)):
                 dist_code     = m["dist_code"]
-                retailer_code = m["retailer_code"]
-                confirmed_retailers[ocr]["dist_code"] = dist_code
+                retailer_code = m.get("retailer_code") or confirmed_retailers[ocr].get("retailer_code", "")
+                confirmed_dist[(ocr, _jisho)] = {
+                    "dist_code": dist_code,
+                    "dist_name": dist_name_by_code.get(dist_code, ""),
+                }
                 await confirm_mapping(
                     mapping_type="dist",
                     ocr_name=ocr,
@@ -612,11 +675,13 @@ async def run_phase3(
                         "form_id": form_id,
                         "issuer_fingerprint": issuer_fingerprint,
                         "retailer_code": retailer_code,
+                        "jisho": _jisho,
                         "dist_name": dist_name_by_code.get(dist_code, ""),
                     },
                     mappings_dir=mappings_dir,
                 )
-            else:
+            elif ocr not in dist_pending_emitted:
+                dist_pending_emitted.add(ocr)
                 pending.append({
                     "mapping_type": "dist",
                     "ocrName":      ocr,
@@ -681,52 +746,17 @@ async def run_phase3(
                 "page_number":  product_page.get(mp["product"]),
             })
 
-    # ── ②-후처리: Claude 결과 반영 후에도 dist_code 없는 거래처 재조회 ──────────
-    # miss_retailers (domae_retail_1 / Claude 경유 확정)는 위 pre-Claude 루프에서 제외되므로
-    # Claude 호출 완료 후 confirmed_retailers 전체를 대상으로 retail_user.csv 재조회
-    pending_ocr_names = {p["ocrName"] for p in pending if p.get("mapping_type") == "dist"}
-    for _name, _info in list(confirmed_retailers.items()):
-        if _info.get("dist_code") or _name in pending_ocr_names:
-            continue
-        _rc = _info.get("retailer_code", "")
-        if not _rc:
-            continue
-        _candidates = [
-            {"dist_code": r["판매처코드"], "dist_name": r["판매처명"]}
-            for r in retail_user_rows
-            if r.get("소매처코드") == _rc
-        ]
-        if len(_candidates) == 1:
-            _dc = _candidates[0]["dist_code"]
-            _dn = _candidates[0]["dist_name"]
-            confirmed_retailers[_name]["dist_code"] = _dc
-            await confirm_mapping(
-                mapping_type="dist",
-                ocr_name=_name,
-                confirmed_code=_dc,
-                context={
-                    "form_id": form_id,
-                    "issuer_fingerprint": issuer_fingerprint,
-                    "retailer_code": _rc,
-                    "dist_name": _dn,
-                },
-                mappings_dir=mappings_dir,
-            )
-        else:
-            if not _candidates:
-                log.warning(
-                    "[%s] dist NOT_FOUND (Claude 후처리) — 소매처 '%s' (코드 %s)에 대한 판매처 후보 없음",
-                    "phase3", _name, _rc,
-                )
-            pending.append({
-                "mapping_type": "dist",
-                "ocrName":      _name,
-                "candidates":   _candidates,
-                "page_number":  customer_page.get(_name),
-            })
+    # ── ②-후처리: Claude로 확정된 소매처 포함, dist 미결 (소매처 × jisho) 일괄 처리 ──
+    # Claude를 다시 부를 수 없으므로 1:1 자동확정 / 캐시 / pending만 수행한다.
+    # _resolve_dist_for는 이미 confirmed_dist에 있는 (소매처, jisho)는 건너뛴다.
+    for _name in list(confirmed_retailers.keys()):
+        await _resolve_dist_for(_name, allow_claude=False)
 
     # ── ③ 아이템에 코드 적용 ─────────────────────────────────────────────────
-    items_out = _apply_mappings(items, confirmed_retailers, confirmed_products)
+    items_out = _apply_mappings(
+        items, confirmed_retailers, confirmed_products,
+        confirmed_dist, _dist_group_field,
+    )
 
     result = {
         "doc_id":              doc_id,
@@ -734,6 +764,11 @@ async def run_phase3(
         "hatsu_month":         hatsu_month,
         "issuer":              issuer,
         "confirmed_retailers": confirmed_retailers,
+        # (소매처, jisho) → 판매처. JSON 직렬화를 위해 list로 펼침 (디버깅·추적용)
+        "confirmed_dist": [
+            {"customer": _c, "jisho": _j, **_v}
+            for (_c, _j), _v in confirmed_dist.items()
+        ],
         "confirmed_products":  confirmed_products,
         "items":               items_out,
         "cover_totals":        _extract_cover_totals(phase2_result),

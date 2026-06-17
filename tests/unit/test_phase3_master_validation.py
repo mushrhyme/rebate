@@ -49,21 +49,31 @@ def test_code_in_master_skips_enforcement_when_master_empty():
 # ── _load_dist_cache: 로컬 파일 부재 + Sheets 경유 _read_csv ──────────────────
 
 _SHEETS_ROWS = [
+    # 구(舊) 캐시 행(jisho 컬럼 없음) → jisho=""로 로드되어야 함 (하위 호환)
     {"form_id": "form_01", "issuer_fingerprint": "fp-A", "retailer_code": "R1", "dist_code": "D1"},
-    {"form_id": "form_04", "issuer_fingerprint": "fp-B", "retailer_code": "R2", "dist_code": "D2"},
+    # jisho 컬럼 포함 행 → (소매처 × jisho) 키
+    {"form_id": "form_04", "issuer_fingerprint": "fp-B", "retailer_code": "R2",
+     "jisho": "CVS営業部", "dist_code": "D2"},
+    {"form_id": "form_04", "issuer_fingerprint": "fp-B", "retailer_code": "R2",
+     "jisho": "R営業東北", "dist_code": "D3"},
 ]
 
 
 def test_load_dist_cache_reads_without_local_file(monkeypatch, tmp_path):
-    """path.exists()가 False여도 _read_csv(Sheets 우선) 결과를 캐시로 구성해야 한다."""
+    """path.exists()가 False여도 _read_csv(Sheets 우선) 결과를 캐시로 구성해야 한다.
+
+    캐시 키는 (form_id, issuer_fingerprint, retailer_code, jisho) 4튜플.
+    jisho 컬럼이 없는 구 행은 jisho=""로 로드된다."""
     monkeypatch.setattr(phase3, "_read_csv", lambda path: _SHEETS_ROWS)
     missing = tmp_path / "ocr_dist.csv"
     assert not missing.exists()
 
     cache = phase3._load_dist_cache(missing)
 
-    assert cache[("form_01", "fp-A", "R1")] == "D1"
-    assert cache[("form_04", "fp-B", "R2")] == "D2"
+    assert cache[("form_01", "fp-A", "R1", "")] == "D1"
+    # 같은 소매처라도 jisho가 다르면 다른 판매처
+    assert cache[("form_04", "fp-B", "R2", "CVS営業部")] == "D2"
+    assert cache[("form_04", "fp-B", "R2", "R営業東北")] == "D3"
 
 
 def test_load_dist_cache_empty_when_no_source(monkeypatch, tmp_path):
