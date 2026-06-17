@@ -5,16 +5,13 @@
  * 컬럼 스펙(kind 기반)으로 기술하고 범용 렌더러가 해석한다. 새 표 형태는
  * 코드가 아니라 스펙(aggColumns 또는 백엔드 emit)만 바꾸면 된다.
  */
-import type { ProductAggregateRow } from '../api/client'
+import type { ProductAggregateRow, AggColumn } from '../api/client'
 
-export type AggColKind = 'mark' | 'qty' | 'unit' | 'amount'
-export interface AggCol {
-  key: string          // unit kind면 condition_type, 그 외 합성 키
-  label: string
-  kind: AggColKind
-}
+// 표시 스펙 타입은 데이터 계약(client.ts)이 단일 출처. 백엔드가 emit하면 그대로,
+// 없으면 아래 aggColumns()가 condition_columns에서 동일 구조로 생성(폴백).
+export type AggCol = AggColumn
 
-/** condition_columns(동적 조건들) → 분해 표 컬럼 스펙. */
+/** [폴백] condition_columns(동적 조건들) → 분해 표 컬럼 스펙. 백엔드 display_columns 부재 시. */
 export function aggColumns(conditionColumns: string[]): AggCol[] {
   return [
     { key: '_mark', label: '', kind: 'mark' },

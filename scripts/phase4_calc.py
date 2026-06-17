@@ -630,9 +630,19 @@ def build_product_aggregate(items_in: list, form_cfg: dict) -> Optional[dict]:
         total_amount = round(sum(r["amount"] for r in rows), 2)
         out_groups.append({**g["_meta"], "rows": rows, "total_qty": total_qty, "total_amount": total_amount})
 
+    # 표시 컬럼 스펙(kind 기반) — 프론트가 순수 해석만 하도록 백엔드가 emit (P4 완전판).
+    # 새 표 형태는 프론트 코드가 아니라 이 스펙으로 제어된다.
+    display_columns = (
+        [{"key": "_mark", "label": "", "kind": "mark"},
+         {"key": "_qty", "label": "수량", "kind": "qty"}]
+        + [{"key": c, "label": c, "kind": "unit"} for c in condition_columns]
+        + [{"key": "_amount", "label": "금액", "kind": "amount"}]
+    )
+
     return {
         "base_condition": base_type,
         "condition_columns": condition_columns,
+        "display_columns": display_columns,
         "groups": out_groups,
         "warnings": warnings,
     }

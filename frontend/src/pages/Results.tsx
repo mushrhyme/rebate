@@ -828,8 +828,9 @@ export function Results() {
   const prodAgg = result.product_aggregate ?? null
   const aggMap = new Map<string, ProductAggregateGroup>()
   if (prodAgg) for (const g of prodAgg.groups) aggMap.set(`${g.jisho} ${g.customer} ${g.product_code}`, g)
-  // 제품별 집계(분해) 표의 선언적 컬럼 스펙 — 헤더·분해행 렌더러가 공유 (P4)
-  const aggCols = prodAgg ? aggColumns(prodAgg.condition_columns) : []
+  // 제품별 집계(분해) 표의 선언적 컬럼 스펙 — 백엔드 emit(display_columns) 우선,
+  // 없으면 condition_columns로 생성(폴백). 헤더·분해행 렌더러가 공유 (P4 완전판)
+  const aggCols = prodAgg ? (prodAgg.display_columns ?? aggColumns(prodAgg.condition_columns)) : []
 
   const activeXv: typeof result.xv =
     selectedBundle != null && result.bundle_xv

@@ -446,9 +446,16 @@ export interface ProductAggregateGroup {
   total_amount: number
 }
 
+export interface AggColumn {
+  key: string                      // unit kind면 condition_type, 그 외 합성 키(_mark/_qty/_amount)
+  label: string
+  kind: 'mark' | 'qty' | 'unit' | 'amount'
+}
+
 export interface ProductAggregate {
   base_condition: string
   condition_columns: string[]      // 동적 조건 컬럼 (定番이 맨 앞)
+  display_columns?: AggColumn[]    // 백엔드 emit 표시 스펙 (P4 완전판) — 없으면 프론트가 condition_columns로 생성
   groups: ProductAggregateGroup[]
   warnings: string[]
 }
