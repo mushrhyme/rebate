@@ -258,6 +258,7 @@ Lecture/
 | Obsidian                     | 미사용                                              | (기존 vault 패턴)            | Claude Code만 의존                                                                                    |
 | SAP Excel 생성               | Python 결정적                                       | LLM 변환                     | 회계 재현성, 비용, 검증성                                                                             |
 | 신규 양식 학습               | 운영자 수동 cold-start (Claude Code 채팅)           | 파이프라인 자동 분기         | 미인식 시 파이프라인 에러 중단 → 운영자가 form 정의 작성 → 재분석                                    |
+| 산식·표시 규칙 작성 주체     | **LLM이 자연어→DSL 컴파일, 결정적 엔진이 실행** (검증 게이트·동결 경유) | ① 개발자 코드만 (현 상태) ② LLM이 런타임 계산까지 | 원칙을 폐기가 아니라 *이동* — "LLM은 산식을 작성하되 실행하지 않는다". 런타임 숫자는 여전히 결정적 코드. 재현성 유지하며 자연어 확장성 확보. 설계: [nl-to-dsl-pipeline.md](nl-to-dsl-pipeline.md) |
 
 ## 8. Phase A — 채팅 기반 워크플로우 (완료)
 
