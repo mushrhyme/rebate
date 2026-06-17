@@ -192,14 +192,23 @@ async def apply_rules(body: ChatRequest, user: dict = Depends(get_current_user))
         model=_MODEL, max_tokens=4096, system=system,
         messages=_to_claude_messages(body.messages),
     )
+    # JSON 객체 추출 — Claude가 설명(예: "이 변경은 개발 필요")을 덧붙여도 본체 블록을 찾는다.
     raw = resp.content[0].text.strip()
-    raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
+    raw = re.sub(r"^```[a-z]*\n?", "", raw).strip().rstrip("`").strip()
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        raise HTTPException(status_code=422, detail=f"블록 JSON을 찾지 못함: {raw[:200]}")
+    note = raw[:m.start()].strip()   # JSON 앞 설명(어휘 밖 거부·개발 필요 안내 등)
     try:
-        new_block = json.loads(raw)
+        new_block = json.loads(m.group(0))
     except Exception:
-        raise HTTPException(status_code=422, detail=f"블록 JSON 파싱 실패: {raw[:200]}")
+        raise HTTPException(status_code=422, detail=f"블록 JSON 파싱 실패: {m.group(0)[:200]}")
     if not isinstance(new_block, dict):
         raise HTTPException(status_code=422, detail="블록이 JSON 객체가 아닙니다.")
+
+    # 변경 없음(어휘 밖 요청을 Claude가 거부) → 파일 쓰지 않고 안내만 반환
+    if new_block == cur_block:
+        return {"ok": True, "form_id": body.form_id, "unchanged": True, "note": note, "wiring": None}
 
     from .forms import apply_block_update
     try:
@@ -208,7 +217,7 @@ async def apply_rules(body: ChatRequest, user: dict = Depends(get_current_user))
         raise HTTPException(status_code=400, detail=f"스키마 검증 실패(반영 안 함): {e}")
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="양식 없음")
-    return result
+    return {**result, "note": note}
 
 
 @router.post("/chat")

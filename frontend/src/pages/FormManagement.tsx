@@ -313,13 +313,20 @@ export function FormManagement() {
         showToast(err.detail ?? '규칙 반영 실패', false)
         return
       }
-      const data = await res.json()           // { ok, form_id, wiring }
+      const data = await res.json()           // { ok, form_id, wiring, note?, unchanged? }
       const w = data.wiring ?? {}
-      const parts: string[] = ['✅ 실행 규칙(블록) 반영 완료.']
-      if (w.safe_fixed?.length) parts.push(`자동수정 ${w.safe_fixed.length}건`)
-      if (w.owner?.length) parts.push(`현업 확인 ${w.owner.length}건`)
-      if (w.dev?.length) parts.push(`개발 필요(T3) ${w.dev.length}건`)
-      setChatHistory(h => [...h, { role: 'assistant', text: parts.join(' · ') }])
+      let msg: string
+      if (data.unchanged) {
+        // 어휘 밖 요청 등으로 Claude가 블록을 바꾸지 않음 (개발 필요 안내 등)
+        msg = `ℹ️ 실행 규칙 변경 없음.${data.note ? `\n${data.note}` : ''}`
+      } else {
+        const parts: string[] = ['✅ 실행 규칙(블록) 반영 완료.']
+        if (w.safe_fixed?.length) parts.push(`자동수정 ${w.safe_fixed.length}건`)
+        if (w.owner?.length) parts.push(`현업 확인 ${w.owner.length}건`)
+        if (w.dev?.length) parts.push(`개발 필요(T3) ${w.dev.length}건`)
+        msg = parts.join(' · ') + (data.note ? `\n${data.note}` : '')
+      }
+      setChatHistory(h => [...h, { role: 'assistant', text: msg }])
       // 블록·자동 섹션이 바뀌었으니 MD 새로고침
       const fresh = await fetch(`${BASE}/api/v3/forms/${selectedId}`, { headers: sessionHeaders() })
       if (fresh.ok) {
@@ -327,7 +334,7 @@ export function FormManagement() {
         setContentByForm(prev => ({ ...prev, [selectedId]: fd.content }))
         setHashByForm(prev => ({ ...prev, [selectedId]: fd.content_hash }))
       }
-      showToast('규칙 반영 완료', true)
+      showToast(data.unchanged ? '변경 없음' : '규칙 반영 완료', true)
     } catch {
       showToast('규칙 반영 실패', false)
     } finally {
