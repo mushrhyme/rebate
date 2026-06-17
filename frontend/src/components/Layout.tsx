@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { NavLink, useNavigate, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, Settings, FileDown,
-  ChevronLeft, ChevronRight, ChevronDown, Users, LogOut, User, UserCog, BarChart2,
+  ChevronLeft, ChevronRight, ChevronDown, Users, LogOut, User, UserCog, BarChart2, Wand2,
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 
@@ -25,6 +25,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
   ]
 
   const adminNav = [
+    { to: '/dsl-studio', icon: Wand2, label: '규칙 스튜디오' },
     { to: '/admin/users', icon: Users, label: '사용자 관리' },
     { to: '/admin/retail-assignment', icon: UserCog, label: '소매처 담당자' },
     { to: '/admin/usage', icon: BarChart2, label: '사용량 모니터링' },

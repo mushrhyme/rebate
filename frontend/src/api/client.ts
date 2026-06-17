@@ -103,6 +103,11 @@ export const api = {
   listDocuments: () => request<Document[]>('/api/v3/documents'),
   getDocument:   (docId: string) => request<Document>(`/api/v3/documents/${docId}`),
   getResults:    (docId: string) => request<Phase4Result>(`/api/v3/documents/${docId}/results`),
+  dslPreview: (body: { form_id: string; doc_id: string; rule: string }) =>
+    request<DslPreview>('/api/v3/dsl/preview', { method: 'POST', body: JSON.stringify(body) }),
+  dslApply: (body: { form_id: string; doc_id: string; rule: string; config: Record<string, string>; confirm_display: boolean }) =>
+    request<{ ok: boolean; backup: string; frozen: Record<string, string>; message: string }>(
+      '/api/v3/dsl/apply', { method: 'POST', body: JSON.stringify(body) }),
   retryDocument: (docId: string, force = false) =>
     request<{ doc_id: string; status: string }>(
       `/api/v3/documents/${docId}/retry${force ? '?force=true' : ''}`,
@@ -450,6 +455,21 @@ export interface AggColumn {
   key: string                      // unit kind면 condition_type, 그 외 합성 키(_mark/_qty/_amount)
   label: string
   kind: 'mark' | 'qty' | 'unit' | 'amount'
+}
+
+export interface DslGate { name: string; ok: boolean; msg: string }
+export interface DslDiff { field: string; from: string | null; to: string | null; validated: boolean }
+export interface DslSample { jisho: string; product: string; rows: { qty: number; amount: number }[]; total_amount: number }
+export interface DslPreview {
+  config: Record<string, string>
+  reasoning: string
+  proposed: Record<string, string>
+  gates: DslGate[]
+  allok: boolean
+  diff: DslDiff[]
+  has_review: boolean
+  sample: DslSample[]
+  grounding: { columns: string[]; conditions: string[] }
 }
 
 export interface ProductAggregate {
