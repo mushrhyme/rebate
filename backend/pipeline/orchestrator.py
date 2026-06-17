@@ -36,7 +36,12 @@ from .phase1 import run_phase1
 from .phase2 import run_phase2
 from .phase2_row_anchor import build_row_anchors, save_row_anchors
 from .phase2_verify import run_phase2_verify
-from .phase3 import run_phase3, _build_issuer_fingerprint, _parse_fingerprint_fields
+from .phase3 import (
+    run_phase3,
+    _build_issuer_fingerprint,
+    _parse_fingerprint_fields,
+    get_dist_group_field,
+)
 from .phase3_fallback import run_phase3_with_tool_use_or_fallback
 from ..tools.mapping import confirm_mapping
 from .phase4 import run_phase4
@@ -432,13 +437,19 @@ async def _merge_confirmed_mappings(doc_id: str) -> None:
                 "basis": "user_confirmed",
             }
 
-    # 사용자가 판매처(dist)를 직접 확정한 소매처 → 해당 소매처 전체 item에 그 값을 적용.
-    # (확인 UI는 소매처 단위이므로 jisho 무차원 override가 사용자 의도)
-    user_dist_by_customer = {
-        row["ocr_name"]: row["confirmed_code"]
-        for row in rows
-        if row["mapping_type"] == "dist" and row.get("confirmed_code")
-    }
+    # 사용자가 판매처(dist)를 직접 확정한 (소매처, jisho) → 해당 item에만 적용.
+    # jisho가 빈 행("")은 그 소매처의 모든 jisho에 적용 (jisho 미사용 양식 / 레거시 교정).
+    _dist_group_field = get_dist_group_field(result.get("form_id", ""))
+    user_dist_specific: dict[tuple[str, str], str] = {}
+    user_dist_all: dict[str, str] = {}
+    for row in rows:
+        if row["mapping_type"] != "dist" or not row.get("confirmed_code"):
+            continue
+        _rj = row.get("jisho", "")
+        if _rj:
+            user_dist_specific[(row["ocr_name"], _rj)] = row["confirmed_code"]
+        else:
+            user_dist_all[row["ocr_name"]] = row["confirmed_code"]
 
     # items 배열 codes 업데이트
     for item in result.get("items", []):
@@ -451,9 +462,12 @@ async def _merge_confirmed_mappings(doc_id: str) -> None:
             item["unconfirmed"]   = False
 
         # dist_code: 사용자 확정이 있으면 덮어쓰고, 없으면 phase3가 넣은 (소매처×jisho) 값 유지
-        # (retailer 단위로 덮어쓰면 같은 소매처의 jisho별 판매처가 뭉개지므로 보존한다)
-        if ocr_customer in user_dist_by_customer:
-            item["dist_code"] = user_dist_by_customer[ocr_customer]
+        # (retailer 단위로 무조건 덮어쓰면 jisho별 판매처가 뭉개지므로 보존한다)
+        _item_jisho = item.get(_dist_group_field, "") if _dist_group_field else ""
+        if (ocr_customer, _item_jisho) in user_dist_specific:
+            item["dist_code"] = user_dist_specific[(ocr_customer, _item_jisho)]
+        elif ocr_customer in user_dist_all:
+            item["dist_code"] = user_dist_all[ocr_customer]
 
         pc = confirmed_products.get(ocr_product)
         if pc:
@@ -501,6 +515,7 @@ async def _merge_confirmed_mappings(doc_id: str) -> None:
                         "form_id": form_id,
                         "issuer_fingerprint": issuer_fp,
                         "retailer_code": rc,
+                        "jisho": row.get("jisho", ""),
                         "dist_name": name,
                     },
                     mappings_dir=md,

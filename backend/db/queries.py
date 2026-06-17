@@ -260,20 +260,31 @@ def _write_mapping_cache(
 async def upsert_remap_mapping(
     doc_id: str, mapping_type: str, ocr_name: str,
     confirmed_code: str, confirmed_name: str, user_id: int,
+    jisho: str = "",
 ) -> None:
+    """결과 화면 매핑 교정을 DB mappings에 upsert.
+
+    판매처(dist)는 (소매처 × jisho) 단위이므로, dist 타입은 jisho까지 일치해야
+    같은 행으로 본다 (같은 소매처라도 jisho가 다르면 별개 교정)."""
     async with get_doc_lock(doc_id):
         mappings = await asyncio.to_thread(_read_mappings, doc_id)
         for m in mappings:
-            if m["mapping_type"] == mapping_type and m["ocr_name"] == ocr_name:
-                m["confirmed_code"] = confirmed_code
-                m["confirmed_name"] = confirmed_name
-                m["confirmed_by"] = user_id
-                m["confirmed_at"] = _now_iso()
-                await asyncio.to_thread(write_json, mappings_key(doc_id), mappings)
-                # meta.pending_count 갱신
-                _count = sum(1 for x in mappings if not x.get("confirmed_code"))
-                await _arw_meta(doc_id, lambda meta: meta.update({"pending_count": _count}))
-                return
+            if m["mapping_type"] != mapping_type or m["ocr_name"] != ocr_name:
+                continue
+            # dist는 jisho까지 일치해야 동일 행
+            if mapping_type == "dist" and m.get("jisho", "") != jisho:
+                continue
+            m["confirmed_code"] = confirmed_code
+            m["confirmed_name"] = confirmed_name
+            m["confirmed_by"] = user_id
+            m["confirmed_at"] = _now_iso()
+            if mapping_type == "dist":
+                m["jisho"] = jisho
+            await asyncio.to_thread(write_json, mappings_key(doc_id), mappings)
+            # meta.pending_count 갱신
+            _count = sum(1 for x in mappings if not x.get("confirmed_code"))
+            await _arw_meta(doc_id, lambda meta: meta.update({"pending_count": _count}))
+            return
         # 없으면 새로 추가
         next_id = max((m["id"] for m in mappings), default=0) + 1
         mappings.append({
@@ -286,6 +297,7 @@ async def upsert_remap_mapping(
             "confirmed_name": confirmed_name,
             "confirmed_by": user_id,
             "confirmed_at": _now_iso(),
+            **({"jisho": jisho} if mapping_type == "dist" else {}),
         })
         await asyncio.to_thread(write_json, mappings_key(doc_id), mappings)
 

@@ -140,10 +140,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ ocr_name: ocrName, retailer_code: retailerCode, retailer_name: retailerName }),
     }),
-  remapDist: (docId: string, ocrName: string, distCode: string, distName: string) =>
+  remapDist: (docId: string, ocrName: string, distCode: string, distName: string, jisho = '') =>
     request<{ ok: boolean; status: string }>(`/api/v3/documents/${docId}/mappings/remap-dist`, {
       method: 'POST',
-      body: JSON.stringify({ ocr_name: ocrName, dist_code: distCode, dist_name: distName }),
+      body: JSON.stringify({ ocr_name: ocrName, dist_code: distCode, dist_name: distName, jisho }),
     }),
   remapProduct: (docId: string, ocrName: string, productCode: string, productName: string) =>
     request<{ ok: boolean; status: string }>(`/api/v3/documents/${docId}/mappings/remap-product`, {

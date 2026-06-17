@@ -776,8 +776,13 @@ def run(doc_id, save=False, summary_only=False, base_dir=None, return_payload=Fa
 
         sr            = retail_master.get(retailer_code, {})
         retailer_name = sr.get("소매처명", "").lstrip("■").strip()
-        # 1차: 소매처코드 → 판매처명, 2차: 판매처코드 → 판매처명, fallback: dist_code
-        dist_name = sr.get("판매처명", "").strip() or dist_name_by_code.get(dist_code, dist_code)
+        # 1차: 실제 dist_code → 판매처명 (remap·1:N로 소매처 기본값과 달라질 수 있으므로
+        # item의 확정 dist_code가 우선), 2차: 소매처 기본 판매처명, fallback: dist_code
+        dist_name = (
+            (dist_name_by_code.get(dist_code, "").strip() if dist_code else "")
+            or sr.get("판매처명", "").strip()
+            or dist_code
+        )
 
         tantousha_list = retail_tantou.get(retailer_code, [])
         tantousha = (tantousha_list[0] if len(tantousha_list) == 1

@@ -236,10 +236,11 @@ function RetailerSearchModal({
 }
 
 function DistSearchModal({
-  ocrName, retailerCode, onSelect, onClose,
+  ocrName, retailerCode, jisho, onSelect, onClose,
 }: {
   ocrName: string
   retailerCode: string
+  jisho?: string
   onSelect: (code: string, name: string) => void
   onClose: () => void
 }) {
@@ -303,7 +304,9 @@ function DistSearchModal({
         }}>
           <div>
             <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-1)' }}>판매처 매핑 수정</span>
-            <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2, fontFamily: 'var(--mono)' }}>{ocrName}</div>
+            <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2, fontFamily: 'var(--mono)' }}>
+              {ocrName}{jisho ? ` · 入出荷支店: ${jisho}` : ''}
+            </div>
           </div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: 4 }}>
             <X size={15} />
@@ -735,7 +738,7 @@ export function Results() {
   const [filterAssigneeId, setFilterAssigneeId] = useState<string | null>(null)
   const [detailTab, setDetailTab] = useState<'detail' | 'aggregate'>('detail')
   const [remapTarget, setRemapTarget] = useState<{ ocrName: string } | null>(null)
-  const [distRemapTarget, setDistRemapTarget] = useState<{ ocrName: string; retailerCode: string } | null>(null)
+  const [distRemapTarget, setDistRemapTarget] = useState<{ ocrName: string; retailerCode: string; jisho?: string } | null>(null)
   const [productRemapTarget, setProductRemapTarget] = useState<{ productOcr: string } | null>(null)
   const [remapping, setRemapping] = useState(false)
   const [selectedBundle, setSelectedBundle] = useState<number | null>(null)
@@ -857,11 +860,11 @@ export function Results() {
     }
   }
 
-  const handleRemapDist = async (ocrName: string, distCode: string, distName: string) => {
+  const handleRemapDist = async (ocrName: string, distCode: string, distName: string, jisho = '') => {
     if (!docId) return
     setRemapping(true)
     try {
-      await api.remapDist(docId, ocrName, distCode, distName)
+      await api.remapDist(docId, ocrName, distCode, distName, jisho)
       const [res, revs] = await Promise.all([api.getResults(docId), api.getReviews(docId)])
       setResult(res)
       setReviews(revs)
@@ -1536,7 +1539,7 @@ export function Results() {
                               <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#fd7e14', flexShrink: 0 }} />
                               <span style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text-3)' }}>{distCode || '—'}</span>
                               <HoverTooltip text={dist} style={{ fontSize: 10, color: 'var(--text-3)' }} />
-                              <button onClick={e => { e.stopPropagation(); setDistRemapTarget({ ocrName, retailerCode }) }} title="판매처 수정" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0 1px', color: 'var(--text-3)', display: 'inline-flex', alignItems: 'center', flexShrink: 0 }}>
+                              <button onClick={e => { e.stopPropagation(); setDistRemapTarget({ ocrName, retailerCode, jisho: row.jisho || '' }) }} title="판매처 수정" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0 1px', color: 'var(--text-3)', display: 'inline-flex', alignItems: 'center', flexShrink: 0 }}>
                                 <Pencil size={9} />
                               </button>
                             </div>
@@ -1606,7 +1609,8 @@ export function Results() {
         <DistSearchModal
           ocrName={distRemapTarget.ocrName}
           retailerCode={distRemapTarget.retailerCode}
-          onSelect={(code, name) => handleRemapDist(distRemapTarget.ocrName, code, name)}
+          jisho={distRemapTarget.jisho}
+          onSelect={(code, name) => handleRemapDist(distRemapTarget.ocrName, code, name, distRemapTarget.jisho ?? '')}
           onClose={() => setDistRemapTarget(null)}
         />
       )}
