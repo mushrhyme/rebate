@@ -443,3 +443,127 @@ Python 코드 전용. Phase 2·3에서는 이 섹션을 무시한다.
 
 show_sections: xv
 aggregate_label: 거래처별 집계
+
+---
+
+## [config] 실행 설정 (정본 · build_form_types.py가 읽음)
+
+> 이 블록이 이 양식의 **유일한 실행 정본**이다. `config/form_types.json`은 여기서 빌드된 생성물이다.
+> 위쪽 산문은 *근거·설명*이고, 실행 값은 이 블록이 결정한다. 둘이 어긋나면 이 블록이 이긴다.
+> 직접 편집 후 `python scripts/build_form_types.py`로 재빌드. 설계: [docs/literate-config-migration.md](../docs/literate-config-migration.md)
+
+```json
+{
+  "label": "日本アクセス 販売促進金請求書 (CVS)",
+  "bara_source": "column:数量",
+  "preprocess": [],
+  "net": {
+    "formula_type": "expr",
+    "expr": "shikiri - teiban - c1",
+    "vars": {
+      "c1": "未収条件"
+    },
+    "needs_teiban": true,
+    "teiban_type": "定番条件"
+  },
+  "condition_display": {
+    "mode": "keesu",
+    "c1": "未収条件",
+    "c2": null
+  },
+  "cover_totals": {
+    "breakdown_key": "入出荷支店別"
+  },
+  "product_aggregate": {
+    "strategy": "subset_subtract",
+    "base_condition": "定番条件",
+    "qty_field": "数量",
+    "unit_field": "未収条件",
+    "amount_field": "金額"
+  },
+  "dist_overrides": [
+    {
+      "when": {
+        "jisho": "CVS営業部"
+      },
+      "pick_candidate_name_contains": "広域リテール"
+    }
+  ],
+  "cross_validation": [
+    {
+      "type": "cover_honbai_vs_detail",
+      "label": "Cover(全請求書 本体合計) vs Detail",
+      "cover_key": "本体合計金額"
+    },
+    {
+      "type": "cover_breakdown_vs_detail",
+      "label": "支店 {key}",
+      "cover_breakdown_key": "入出荷支店別",
+      "detail_group_field": "jisho",
+      "detail_amount_field": "未収金額合計"
+    }
+  ],
+  "show_sections": [
+    "xv"
+  ],
+  "aggregate_label": "거래처별 집계",
+  "summary": "invoice_totals",
+  "summary_cover_keys": {
+    "honbai": "本体合計金額",
+    "tax": "消費税金額",
+    "total": "合計ご請求金額"
+  },
+  "row_anchor": {
+    "block_pattern": "管理No\\s*[：:]\\s*(\\d{5,8})",
+    "subgroup_pattern": "入出荷支店\\s*[：:]\\s*(\\S+)",
+    "condition_pattern": "(定番条件|原価引き条件|導入条件)",
+    "total_pattern": "計[：:]",
+    "recovery_cell_map": {
+      "product": 1,
+      "nyusuu": 2,
+      "qty": 3,
+      "cond": 5,
+      "biko": 8,
+      "cond_field": "未収条件",
+      "cond_scale": 0.01,
+      "skip_product_pattern": "管理No|入出荷|得意先|計上場所"
+    },
+    "header_keywords": [
+      "計上場所",
+      "入出荷支店",
+      "入出荷センター",
+      "得意先",
+      "管理No",
+      "得意先又は商品",
+      "整数部",
+      "小数部",
+      "請求書",
+      "作成日",
+      "ご請求期",
+      "お支払予定",
+      "未収取扱",
+      "発行元",
+      "販売促進",
+      "項目"
+    ]
+  },
+  "bundle_detection": {
+    "cover_required": [
+      "請求書No",
+      "本体合計金額"
+    ],
+    "cover_excluded": [
+      "管理No"
+    ],
+    "skip_markers": [
+      "振込先銀行",
+      "決済方法",
+      "お支払明細書",
+      "口座種別"
+    ],
+    "skip_excluded": [
+      "本体合計金額"
+    ]
+  }
+}
+```

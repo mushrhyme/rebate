@@ -267,13 +267,13 @@ md 바꿨는데 반영해줘
 
 **하는 일**
 
-`form_definitions/form_XX.md`를 읽어 `config/form_types.json`을 자동으로 업데이트한다.
+`form_definitions/form_XX.md` 안의 **`[config]` 정본 블록**을 모아 `config/form_types.json`을 빌드한다.
 
-- form_XX.md의 `[Phase 3] タイプ 분류 규칙`에서 `✅ 확정` 항목만 반영한다.
-- form_XX.md의 `[Phase 4] NET 계산식`에서 수식 타입과 파라미터를 반영한다.
+- 실행 설정의 단일 진실 소스는 form_XX.md의 `[config]` 블록이다. `config/form_types.json`은 거기서 만들어지는 **생성물**.
+- 블록이 있는 양식은 결정적으로 빌드(추론 없음), 블록이 아직 없는 양식만 산문에서 추론해 블록을 만든다.
 - 변경 내역을 보고한다. 개발자 확인이 필요한 케이스는 ⚠️ 표시.
 
-**form_types.json을 직접 편집하지 않는다.** form_XX.md를 수정한 뒤 이 명령을 실행한다.
+**form_types.json을 직접 편집하지 않는다.** form_XX.md(와 그 안의 `[config]` 블록)를 수정한 뒤 이 명령을 실행한다.
 
 ---
 
@@ -329,8 +329,8 @@ CF 키워드에 宅配掲載料 추가해줘
 cold-start 이후 `TBD`로 남겨진 타입 분류 규칙을 현업 확인 후 `✅ 확정`으로 업데이트한다.
 
 - Claude가 현재 form_XX.md를 읽고 변경 내용을 정리해 보여준다.
-- 승인하면 form_XX.md를 저장한다.
-- 저장 후 form_types.json 동기화 여부를 물어본다.
+- 승인하면 form_XX.md(필요 시 `[config]` 정본 블록 포함)를 저장한다.
+- 저장 후 form_types.json 빌드(동기화) 여부를 물어본다.
 
 > 이미지 없이 텍스트로만 요청해도 된다. 이미지가 있으면 같은 명령(`반영해줘`)을 쓰면 된다.
 

@@ -263,3 +263,107 @@ Python 코드 전용. Phase 2·3에서는 이 섹션을 무시한다.
 
 show_sections: xv
 aggregate_label: 소매처별 집계
+
+---
+
+## [config] 실행 설정 (정본 · build_form_types.py가 읽음)
+
+> 이 블록이 이 양식의 **유일한 실행 정본**이다. `config/form_types.json`은 여기서 빌드된 생성물이다.
+> 위쪽 산문은 *근거·설명*이고, 실행 값은 이 블록이 결정한다. 둘이 어긋나면 이 블록이 이긴다.
+> 직접 편집 후 `python scripts/build_form_types.py`로 재빌드. 설계: [docs/literate-config-migration.md](../docs/literate-config-migration.md)
+
+```json
+{
+  "label": "FINET 買掛金特別値引請求明細書",
+  "bundle_detection": {
+    "cover_required": [
+      "今回請求金額合計"
+    ],
+    "cover_required_any": [
+      "入金予定日",
+      "振込先銀行",
+      "対象期間",
+      "決済方法"
+    ],
+    "cover_excluded": [
+      "請求伝票番号",
+      "商品名"
+    ]
+  },
+  "bara_source": "by_unit",
+  "qty_field": [
+    "数量",
+    "請求計上数量"
+  ],
+  "preprocess": [],
+  "row_anchor": {
+    "block_pattern": "^\\|\\s*(\\d+[-][A-Z0-9]\\d+)\\s*\\|",
+    "block_includes_product": true,
+    "product_cell": 2,
+    "row_id_cell": 2,
+    "total_pattern": "小計|合計",
+    "header_keywords": [
+      "計上No"
+    ]
+  },
+  "net": {
+    "formula_type": "expr",
+    "expr": "shikiri - discount",
+    "vars": {
+      "c1": "条件",
+      "c2": null
+    },
+    "computed_vars": {
+      "discount": {
+        "expr": "c1 + c2",
+        "divide_by": {
+          "field": "ケース入数",
+          "when": {
+            "field": "数量単位",
+            "equals": "CS"
+          },
+          "default": 1,
+          "zero_policy": "skip_divide"
+        }
+      }
+    },
+    "no_net_kubun": [
+      "円"
+    ]
+  },
+  "condition_display": {
+    "mode": "by_kubun",
+    "kubun_field": "条件区分",
+    "pack_kubun": "個",
+    "keesu_kubun": "CS",
+    "c1": "条件",
+    "c2": null
+  },
+  "cover_totals": {},
+  "cross_validation": [
+    {
+      "type": "cover_taxex_vs_detail",
+      "label": "Cover(税抜合計) vs Detail(税抜)",
+      "cover_key_8": "販促金請求 8%対象 税抜",
+      "cover_key_10": "販促金請求 10%対象 税抜"
+    },
+    {
+      "type": "per_customer_vs_summary",
+      "label": "得意先 {key}"
+    }
+  ],
+  "show_sections": [
+    "xv"
+  ],
+  "aggregate_label": "소매처별 집계",
+  "summary": "rate_then_customer",
+  "summary_cover_keys": {
+    "hasso": "販促金請求 今回請求金額合計",
+    "yakumu": "役務提供 今回請求金額合計",
+    "tax_8": "販促金請求 8%対象 消費税",
+    "tax_10": "販促金請求 10%対象 消費税",
+    "taxex_8": "販促金請求 8%対象 税抜",
+    "taxex_10": "販促金請求 10%対象 税抜"
+  }
+}
+```

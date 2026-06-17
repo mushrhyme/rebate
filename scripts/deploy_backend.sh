@@ -5,6 +5,10 @@
 # 백엔드가 S3 미러(config/...)에 기록한다. 이 스크립트는 배포 전에 미러와
 # 로컬을 비교해, EC2에서 자란 설정을 로컬 구버전이 덮어쓰는 사고를 차단한다.
 #
+# Literate config(docs/literate-config-migration.md): config/form_types.json은
+# form_definitions/form_XX.md의 [config] 정본 블록에서 빌드되는 생성물이다.
+# 미러 가드 직후 build --check로 둘의 동치를 강제 — 드리프트가 있으면 배포를 중단한다.
+#
 # 사용법:
 #   bash scripts/deploy_backend.sh                # 미러≠로컬이면 중단 (기본)
 #   bash scripts/deploy_backend.sh --take-remote  # 미러를 로컬로 가져온 뒤 배포
@@ -106,6 +110,17 @@ if [ ${#DIFFS[@]} -gt 0 ]; then
   esac
 else
   echo "✓ 미러 가드 통과 — EC2 런타임 변경분 없음"
+fi
+
+# ── 1b) Literate config 가드 ──────────────────────────────────────────────────
+# form_types.json이 form_XX.md [config] 정본 블록과 일치하는지 확인 (단일 진실 소스).
+# 불일치면 배포 중단 — 정본(블록)과 생성물(json)이 어긋난 채 배포되는 것을 막는다.
+echo "▶ literate config 가드 — form_types.json ↔ [config] 블록 동치 확인..."
+PYBIN="$(command -v python3 || command -v python)"
+if ! "$PYBIN" scripts/build_form_types.py --check; then
+  echo "✗ config/form_types.json이 form_XX.md [config] 블록과 불일치합니다."
+  echo "  해결: '$PYBIN' scripts/build_form_types.py 로 재빌드 → 커밋 → 재배포."
+  exit 1
 fi
 
 # ── 2) 로컬 → S3 app-code ─────────────────────────────────────────────────────
