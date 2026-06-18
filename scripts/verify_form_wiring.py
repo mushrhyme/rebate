@@ -27,7 +27,10 @@ sys.path.insert(0, str(BASE))
 
 from scripts.build_form_types import build_forms, serialize, extract_config_block  # noqa: E402
 from scripts.aggregate_strategies import AGGREGATE_STRATEGIES  # noqa: E402
-from scripts.phase4_calc import _SAFE_OPS  # noqa: E402  (엔진의 허용 연산 — 단일 출처)
+from scripts.phase4_calc import _SAFE_OPS, _SAFE_CMP, _SAFE_BOOLOPS, _RELATIONSHIP_STRATEGY  # noqa: E402  (엔진 허용 연산·집계 매핑 — 단일 출처)
+
+# 엔진이 지원하는 op 노드 타입 전체 (산술 + 비교 + 논리 and/or/not). _net_names_and_ops·게이트가 참조.
+_ENGINE_OP_TYPES = set(_SAFE_OPS) | set(_SAFE_CMP) | set(_SAFE_BOOLOPS) | {ast.Not}
 
 FORM_DEFS = BASE / "form_definitions"
 CONFIG = BASE / "config" / "form_types.json"
@@ -51,7 +54,7 @@ def engine_dsl_names() -> set[str]:
 
 
 def engine_op_allowed(op_node) -> bool:
-    return type(op_node) in _SAFE_OPS
+    return type(op_node) in _ENGINE_OP_TYPES
 
 
 # ── Finding ──────────────────────────────────────────────────────────────────
@@ -101,8 +104,10 @@ def _net_names_and_ops(net: dict):
         for node in ast.walk(tree):
             if isinstance(node, ast.Name):
                 names.add(node.id)
-            elif isinstance(node, (ast.BinOp, ast.UnaryOp)):
+            elif isinstance(node, (ast.BinOp, ast.UnaryOp, ast.BoolOp)):
                 ops.append(node.op)
+            elif isinstance(node, ast.Compare):
+                ops.extend(node.ops)
     return names, ops
 
 
@@ -175,14 +180,18 @@ def verify(form_id: str, json_data: dict, cv_types: set[str]) -> list[Finding]:
         out.append(Finding("cross_validation", "ok",
             f"교차검증 type 전부 등록됨 ({[r['type'] for r in cfg['cross_validation']]})"))
 
-    # 5) 집계 전략 레지스트리
+    # 5) 집계 전략 레지스트리 — strategy(명시) 또는 relationship(선언적)로 결정된 실효 전략을 검사
     pa = cfg.get("product_aggregate") or {}
-    if pa.get("strategy"):
-        if pa["strategy"] in AGGREGATE_STRATEGIES:
-            out.append(Finding("aggregate", "ok", f"집계 전략 '{pa['strategy']}' 등록됨"))
+    if pa.get("strategy") or pa.get("relationship"):
+        eff = pa.get("strategy") or _RELATIONSHIP_STRATEGY.get(pa.get("relationship", "subset"))
+        if eff is None:
+            out.append(Finding("aggregate", "owner",
+                f"relationship '{pa.get('relationship')}' 미지원 — {sorted(_RELATIONSHIP_STRATEGY)} 중 선택(현업)"))
+        elif eff in AGGREGATE_STRATEGIES:
+            out.append(Finding("aggregate", "ok", f"집계 전략 '{eff}' 등록됨"))
         else:
             out.append(Finding("aggregate", "dev",
-                f"집계 전략 '{pa['strategy']}' 미등록 — aggregate_strategies에 추가 필요(개발자 T3)"))
+                f"집계 전략 '{eff}' 미등록 — aggregate_strategies에 추가 필요(개발자 T3)"))
 
     # 6) 식별 패턴 (양식 인식 연결)
     m = re.search(r"##\s*식별\s*패턴\s*\n+(.+)", md)

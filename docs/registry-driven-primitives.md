@@ -87,9 +87,16 @@ def _subset_subtract(groups, cfg): ...   # 현 build_product_aggregate 본문을
 
 | 변화 | 티어 | 처리 |
 |---|---|---|
-| 다른 양식도 定番−추가조건 분해 | T1 | `"strategy":"subset_subtract"` + 필드명. **설정만** |
+| 다른 양식도 定番−추가조건 분해 | T1 | `"relationship":"subset"`(기본) + 필드명. **설정만** |
 | 분해 기준조건을 定番→다른 조건 | T2 | `base_condition` 변경. 설정만 |
+| 조건이 **독립**(부분집합 아님) → 차감 없이 나열 | T2 | `"relationship":"independent"`. **설정만** |
+| 묶음 기준 차원 변경(지점 빼고 거래처·제품만 등) | T2 | `"group_by":["customer","product"]`. **설정만** |
 | 비율 배분이 아닌 **새 분해 알고리즘** | T3 | `@register("새이름")` 함수 1회 + 골든 테스트 |
+
+> **파라미터화(2026-06-18):** `subset_subtract`에 박혀 있던 선택을 선언적 키로 노출했다 —
+> `relationship`(subset|independent)은 등록된 전략에 매핑되고(`_RELATIONSHIP_STRATEGY`, 단일 출처),
+> `group_by`는 묶음 차원을 바꾼다. 이미 아는 변형은 코드 0(설정만). **새 분해 알고리즘만** 여전히 T3(@register).
+> 의도적으로 일반 reduce 엔진은 만들지 않았다 — 예시 1개로 추상을 추측하면 틀이 어긋나기 때문(두 번째 실제 케이스에서 설계).
 
 ---
 

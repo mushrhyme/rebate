@@ -82,6 +82,9 @@ def _clean_cell(val) -> str:
     return re.sub(r'\s*(?:\|\s*)+$', '', str(val)).strip()
 
 # ── DSL 수식 평가기 ───────────────────────────────────────────────────────────
+# 결정적 인터프리터. eval() 미사용. 함수 호출·속성 접근은 영구 금지(임의 코드 실행 차단).
+# 산술에 더해 비교·논리·조건식(삼항)을 화이트리스트로 지원한다 → 결정적 "조건 분기" DSL.
+# 세 dict/set은 게이트(verify_form_wiring)가 "엔진 지원 연산"을 판정하는 단일 출처이기도 하다.
 _SAFE_OPS = {
     ast.Add:  operator.add,
     ast.Sub:  operator.sub,
@@ -89,11 +92,26 @@ _SAFE_OPS = {
     ast.Div:  operator.truediv,
     ast.USub: operator.neg,
 }
+_SAFE_CMP = {
+    ast.Lt:    operator.lt,
+    ast.LtE:   operator.le,
+    ast.Gt:    operator.gt,
+    ast.GtE:   operator.ge,
+    ast.Eq:    operator.eq,
+    ast.NotEq: operator.ne,
+}
+_SAFE_BOOLOPS = {ast.And, ast.Or}   # node.op 타입 (UnaryOp Not는 별도 처리)
 
 def _safe_eval(expr: str, ctx: dict, *, _form_id: str = "", _label: str = "") -> float:
-    """산술 표현식만 허용하는 안전한 평가기. eval() 미사용.
-    허용: 숫자 리터럴, ctx 변수명, +  -  *  /  ()
-    금지: 함수 호출, 속성 접근, 비교 연산, 그 외 모든 것.
+    """결정적 표현식 평가기. eval() 미사용.
+    허용: 숫자 리터럴, ctx 변수명, +  -  *  /  (),
+          비교(<  <=  >  >=  ==  !=), 논리(and  or  not),
+          조건식(A if 조건 else B).
+    금지: 함수 호출, 속성 접근, 그 외 모든 노드 — 임의 코드 실행 영구 차단.
+
+    조건식은 '택한 가지만' 평가한다 → 미택 가지의 0나누기 등은 일어나지 않으므로
+    `(a / b) if b != 0 else 0` 같은 가드를 안전하게 쓸 수 있다.
+    반환은 항상 float (비교/논리 결과 True/False는 1.0/0.0으로 코어션).
 
     _form_id, _label: 오류 메시지에 포함할 컨텍스트 정보.
     """
@@ -106,9 +124,42 @@ def _safe_eval(expr: str, ctx: dict, *, _form_id: str = "", _label: str = "") ->
             f"DSL 수식 구문 오류 [{_ctx_str}]: expr={expr!r} → {e}"
         ) from e
 
+    def _truth(node) -> bool:
+        return bool(_eval(node))
+
     def _eval(node):
         if isinstance(node, ast.Expression):
             return _eval(node.body)
+        # 조건식 A if 조건 else B — 택한 가지만 평가(지연)
+        if isinstance(node, ast.IfExp):
+            return _eval(node.body) if _truth(node.test) else _eval(node.orelse)
+        # 논리 and / or — 단축평가(미평가 가지의 0나누기 회피)
+        if isinstance(node, ast.BoolOp):
+            if isinstance(node.op, ast.And):
+                return all(_truth(v) for v in node.values)
+            if isinstance(node.op, ast.Or):
+                return any(_truth(v) for v in node.values)
+            raise ValueError(
+                f"허용되지 않은 논리 연산자 [{_ctx_str}]: "
+                f"expr={expr!r}, 연산자={type(node.op).__name__}"
+            )
+        # 비교 (체이닝 a < b <= c 지원)
+        if isinstance(node, ast.Compare):
+            left = _eval(node.left)
+            ok = True
+            for op_node, comparator in zip(node.ops, node.comparators):
+                fn = _SAFE_CMP.get(type(op_node))
+                if fn is None:
+                    raise ValueError(
+                        f"허용되지 않은 비교 연산자 [{_ctx_str}]: "
+                        f"expr={expr!r}, 연산자={type(op_node).__name__}"
+                    )
+                right = _eval(comparator)
+                if not fn(left, right):
+                    ok = False
+                    break
+                left = right
+            return ok
         if isinstance(node, ast.Constant):
             if not isinstance(node.value, (int, float)):
                 raise ValueError(
@@ -141,6 +192,8 @@ def _safe_eval(expr: str, ctx: dict, *, _form_id: str = "", _label: str = "") ->
                 )
             return op(left, right)
         if isinstance(node, ast.UnaryOp):
+            if isinstance(node.op, ast.Not):
+                return not _truth(node.operand)
             op = _SAFE_OPS.get(type(node.op))
             if op is None:
                 raise ValueError(
@@ -151,10 +204,10 @@ def _safe_eval(expr: str, ctx: dict, *, _form_id: str = "", _label: str = "") ->
         raise ValueError(
             f"허용되지 않은 AST 노드 [{_ctx_str}]: "
             f"expr={expr!r}, 노드={type(node).__name__} "
-            f"(함수 호출·속성 접근·비교 연산 등은 DSL에서 지원하지 않음)"
+            f"(함수 호출·속성 접근 등은 DSL에서 지원하지 않음)"
         )
 
-    return _eval(tree)
+    return float(_eval(tree))
 
 
 def _eval_expr(
@@ -542,6 +595,24 @@ def calc_cross_validation(
 
 
 # ── 제품별 집계: 이중조건 수량 분해 (form_types.json product_aggregate) ──────────
+# relationship(선언적 키) → 등록된 분해 전략. 새 relationship은 여기 + 전략 1회 등록으로 확장.
+_RELATIONSHIP_STRATEGY = {
+    "subset":      "subset_subtract",
+    "independent": "independent_list",
+}
+
+
+def _resolve_group_field(it: dict, field: str):
+    """group_by의 논리 필드명을 item 값으로 해석. 기존 폴백(OCR명·코드)을 보존한다."""
+    if field in ("product", "product_code"):
+        return it.get("product_code") or it.get("product_ocr") or ""
+    if field in ("customer", "customer_ocr"):
+        return it.get("customer_ocr") or it.get("customer", "")
+    if field == "jisho":
+        return it.get("jisho", "")
+    return it.get(field, "")
+
+
 def build_product_aggregate(items_in: list, form_cfg: dict) -> Optional[dict]:
     """이중·삼중조건을 제품 단위로 집계해 '실제 물량 그룹'으로 분해한다.
 
@@ -565,10 +636,18 @@ def build_product_aggregate(items_in: list, form_cfg: dict) -> Optional[dict]:
     qty_field = cfg.get("qty_field", "数量")
     unit_field = cfg.get("unit_field", "未収条件")
     amount_field = cfg.get("amount_field", "金額")
-    # 분해 전략 — 레지스트리에서 이름으로 선택. 미지정이면 기존 동작(무손실 하위호환).
-    strategy_name = cfg.get("strategy", "subset_subtract")
+    # 분해 전략 선택: 명시적 strategy가 1순위(개발자 escape hatch), 없으면 relationship로 결정.
+    #   relationship: subset(부분집합·차감, 기본) | independent(독립·나열). 둘 다 등록된 전략에 매핑.
+    strategy_name = cfg.get("strategy") or _RELATIONSHIP_STRATEGY.get(cfg.get("relationship", "subset"))
+    if strategy_name is None:
+        raise ValueError(
+            f"product_aggregate.relationship={cfg.get('relationship')!r} 미지원 — "
+            f"{sorted(_RELATIONSHIP_STRATEGY)} 중 하나여야 합니다."
+        )
+    # 그룹핑 키 차원 — group_by로 선언. 미지정이면 기존 (jisho, customer, product)와 동일.
+    group_by = cfg.get("group_by") or ["jisho", "customer", "product"]
 
-    # (jisho, customer_ocr, product_code) → condition_type → 누적
+    # 논리 필드명 → condition_type 누적 그룹
     groups: dict[tuple, dict] = {}
     order: list[tuple] = []
     for it in items_in:
@@ -577,7 +656,7 @@ def build_product_aggregate(items_in: list, form_cfg: dict) -> Optional[dict]:
         if not ctype:
             continue
         pcode = it.get("product_code") or it.get("product_ocr") or ""
-        key = (it.get("jisho", ""), it.get("customer_ocr") or it.get("customer", ""), pcode)
+        key = tuple(_resolve_group_field(it, f) for f in group_by)
         if key not in groups:
             groups[key] = {
                 "_meta": {

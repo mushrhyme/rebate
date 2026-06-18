@@ -15,7 +15,8 @@ phase4_calc.build_product_aggregate가 그룹핑·표시 스펙 생성을 맡고
 #   base_type:  기준 조건명(예: "定番条件")
 #   rows:       [{"qty", "units": {조건:단가}, "amount"}]  — None이면 이 그룹은 분해 대상 아님(skip)
 #   warning:    데이터 이상 경고 문자열 또는 None (제품명은 호출자가 prefix로 붙임)
-#   불변식: Σrows.qty = 기준 총수량, Σrows.amount = 그룹 원본 총금액 (±0.01)
+#   불변식(전략별): subset 계열은 Σrows.qty = 기준 총수량, independent는 Σ(모든 조건 수량).
+#                  어느 전략이든 Σrows.amount = 그룹 원본 총금액 (±0.01) — 금액 보존은 공통.
 AGGREGATE_STRATEGIES: dict = {}
 
 
@@ -86,3 +87,28 @@ def subset_subtract(conds: dict, base_type: str):
         warning = f"추가조건 합({extra_qty_sum})이 {base_type}({base_qty}) 초과 — 분해 음수"
 
     return rows, warning
+
+
+@register("independent_list")
+def independent_list(conds: dict, base_type: str):
+    """조건들이 서로 독립(부분집합 아님) — 차감하지 않고 각 조건을 제 수량·금액 그대로 한 행씩.
+
+    subset_subtract와 달리 기준조건에서 빼지 않는다. 각 조건이 별개 물량이므로 불변식이 다르다:
+      Σrows.qty    = Σ(모든 조건 수량)        ← '기준 총수량'이 아님
+      Σrows.amount = Σ(모든 조건 원본금액)     (금액 보존)
+    base_type는 표시 컬럼 정렬에만 쓰이고 계산엔 관여하지 않는다(없어도 동작).
+    조건이 하나도 없으면 (None, None).
+
+    config: product_aggregate.relationship == "independent" 일 때 선택된다.
+    """
+    if not conds:
+        return None, None
+    rows = []
+    for ct, v in conds.items():
+        q = v["qty"]
+        rows.append({
+            "qty": _num_out(q),
+            "units": {ct: round((v["amount"] / q) if q else 0.0, 2)},
+            "amount": round(v["amount"], 2),
+        })
+    return rows, None

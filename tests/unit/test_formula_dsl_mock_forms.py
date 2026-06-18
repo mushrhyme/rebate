@@ -228,10 +228,17 @@ class TestUnknownVariable:
         with pytest.raises(ValueError, match="허용되지 않은|Unsupported"):
             _safe_eval("abs(-1)", {}, _form_id="mock_test")
 
-    def test_comparison_operator_raises(self):
-        """비교 연산자 → 허용되지 않은 AST 노드 오류."""
-        with pytest.raises(ValueError):
-            _safe_eval("shikiri > 0", {"shikiri": 100}, _form_id="mock_test")
+    def test_comparison_operator_allowed(self):
+        """비교 연산자는 이제 결정적 조건 분기 DSL로 허용된다(True/False→1.0/0.0)."""
+        assert _safe_eval("shikiri > 0", {"shikiri": 100}, _form_id="mock_test") == 1.0
+        assert _safe_eval("shikiri > 0", {"shikiri": -5}, _form_id="mock_test") == 0.0
+
+    def test_conditional_branch_evaluates(self):
+        """조건식 A if 조건 else B — 택한 가지만 계산."""
+        net = {"formula_type": "expr", "expr": "shikiri - joken if joken > 0 else shikiri",
+               "vars": {"joken": "条件"}}
+        assert _run_calc_net("mock_form_cond", net, {"条件": 30}, shikiri=200) == 170.0
+        assert _run_calc_net("mock_form_cond", net, {"条件": 0}, shikiri=200) == 200.0
 
 
 # ── 케이스 6: 수식 미정의 → 명확한 오류 ─────────────────────────────────────

@@ -152,9 +152,14 @@ _RULES_SYSTEM_TMPL = """\
   변경하지 마세요. (그런 변경은 개발(T3)이 필요합니다.)
 
 ## 허용 어휘
-- NET 수식 연산: `+` `-` `*` `/` 와 괄호. 변수는 `shikiri`(仕切)·`teiban`(定番)·블록의 vars/computed_vars만.
+- NET 수식 연산: 산술 `+` `-` `*` `/` 괄호, 비교 `<` `<=` `>` `>=` `==` `!=`, 논리 `and` `or` `not`,
+  조건식 `A if 조건 else B`. 변수는 `shikiri`(仕切)·`teiban`(定番)·블록의 vars/computed_vars만.
+  (함수 호출·외부 참조는 금지 — 결정적 수식만.) 예: `(c1 + c2) if c1 + c2 > 0 else fallback`
 - 교차검증 type: {cv_types}
-- 집계 전략: {strategies}\
+- 집계 전략: {strategies}
+- 집계 방식(product_aggregate): `relationship`=`subset`(추가조건이 기준조건의 부분집합·차감 분해) 또는
+  `independent`(조건들이 독립·차감 없이 나열). `group_by`로 묶음 기준 변경 가능(예: `["jisho","customer","product"]`).
+  완전히 새로운 분해 알고리즘은 어휘 밖(개발 T3).\
 """
 
 

@@ -54,7 +54,7 @@
         "expr": {
           "type": "string",
           "minLength": 1,
-          "description": "산술 표현식. 허용 변수: shikiri, teiban, vars/computed_vars에 정의된 alias"
+          "description": "결정적 표현식. 산술(+ - * / 괄호)에 더해 비교(< <= > >= == !=)·논리(and or not)·조건식(A if 조건 else B) 허용. 함수 호출·속성 접근은 금지. 허용 변수: shikiri, teiban, vars/computed_vars에 정의된 alias. 예: '(c1 + c2) if c1 + c2 > 0 else fallback'"
         },
         "vars": {
           "type": "object",
@@ -141,12 +141,23 @@
     },
     "ProductAggregate": {
       "type": "object",
-      "description": "제품별 집계 분해 설정. strategy로 분해 알고리즘을 선택한다(scripts/aggregate_strategies.py 레지스트리). 미지정 시 subset_subtract.",
+      "description": "제품별 집계 분해 설정. relationship(선언적 키)로 분해 방식을 고르거나, strategy로 등록된 전략을 직접 지정한다(scripts/aggregate_strategies.py 레지스트리). 둘 다 미지정 시 subset.",
       "properties": {
+        "relationship": {
+          "type": "string",
+          "enum": ["subset", "independent"],
+          "description": "조건 간 관계. subset=추가조건이 기준조건의 부분집합(차감 분해, 기본). independent=조건들이 독립(차감 없이 각 조건 나열). strategy가 명시되면 그쪽이 우선."
+        },
+        "group_by": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "description": "집계 묶음 기준 필드. 미지정 시 [\"jisho\",\"customer\",\"product\"]. 논리명(jisho·customer·product)은 OCR명·코드 폴백을 보존."
+        },
         "strategy": {
           "type": "string",
           "minLength": 1,
-          "description": "분해 전략 이름. 등록된 전략만 허용(런타임 get_strategy가 검증). 현재: subset_subtract. 새 전략은 aggregate_strategies.py에 @register로 추가."
+          "description": "분해 전략 이름(escape hatch). 등록된 전략만 허용(런타임 get_strategy가 검증). 현재: subset_subtract, independent_list. 새 전략은 aggregate_strategies.py에 @register로 추가."
         },
         "base_condition": { "type": "string", "minLength": 1 },
         "qty_field": { "type": "string", "minLength": 1 },

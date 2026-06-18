@@ -58,7 +58,9 @@ export function FormManagement() {
   const [isSaved, setIsSaved] = useState(false)
   const [savedAt, setSavedAt] = useState<Date | null>(null)
   const [isChatOpen, setIsChatOpen] = useState(false)
-  const [saveToast, setSaveToast] = useState<{ msg: string; ok: boolean } | null>(null)
+  const [saveToast, setSaveToast] = useState<{ msg: string; ok: boolean; warn?: boolean } | null>(null)
+  // 반영 점검 배너 — 동기화/규칙반영 후 엔진에 안 붙은(dev) · 현업 확인(owner) gap을 끝까지 노출 (무음 성공 방지)
+  const [wiringNotice, setWiringNotice] = useState<{ dev: string[]; owner: string[] } | null>(null)
   const [contentByForm, setContentByForm] = useState<Record<string, string>>({})
   const [hashByForm, setHashByForm] = useState<Record<string, string>>({})
   const [isLoadingContent, setIsLoadingContent] = useState(false)
@@ -315,18 +317,31 @@ export function FormManagement() {
       }
       const data = await res.json()           // { ok, form_id, wiring, note?, unchanged? }
       const w = data.wiring ?? {}
+      const dev: string[] = w.dev ?? []        // 엔진 미반영 — 계산에 적용 안 됨(관리자/개발 필요)
+      const owner: string[] = w.owner ?? []    // 현업이 더 채워야 반영됨
       let msg: string
       if (data.unchanged) {
         // 어휘 밖 요청 등으로 Claude가 블록을 바꾸지 않음 (개발 필요 안내 등)
-        msg = `ℹ️ 실행 규칙 변경 없음.${data.note ? `\n${data.note}` : ''}`
+        msg = `ℹ️ 실행 규칙 변경 없음 — 반영된 게 없습니다.${data.note ? `\n${data.note}` : ''}`
       } else {
-        const parts: string[] = ['✅ 실행 규칙(블록) 반영 완료.']
+        const parts: string[] = ['✅ 실행 규칙(블록) 저장됨.']
         if (w.safe_fixed?.length) parts.push(`자동수정 ${w.safe_fixed.length}건`)
-        if (w.owner?.length) parts.push(`현업 확인 ${w.owner.length}건`)
-        if (w.dev?.length) parts.push(`개발 필요(T3) ${w.dev.length}건`)
-        msg = parts.join(' · ') + (data.note ? `\n${data.note}` : '')
+        if (owner.length) parts.push(`현업 확인 ${owner.length}건`)
+        if (dev.length) parts.push(`개발 필요(T3) ${dev.length}건`)
+        msg = parts.join(' · ')
+        if (dev.length) {
+          // 블록은 저장됐지만 엔진이 이 어휘를 모름 → 실제 계산엔 반영 안 됨. 무음 성공으로 끝내지 않는다.
+          msg += `\n\n⛔ 단, 아래는 엔진에 반영되지 않았습니다(계산에 적용되지 않음) — 관리자(개발)에게 연락하세요:\n`
+            + dev.map((d: string) => `  • ${d}`).join('\n')
+        }
+        if (owner.length) {
+          msg += `\n\n👤 현업이 확인/보완해야 반영됩니다:\n` + owner.map((o: string) => `  • ${o}`).join('\n')
+        }
+        if (data.note) msg += `\n${data.note}`
       }
       setChatHistory(h => [...h, { role: 'assistant', text: msg }])
+      // 동기화 경로와 공유하는 점검 배너 — gap이 있으면 토스트가 사라져도 끝까지 남긴다
+      setWiringNotice(!data.unchanged && (dev.length || owner.length) ? { dev, owner } : null)
       // 블록·자동 섹션이 바뀌었으니 MD 새로고침
       const fresh = await fetch(`${BASE}/api/v3/forms/${selectedId}`, { headers: sessionHeaders() })
       if (fresh.ok) {
@@ -334,7 +349,9 @@ export function FormManagement() {
         setContentByForm(prev => ({ ...prev, [selectedId]: fd.content }))
         setHashByForm(prev => ({ ...prev, [selectedId]: fd.content_hash }))
       }
-      showToast(data.unchanged ? '변경 없음' : '규칙 반영 완료', true)
+      if (data.unchanged) showToast('변경 없음 — 반영된 것 없음', true)
+      else if (dev.length) showToast('⚠ 일부 미반영 — 관리자 확인 필요', false, true)
+      else showToast('규칙 반영 완료', true)
     } catch {
       showToast('규칙 반영 실패', false)
     } finally {
@@ -359,10 +376,20 @@ export function FormManagement() {
       const data = await res.json()
       setLastSyncedAt(new Date())
       setSyncChanges(data.changes ?? [])
-      showToast(
-        data.changes?.length > 0 ? `동기화 완료 (${data.changes.length}개 변경)` : '동기화 완료 (변경 없음)',
-        true,
-      )
+      // 동기화 후 와이어링 점검 결과를 끝까지 노출 — "동기화 완료"만 뜨고 실제론 엔진에 안 붙은 무음 갭 방지
+      const w = data.wiring ?? {}
+      const dev: string[] = w.dev ?? []
+      const owner: string[] = w.owner ?? []
+      const attention = dev.length > 0 || owner.length > 0
+      setWiringNotice(attention ? { dev, owner } : null)
+      if (attention) {
+        showToast('⚠ 동기화됨 — 일부 미반영(확인 필요)', false, true)
+      } else {
+        showToast(
+          data.changes?.length > 0 ? `동기화 완료 (${data.changes.length}개 변경)` : '동기화 완료 (변경 없음)',
+          true,
+        )
+      }
     } catch {
       showToast('동기화 실패', false)
     } finally {
@@ -399,8 +426,8 @@ export function FormManagement() {
     }
   }
 
-  function showToast(msg: string, ok: boolean) {
-    setSaveToast({ msg, ok })
+  function showToast(msg: string, ok: boolean, warn = false) {
+    setSaveToast({ msg, ok, warn })
     setTimeout(() => setSaveToast(null), 3000)
   }
 
@@ -631,6 +658,42 @@ export function FormManagement() {
                   )}
                 </button>
               </div>
+
+              {/* 반영 점검 배너 — dev(엔진 미반영) · owner(현업 확인) gap을 닫기 전까지 노출 */}
+              {wiringNotice && (wiringNotice.dev.length > 0 || wiringNotice.owner.length > 0) && (
+                <div style={{
+                  margin: '12px 32px 0', padding: '12px 16px', borderRadius: 8,
+                  border: '1px solid #f5c97a', background: '#fff8ec',
+                  display: 'flex', flexDirection: 'column', gap: 8,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: '#b45309' }}>⚠️ 반영 점검</span>
+                    <button
+                      onClick={() => setWiringNotice(null)}
+                      style={{
+                        marginLeft: 'auto', border: 'none', background: 'transparent',
+                        color: 'var(--text-3)', fontSize: 12, cursor: 'pointer',
+                      }}
+                    >닫기</button>
+                  </div>
+                  {wiringNotice.dev.length > 0 && (
+                    <div style={{ fontSize: 12, color: '#7c2d12' }}>
+                      <div style={{ fontWeight: 600 }}>⛔ 엔진에 반영되지 않음 — 계산에 적용되지 않습니다. 관리자(개발)에게 연락하세요:</div>
+                      <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+                        {wiringNotice.dev.map((d, i) => <li key={i}>{d}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                  {wiringNotice.owner.length > 0 && (
+                    <div style={{ fontSize: 12, color: '#92400e' }}>
+                      <div style={{ fontWeight: 600 }}>👤 현업이 확인/보완해야 반영됩니다:</div>
+                      <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+                        {wiringNotice.owner.map((o, i) => <li key={i}>{o}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* MD 렌더링 */}
               <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px', background: 'var(--bg)' }}>
@@ -899,7 +962,7 @@ export function FormManagement() {
                   초기화
                 </button>
                 {saveToast && (
-                  <span style={{ fontSize: 11, fontWeight: 600, color: saveToast.ok ? 'var(--primary)' : '#dc2626' }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: saveToast.warn ? '#b45309' : saveToast.ok ? 'var(--primary)' : '#dc2626' }}>
                     {saveToast.msg}
                   </span>
                 )}

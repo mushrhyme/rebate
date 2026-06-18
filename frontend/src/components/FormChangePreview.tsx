@@ -1,6 +1,10 @@
-import { useState, Fragment } from 'react'
-import { api, type FormPreview } from '../api/client'
+import { useState, useEffect, Fragment } from 'react'
+import { api, type FormPreview, type Document } from '../api/client'
 import { aggColumns, AggHeadCells, AggDecompCells } from './aggTable'
+
+// phase3 산출물(phase3_output.json)이 존재해 미리보기 재계산이 가능한 상태들.
+// phase3 진행 중·이전 단계는 산출물이 없어 500이 나므로 제외한다.
+const PREVIEWABLE_STATUSES = new Set(['phase4', 'pending', 'done', 'xv_warning'])
 
 /**
  * Form 관리 — md 수정본을 config로 반영하기 전에, 샘플 문서로 재계산한 결과를
@@ -9,10 +13,25 @@ import { aggColumns, AggHeadCells, AggDecompCells } from './aggTable'
  */
 export function FormChangePreview({ formId }: { formId: string }) {
   const [docId, setDocId] = useState('')
+  const [docs, setDocs] = useState<Document[]>([])
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [pv, setPv] = useState<FormPreview | null>(null)
   const [committed, setCommitted] = useState<string | null>(null)
+
+  // 이 양식에 속하고 미리보기 가능한(phase3 완료) 샘플 문서 목록을 불러온다.
+  useEffect(() => {
+    let alive = true
+    api.listDocuments()
+      .then(all => {
+        if (!alive) return
+        setDocs(all
+          .filter(d => d.form_id === formId && PREVIEWABLE_STATUSES.has(d.status))
+          .sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? '')))
+      })
+      .catch(() => { if (alive) setDocs([]) })
+    return () => { alive = false }
+  }, [formId])
 
   async function doPreview() {
     setErr(null); setCommitted(null); setPv(null); setLoading(true)
@@ -48,9 +67,17 @@ export function FormChangePreview({ formId }: { formId: string }) {
 
       <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginBottom: 12 }}>
         <label style={{ flex: 1 }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-3)', marginBottom: 4 }}>샘플 청구서 ID</div>
-          <input value={docId} onChange={e => setDocId(e.target.value)} placeholder="예: 2월日本アクセスＣＶＳ①"
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-3)', marginBottom: 4 }}>
+            샘플 청구서 {docs.length > 0 && <span style={{ fontWeight: 400 }}>({docs.length}건 — 이름으로 검색)</span>}
+          </div>
+          <input list="preview-doc-list" value={docId} onChange={e => setDocId(e.target.value)}
+                 placeholder={docs.length > 0 ? '청구서 이름을 입력해 검색…' : '이 양식의 분석 완료 문서가 없습니다'}
                  style={{ width: '100%', padding: '8px 10px', border: '1px solid var(--border)', borderRadius: 6, fontSize: 13, boxSizing: 'border-box' }} />
+          <datalist id="preview-doc-list">
+            {docs.map(d => (
+              <option key={d.doc_id} value={d.doc_id}>{d.pdf_filename || d.doc_id}</option>
+            ))}
+          </datalist>
         </label>
         <button onClick={doPreview} disabled={loading || !docId}
                 style={{ padding: '9px 16px', borderRadius: 6, border: 'none', background: 'var(--text-1)', color: '#fff', fontSize: 13, fontWeight: 600, cursor: loading || !docId ? 'not-allowed' : 'pointer', opacity: loading || !docId ? 0.5 : 1 }}>
