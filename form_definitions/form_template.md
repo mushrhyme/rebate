@@ -265,3 +265,21 @@ Python 코드 전용. Phase 2·3에서는 이 섹션을 무시한다.
   }
 }
 ```
+
+## 사용 가능한 어휘 (코드 없이 config로 표현 가능한 규칙)
+
+> 아래 어휘는 **엔진이 이미 구현**한 것이라 `[config]` 블록(=채팅 "규칙 반영")만으로 동작한다.
+> **어휘 밖**을 쓰면 조용히 무시되지 않고 **동기화(sync) 시점에 스키마가 시끄럽게 막는다** —
+> "MD 고쳤는데 분석이 안 바뀐다"를 빌드 단계에서 차단하기 위함이다. 어휘 확장(새 type/전략)은 개발자 작업(T3).
+
+| 항목 | config 키 | 허용 값(어휘) |
+|------|-----------|---------------|
+| NET 수식 | `net.formula_type` | `expr`(권장). `expr`에 `+ - * / ()`·변수·`computed_vars`·`divide_by` 사용 |
+| 제품 집계 분해 | `product_aggregate.relationship` | `subset`(부분집합·차감, 기본) · `independent`(독립·나열) |
+| 〃 (직접 전략 지정) | `product_aggregate.strategy` | `subset_subtract` · `independent_list` |
+| 교차검증 | `cross_validation[].type` | `cover_honbai_vs_detail` · `cover_breakdown_vs_detail` · `cover_taxex_vs_detail` · `cover_total_vs_summary` · `summary_vs_detail` · `per_customer_vs_summary` |
+| 판매처 조건부 확정 | `dist_overrides[].when` + `pick_candidate_name_contains` 또는 `dist_code` | `when`은 item 필드 **정확 일치**(AND) |
+| 판매처 캐시 차원 | (ocr_dist 키) | `retailer_code` · `jisho` — 새 차원은 시트 마이그레이션 필요(T3) |
+
+> **어휘에 없는 규칙이 필요하면** = "코드가 바뀌어야 하는" 경우다. 그 규칙을 블록에 적어 동기화하면
+> 스키마가 막아 알려준다(무음 실패 아님). 개발자가 엔진에 분기/전략을 등록(T3)한 뒤에야 config로 내려온다.

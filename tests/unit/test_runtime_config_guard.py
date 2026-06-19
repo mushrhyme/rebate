@@ -256,3 +256,65 @@ class TestPostSyncWiringHook:
         assert res["available"] is True
         assert isinstance(res["owner"], list) and isinstance(res["dev"], list)
         assert res["safe_fixed"] == [], "등록·정합 양식인데 파일을 수정함(비파괴 위반)"
+
+
+# ── 7. config 드리프트 가드 — form_types.json ≠ [config] 블록 차단 ──────────────
+
+class TestConfigDriftGuard:
+    """form_XX.md [config] 블록을 고쳤는데 form_types.json을 재빌드하지 않으면,
+    엔진이 옛 json으로 '내가 고친 규칙과 다르게' 조용히 계산한다. 이 가드가 분석 전에 차단한다.
+    """
+
+    def _env(self, tmp_path, md_block: dict, json_entry):
+        """form_03.md [config] 블록 = md_block, form_types.json[form_03] = json_entry 인 워크스페이스."""
+        from unittest.mock import MagicMock
+        (tmp_path / "config").mkdir()
+        fd = tmp_path / "form_definitions"
+        fd.mkdir()
+        block = json.dumps(md_block, ensure_ascii=False, indent=2)
+        (fd / "form_03.md").write_text(
+            f"# form_03 정의\n\n## [config] 실행 설정\n\n```json\n{block}\n```\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "config" / "form_types.json").write_text(
+            json.dumps({"form_03": json_entry}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        settings = MagicMock()
+        settings.workspace_root = tmp_path
+        settings.form_definitions_dir = fd
+        return settings
+
+    def test_in_sync_returns_none(self, tmp_path):
+        from backend.pipeline.orchestrator import _check_config_drift
+        settings = self._env(tmp_path, {"label": "X", "net": {"formula_type": "expr", "expr": "a-b"}},
+                             {"label": "X", "net": {"formula_type": "expr", "expr": "a-b"}})
+        assert _check_config_drift("form_03", settings) is None
+
+    def test_drift_returns_message(self, tmp_path):
+        """블록은 새 수식, json은 옛 수식 → 사람용 메시지 반환(차단 신호)."""
+        from backend.pipeline.orchestrator import _check_config_drift
+        settings = self._env(tmp_path, {"net": {"formula_type": "expr", "expr": "a - b - c"}},
+                             {"net": {"formula_type": "expr", "expr": "a - b"}})
+        msg = _check_config_drift("form_03", settings)
+        assert msg and "재빌드" in msg and "form_03" in msg
+
+    def test_key_order_insensitive(self, tmp_path):
+        """키 순서만 다른 동일 내용은 드리프트가 아니다(오탐 방지)."""
+        from backend.pipeline.orchestrator import _check_config_drift
+        settings = self._env(tmp_path, {"a": 1, "b": 2}, {"b": 2, "a": 1})
+        assert _check_config_drift("form_03", settings) is None
+
+    def test_blockless_returns_none(self, tmp_path):
+        """[config] 블록 없는 양식은 판단 불가 → None (sync 단계가 따로 막음)."""
+        from unittest.mock import MagicMock
+        from backend.pipeline.orchestrator import _check_config_drift
+        (tmp_path / "config").mkdir()
+        fd = tmp_path / "form_definitions"
+        fd.mkdir()
+        (fd / "form_03.md").write_text("# form_03\n블록 없음\n", encoding="utf-8")
+        (tmp_path / "config" / "form_types.json").write_text("{}", encoding="utf-8")
+        settings = MagicMock()
+        settings.workspace_root = tmp_path
+        settings.form_definitions_dir = fd
+        assert _check_config_drift("form_03", settings) is None

@@ -128,6 +128,21 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
             await _set_form_id(doc_id, form_id)
             await _record_pipeline_hashes(doc_id, form_id, settings)
 
+            # ── config 드리프트 가드 (재빌드 누락 차단) ─────────────
+            # form_XX.md [config] 블록을 고쳤는데 form_types.json을 재빌드하지 않으면,
+            # 엔진은 옛 json을 그대로 읽어 '내가 고친 규칙과 다르게' 조용히 계산한다.
+            # 분석 시작 전에 둘의 동치를 확인하고, 어긋나면 명시적 error로 떨군다.
+            _drift_msg = await asyncio.to_thread(_check_config_drift, form_id, settings)
+            if _drift_msg:
+                await update_document_error(
+                    doc_id,
+                    error_type="config_drift",
+                    error_phase="config",
+                    message=_drift_msg,
+                )
+                log.error("[%s] config 드리프트 가드 실패 — 분석 중단: %s", doc_id, _drift_msg)
+                return
+
             # ── 마스터 가용성 가드 (Sheets 모드) ──────────────────
             # 토큰 만료/네트워크 장애로 마스터(unit_price)가 빈 채로 분석이 진행되면
             # 모든 매핑이 not_found·NET이 None이 되어 '조용히 틀린' 결과가 나온다.
@@ -523,6 +538,21 @@ async def _merge_confirmed_mappings(doc_id: str) -> None:
 
 
 async def _run_phase4_and_finish(doc_id: str, run_id: str = "", skip_xv: bool = False) -> None:
+    # config 드리프트 가드 (모든 경로의 단일 초크포인트) — resume_* 경로는 run_pipeline의
+    # 초기 가드를 거치지 않으므로 여기서도 확인한다. 드리프트면 옛 규칙으로 계산된
+    # 결과가 절대 나오지 않게 분석을 거부한다.
+    settings = get_settings()
+    _doc = await get_document(doc_id)
+    _form_id = (_doc or {}).get("form_id") or ""
+    if _form_id:
+        _drift_msg = await asyncio.to_thread(_check_config_drift, _form_id, settings)
+        if _drift_msg:
+            await update_document_error(
+                doc_id, error_type="config_drift", error_phase="config", message=_drift_msg,
+            )
+            log.error("[%s] config 드리프트 가드 실패 (phase4 직전) — 중단: %s", doc_id, _drift_msg)
+            return
+
     await update_document_status(doc_id, "phase4")
     _t0 = time.monotonic()
     phase4_data = await run_phase4(doc_id, run_id=run_id, skip_xv=skip_xv)
@@ -820,6 +850,38 @@ def _check_master_availability() -> str | None:
     except SheetsUnavailableError as e:
         return str(e)
     return None
+
+
+def _check_config_drift(form_id: str, settings) -> str | None:
+    """form_types.json[form_id]가 form_XX.md [config] 정본 블록과 다르면 사람용 메시지, 같으면 None.
+
+    literate-config 단일 진실 소스: form_types.json은 [config] 블록의 빌드 생성물이다.
+    블록을 고치고 재빌드(sync/'규칙 반영')를 안 하면 둘이 어긋난다 — 이때 엔진은 옛 json을
+    읽으므로 '내가 고친 대로 분석이 안 되는' 무음 오류가 난다. 이 함수가 그 드리프트를 잡는다.
+
+    판단 불가(파일 부재·블록 없음)는 None을 돌려 다른 가드(build --check·sync 실패)에 맡긴다.
+    """
+    try:
+        from scripts.build_form_types import extract_config_block
+        md_path = settings.form_definitions_dir / f"{form_id}.md"
+        ft_path = settings.workspace_root / "config" / "form_types.json"
+        if not md_path.exists() or not ft_path.exists():
+            return None
+        block = extract_config_block(md_path.read_text(encoding="utf-8"), f"{form_id}.md")
+        if block is None:
+            return None  # 블록 없는 미등록 초안 — sync 단계가 따로 시끄럽게 막음
+        current = json.loads(ft_path.read_text(encoding="utf-8")).get(form_id)
+        if block == current:
+            return None
+        return (
+            f"{form_id}.md의 [config] 블록이 config/form_types.json과 다릅니다(재빌드 누락). "
+            f"블록을 고친 뒤 'Form 관리 > 규칙 반영'으로 반영하거나 동기화하세요. "
+            f"이 상태로 분석하면 옛 규칙으로 계산되므로 중단했습니다."
+        )
+    except Exception:
+        # 가드 자체의 오류로 분석을 막지 않는다 — 보수적으로 통과(다른 가드가 잡음).
+        log.warning("[config_drift] 드리프트 검사 실패 (무시): %s", form_id, exc_info=True)
+        return None
 
 
 def _compute_pipeline_hashes(form_id: str, settings) -> dict:

@@ -280,3 +280,42 @@ class TestSchemaAcceptsValidStructures:
         }
         errors = list(Draft7Validator(schema).iter_errors(valid))
         assert not errors, f"unknown 키 허용이어야 하는데 실패: {[e.message for e in errors]}"
+
+
+# ── 3. cross_validation type 어휘 enum (무음 무시 차단) ───────────────────────
+
+class TestCrossValidationTypeEnum:
+    """교차검증 type을 구현된 6종으로 제한 — 어휘 밖 type이 조용히 무시되는 무음 실패 차단.
+
+    이전엔 schema가 cross_validation을 `{"type":"array"}`로만 두어 임의 type이 통과했고,
+    phase4_calc는 if/elif 체인에 else가 없어 모르는 type을 조용히 건너뛰었다.
+    """
+
+    _VALID_TYPES = [
+        "cover_honbai_vs_detail", "cover_breakdown_vs_detail", "cover_taxex_vs_detail",
+        "cover_total_vs_summary", "summary_vs_detail", "per_customer_vs_summary",
+    ]
+
+    @pytest.mark.parametrize("rtype", _VALID_TYPES)
+    def test_known_types_pass(self, schema, rtype):
+        valid = {"form_x": {"cross_validation": [{"type": rtype, "label": "검증"}]}}
+        errors = list(Draft7Validator(schema).iter_errors(valid))
+        assert not errors, f"구현된 type인데 실패: {rtype} — {[e.message for e in errors]}"
+
+    def test_unknown_type_rejected(self, schema):
+        """어휘 밖 type → schema 실패 (sync/build에서 시끄럽게 차단)."""
+        invalid = {"form_x": {"cross_validation": [{"type": "made_up_check", "label": "검증"}]}}
+        errors = list(Draft7Validator(schema).iter_errors(invalid))
+        assert errors, "어휘 밖 cross_validation type이 schema를 통과함(무음 무시 위험)"
+
+    def test_missing_type_rejected(self, schema):
+        invalid = {"form_x": {"cross_validation": [{"label": "검증"}]}}
+        errors = list(Draft7Validator(schema).iter_errors(invalid))
+        assert errors, "type 없는 cross_validation 규칙이 통과함"
+
+    def test_current_config_cross_validation_valid(self, form_types, schema):
+        """현 form_types.json의 모든 cross_validation type이 enum 안에 있어야 한다."""
+        for form_id, cfg in form_types.items():
+            for rule in cfg.get("cross_validation", []):
+                assert rule.get("type") in self._VALID_TYPES, \
+                    f"{form_id}: 미구현 cross_validation type {rule.get('type')!r}"

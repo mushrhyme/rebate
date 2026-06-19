@@ -591,6 +591,19 @@ def calc_cross_validation(
                 label = rule["label"].replace("{key}", norm[:20])
                 xv.append((label, sv, total_ex_cust, abs(total_ex_cust - sv) < 2))
 
+        else:
+            # 어휘 밖 type은 조용히 건너뛰지 않는다 — 현업이 교차검증을 넣었는데
+            # 미구현 type이라 아무 일도 안 일어나는 무음 실패를 막는다. (스키마 enum이
+            # sync에서 1차 차단하지만, json 손편집·구버전 우회 시의 런타임 방어선.)
+            raise ValueError(
+                f"알 수 없는 cross_validation type: {rtype!r}. "
+                f"구현된 종류: cover_honbai_vs_detail, cover_breakdown_vs_detail, "
+                f"cover_taxex_vs_detail, cover_total_vs_summary, summary_vs_detail, "
+                f"per_customer_vs_summary. "
+                f"새 종류는 phase4_calc.calc_cross_validation에 분기 추가 + "
+                f"form_types.schema.json CrossValidationRule.enum 확장이 필요합니다(개발자 작업)."
+            )
+
     return xv
 
 

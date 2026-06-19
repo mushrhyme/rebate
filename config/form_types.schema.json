@@ -19,7 +19,10 @@
         "row_anchor": { "type": "object" },
         "condition_display": { "type": "object" },
         "cover_totals": { "type": "object" },
-        "cross_validation": { "type": "array" },
+        "cross_validation": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/CrossValidationRule" }
+        },
         "show_sections": { "type": "array", "items": { "type": "string" } },
         "aggregate_label": { "type": "string" },
         "summary": { "type": "string" },
@@ -189,6 +192,27 @@
         }
       },
       "additionalProperties": false
+    },
+    "CrossValidationRule": {
+      "type": "object",
+      "description": "교차검증 규칙. type은 phase4_calc.calc_cross_validation이 실제 구현한 어휘로 제한된다 — 어휘 밖 type을 쓰면 조용히 무시되지 않고 빌드(sync)에서 시끄럽게 막힌다. 새 type은 개발자가 calc_cross_validation에 분기 추가 + 여기 enum 확장(T3).",
+      "required": ["type", "label"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "cover_honbai_vs_detail",
+            "cover_breakdown_vs_detail",
+            "cover_taxex_vs_detail",
+            "cover_total_vs_summary",
+            "summary_vs_detail",
+            "per_customer_vs_summary"
+          ],
+          "description": "검증 종류. 구현된 6종만 허용."
+        },
+        "label": { "type": "string", "description": "결과 표에 표시될 이름. {key}는 그룹명으로 치환됨." }
+      },
+      "additionalProperties": true
     },
     "PreprocessRule": {
       "type": "object",
