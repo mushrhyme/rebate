@@ -186,7 +186,7 @@ config([form_types.json](../config/form_types.json) form_04):
 | **P0 (이 문서)** | 설계 합의 + architecture.md §7 의사결정 기록 | — | ⏳ |
 | **P1. 축 A 레지스트리** | `aggregate_strategies.py`(register/get_strategy + `subset_subtract`) + `build_product_aggregate`를 그룹핑·표시스펙 오케스트레이터로 축소(분해는 전략 위임). form_04 config에 `"strategy":"subset_subtract"` 명시(무손실). schema에 `ProductAggregate` 정의. 골든 7 + 회귀 그린, 잘못된 전략명은 get_strategy가 명확히 차단 | 낮음(출력 계산만) | ✅ 2026-06-17 |
 | **P2. 축 B 차원 선언** | (B-1 합성키 대신) 키 스키마 단일 출처 `backend/core/dist_cache_key.py` — 빌드·조회·쓰기 세 경로를 통일, 3/4튜플 드리프트 제거. 차원 추가 = `DIMENSION_FIELDS` 한 줄 + 시트 컬럼(+plumbing). 계약 테스트 4 + 기존 dist 212 그린 | 중(매핑·시트) → 무손실 | ✅ 2026-06-17 |
-| **P3. config 스키마·sync 연계** | `form_types.schema.json`에 `strategy` enum·`key_fields` 추가. sync-form-config가 신규 필드 보존·검증 | 낮음 | ⏭ |
+| **P3. config 스키마·sync 연계** | `form_types.schema.json`에 `strategy` enum·`key_fields` 추가. sync-form-config가 신규 필드 보존·검증 | 낮음 | ✅ 2026-06-19 확인 — schema에 `ProductAggregate`(`strategy` enum·`group_by`) 반영됨. "sync 보존" 전제는 literate-config 전환으로 소멸(`[config]` 블록이 verbatim 정본, `build_form_types.validate_schema`가 빌드 시 검증) |
 
 **P1 먼저인 이유:** 자기완결적(행 데이터·시트 무관), 위험 낮음, 레지스트리 패턴을 싸게 검증. 통과하면 그 틀을 축 B에 그대로 적용.
 

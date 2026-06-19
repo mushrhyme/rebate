@@ -68,6 +68,8 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
   me: () => request<User>('/api/auth/me'),
+  // 슬라이딩 갱신 — 유효한 토큰으로 만료시각이 새로워진 토큰을 받는다 (AuthContext가 주기 호출)
+  refresh: () => request<{ session_id: string }>('/api/auth/refresh', { method: 'POST' }),
   logout: () => request('/api/auth/logout', { method: 'POST' }),
   changePassword: (current_password: string, new_password: string) =>
     request<{ ok: boolean }>('/api/auth/change-password', {

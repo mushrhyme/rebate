@@ -301,4 +301,6 @@ PHASE3_TOOL_USE_ENABLED=false
 
 ---
 
-**Last Updated:** 2026-06-17 (Literate config 전환 — 룰 단일 진실 소스를 form_XX.md `[config]` 정본 블록으로. form_types.json은 `build_form_types.py` 생성물. 런타임 sync 블록 우선·Claude 폴백, 배포 가드·스킬·문서 갱신. 설계: docs/literate-config-migration.md)
+**Last Updated:** 2026-06-18 (Literate config **P3 완료 — 정본-only**. 산문→구조 LLM 추론·auto 블록·blockless 폴백을 표준 경로에서 영구 제거. sync는 `[config]` 블록 빌드만 하고, 블록 없으면 시끄럽게 실패. 신규 양식 첫 블록은 cold-start/create가 골격으로 부착, 규칙은 '규칙 반영'으로. form_03 정본 승격. 잔여: form_02. 설계: docs/literate-config-migration.md §P3)
+
+이전 (2026-06-17): Literate config 전환 — 룰 단일 진실 소스를 form_XX.md `[config]` 정본 블록으로. form_types.json은 `build_form_types.py` 생성물.

@@ -19,8 +19,6 @@ router = APIRouter(prefix="/api/v3/forms", tags=["forms"])
 log = logging.getLogger(__name__)
 
 _TBD_RE = re.compile(r"\bTBD\b")
-# 자동 생성 실행 규칙 섹션(블록에서 렌더) — prose-sha·블록 재작성 시 산문에서 제외한다.
-_AUTO_RULES_RE = re.compile(r"<!-- BEGIN auto-rules.*?<!-- END auto-rules -->\s*", re.DOTALL)
 
 # form_types.json read-merge-write 직렬화 — 동시 sync 시 늦게 끝난 쪽이
 # 먼저 끝난 쪽의 변경을 통째로 덮어쓰는 lost-update 방지
@@ -272,6 +270,10 @@ async def create_form(body: CreateFormBody, user: dict = Depends(get_current_use
         f"- 메모: {body.memo}\n"
     )
 
+    # 정본 블록 보장 — 템플릿에 [config] 골격이 있으면 그대로, 없으면(폴백 등) 최소 골격 부착.
+    if _extract_config_block(content, form_id) is None:
+        content = _append_skeleton_config_block(content, body.short_name)
+
     out_path = settings.form_definitions_dir / f"{form_id}.md"
     out_path.write_text(content, encoding="utf-8")
     return {"form_id": form_id, "content": content, "content_hash": _content_hash(content)}
@@ -325,7 +327,9 @@ async def cold_start_analyze(body: ColdStartBody, user: dict = Depends(get_curre
             "1. 이미지에서 직접 확인 가능한 항목(컬럼명, 계층 구조, 페이지 역할, 합계 키, 식별 패턴 등)은 정확하게 채웁니다.\n"
             "2. 업무규칙이 필요하거나 이미지에서 확인 불가능한 항목(タイプ 분류, NET 계산식, データソース 등)은 `TBD`로 표시합니다.\n"
             "3. 일본어 컬럼명은 이미지에서 정확히 읽어 원문 그대로 사용합니다.\n"
-            "4. 출력은 마크다운 코드블록(```) 없이 MD 파일 내용만 출력합니다. 다른 설명 없이 MD 내용만.\n\n"
+            "4. `## [config]` 실행 설정 블록은 **그대로 두거나 생략**합니다(JSON을 추측해 채우지 마세요). "
+            "실행 규칙은 이후 채팅 '규칙 반영'으로 확정합니다 — 백엔드가 최소 골격을 보장합니다.\n"
+            "5. 출력은 마크다운 코드블록(```) 없이 MD 파일 내용만 출력합니다. 다른 설명 없이 MD 내용만.\n\n"
             "---\n[템플릿 — 기본 정보 치환 완료]\n"
             f"{initial}"
         ),
@@ -342,6 +346,11 @@ async def cold_start_analyze(body: ColdStartBody, user: dict = Depends(get_curre
         return resp.content[0].text.strip()
 
     generated = await asyncio.to_thread(_call)
+    # 정본 블록 보장(결정적) — cold-start는 산문을 만들고, 실행 정본 블록은 최소 골격으로 직접 부착한다.
+    # sync는 block-first only(아래 _run_form_sync_inner) — 블록 없는 양식을 산문에서 자동 파싱하지 않는다.
+    # 실제 NET·교차검증 규칙은 이후 '규칙 반영'(apply_block_update)으로 채운다.
+    if _extract_config_block(generated, form_id) is None:
+        generated = _append_skeleton_config_block(generated, body.short_name)
     out_path = settings.form_definitions_dir / f"{form_id}.md"
     out_path.write_text(generated, encoding="utf-8")
     await asyncio.to_thread(mirror_form_md, form_id, generated)
@@ -384,108 +393,32 @@ def _extract_config_block(md_content: str, form_id: str):
     return extract_config_block(md_content, f"{form_id}.md")
 
 
-# ── 자동 [config] 블록 (UI 동기화로 산문→블록 생성, 개발자 손 안 타게) ──────────
-# 손으로 만든 정본 블록(form_01/04)과 구분: 자동 블록은 마커 주석을 달고 prose-sha로
-# 산문 변경을 감지한다. 산문이 바뀌면 재생성, 손 블록은 절대 산문에서 덮어쓰지 않는다.
+def _append_skeleton_config_block(md_content: str, label: str) -> str:
+    """산문 MD 끝에 [config] 정본 블록 *최소 골격*을 부착한다 (cold-start/create 부트스트랩).
 
-def _render_auto_rules(entry: dict) -> str:
-    """블록 → 사람이 읽는 실행 규칙 섹션(자동). scripts/render_form_prose 단일 출처."""
-    import sys
-    root = str(get_settings().workspace_root)
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    try:
-        from scripts.render_form_prose import render_rules
-        return render_rules(entry)
-    except Exception as e:
-        log.warning("[render] 실행 규칙 렌더 실패(생략): %s", e)
-        return ""
-
-
-def _prose_only(md_content: str) -> str:
-    """[config] 섹션·자동 규칙 섹션을 제거한 *손으로 쓴 산문* (prose-sha·블록 재작성 공통 기준).
-
-    자동 규칙 섹션은 블록 생성물이므로 산문 변경 감지(prose-sha)에서 제외한다.
+    블록 없는 양식이 sync에서 시끄럽게 실패하지 않도록, 모든 신규 양식이 블록을 갖고 태어나게 한다.
+    NET=仕切는 자리표시 — 실제 규칙은 채팅 '규칙 반영'(apply_block_update)으로 확정한다.
+    스키마 유효 최소집합(label + net expr)만 둔다.
     """
-    md = _AUTO_RULES_RE.sub("", md_content)
-    head = md.split("## [config]", 1)[0].rstrip()
-    if head.endswith("---"):
-        head = head[:-3].rstrip()
-    return head
-
-
-def _prose_sha(md_content: str) -> str:
-    """산문(블록 제외)의 해시 — 자동 블록이 최신 산문에서 나온 것인지 판정."""
-    return hashlib.sha256(_prose_only(md_content).encode("utf-8")).hexdigest()[:16]
-
-
-def _block_is_auto(md_content: str) -> tuple[bool, str | None]:
-    """[config] 섹션이 자동 생성 블록인지 + 기록된 prose-sha. (손 블록이면 (False, None))"""
-    idx = md_content.find("## [config]")
-    if idx == -1:
-        return False, None
-    section = md_content[idx:]
-    if "config-block: auto" not in section:
-        return False, None
-    m = re.search(r"prose-sha:\s*([0-9a-f]+)", section)
-    return True, (m.group(1) if m else None)
-
-
-def _write_auto_block(md_content: str, entry: dict, prose_sha: str) -> str:
-    """산문은 그대로 두고, 끝에 자동 [config] 블록(마커·prose-sha 포함)을 기록한 새 MD 반환."""
     import json as _json
-    block = _json.dumps(entry, ensure_ascii=False, indent=2)
-    prose = _prose_only(md_content)
-    auto = _render_auto_rules(entry)            # 블록 → 사람이 읽는 실행 규칙(자동)
-    auto_part = (auto.rstrip() + "\n\n") if auto else ""
-    config_section = (
-        "## [config] 실행 설정 (자동 생성 — 산문에서 빌드, 직접 편집 금지)\n\n"
-        f"<!-- config-block: auto; prose-sha: {prose_sha} -->\n"
-        "> 이 블록은 동기화 시 산문에서 자동 생성됩니다. 직접 고치지 말고 위 산문을 수정한 뒤 동기화하세요.\n\n"
+    skeleton = {"label": label, "net": {"formula_type": "expr", "expr": "shikiri"}}
+    block = _json.dumps(skeleton, ensure_ascii=False, indent=2)
+    section = (
+        "\n\n---\n\n"
+        "## [config] 실행 설정 (정본 · build_form_types.py가 읽음)\n\n"
+        "> 이 블록이 이 양식의 **유일한 실행 정본**이다. `config/form_types.json`은 여기서 빌드된 생성물.\n"
+        "> 아래는 **최소 골격**(NET=仕切 자리표시) — 실제 규칙은 채팅 **\"규칙 반영\"**으로 채운다.\n\n"
         f"```json\n{block}\n```\n"
     )
-    return prose + "\n\n---\n\n" + auto_part + config_section
+    return md_content.rstrip() + section
 
 
-async def _claude_parse_md_to_entry(form_id: str, md_content: str, current_entry: dict, settings) -> dict:
-    """레거시 폴백 — [config] 블록 없는 양식에서 Claude가 sync-form-config 규칙으로 산문→JSON 추론.
-
-    literate config 마이그레이션 완료 양식은 _extract_config_block가 결정적으로 처리하므로
-    이 경로를 타지 않는다. 미마이그레이션·신규(블록 미작성) 양식만 여기로 폴백한다.
-    """
-    import json as _json
-    skill_path = settings.workspace_root / ".claude" / "skills" / "sync-form-config" / "SKILL.md"
-    skill_content = skill_path.read_text(encoding="utf-8") if skill_path.exists() else ""
-    prompt = f"""아래 sync-form-config 파싱 규칙(Step 2 전체)에 따라 form 정의 MD를 분석하고,
-form_types.json의 해당 항목을 JSON으로만 반환하세요.
-JSON만 출력하세요 (마크다운 코드블록 없이, 설명 없이, 오직 JSON 객체만).
-Step 3(파일 저장)과 Step 4(변경 내역 보고)는 백엔드가 처리하므로 생략합니다.
-파싱할 수 없는 항목(⚠️)은 아래 [현재 form_types.json 항목]의 기존 값을 그대로 유지하세요.
-
-## sync-form-config 파싱 규칙
-{skill_content}
-
-## 현재 form_types.json 항목 (참고용 — 파싱 불가 항목은 이 값 유지)
-{_json.dumps(current_entry, ensure_ascii=False, indent=2)}
-
-## {form_id}.md
-{md_content}"""
-    client = _anthropic.Anthropic(api_key=settings.anthropic_api_key)
-
-    def _call() -> str:
-        resp = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return resp.content[0].text.strip()
-
-    raw = await asyncio.to_thread(_call)
-    raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
-    try:
-        return _json.loads(raw)
-    except Exception:
-        raise ValueError(f"Claude 응답 파싱 실패: {raw[:200]}")
+# ── 자동 [config] 블록 경로 제거(정본-only, P3 완주) ──────────────────────────
+# 산문→구조 LLM 추론(_claude_parse_md_to_entry)·auto 블록 기록(_write_auto_block)·
+# prose-sha 드리프트 추적은 모두 제거됐다. 블록이 유일한 정본이며, 신규 양식의 첫 블록은
+# cold-start/create가 골격으로 부착하고(위 _append_skeleton_config_block), 실제 규칙은
+# 채팅 '규칙 반영'(apply_block_update)으로 채운다. 사람이 읽는 실행 규칙 섹션은
+# build_form_types(scripts)가 빌드 시 단일 출처로 재렌더한다.
 
 
 # 런타임 post-sync 훅에서 무조건 안전한(가산적·결정적) safe 게이트만 자동수정한다.
@@ -630,20 +563,19 @@ async def _run_form_sync_inner(form_id: str) -> dict:
     form_types: dict = _json.loads(form_types_path.read_text(encoding="utf-8")) if form_types_path.exists() else {}
     current_entry = form_types.get(form_id, {})
 
-    # 정본 통일(step 3): [config] 블록이 있으면 *항상* 그것이 정본(block-first). 산문에서 재파싱하지 않는다.
-    #  · 모든 양식 동일 — "산문이 정본"인 양식은 더 이상 없다(드리프트·비일관 제거).
-    #  · 블록이 없을 때만(cold-start 직후) 레거시 산문 파싱으로 1회 블록을 만든다.
-    #  · 규칙 변경은 채팅→블록(apply_block_update) 경로로 한다 — 산문→구조 재파싱이 표준 경로에서 사라짐.
+    # 정본-only(P3 완주): [config] 블록이 *유일한* 정본. 동기화는 블록을 빌드만 한다.
+    #  · 산문→구조 LLM 추론은 표준 경로에서 영구 제거 — 블록 없는 양식을 조용히 자동생성하지 않는다.
+    #  · 블록 없으면 시끄럽게 실패 → 신규 양식의 첫 블록은 cold-start/create가 골격으로 부착,
+    #    실제 규칙은 채팅 '규칙 반영'(apply_block_update)으로 채운다.
+    #  · 무음 no-op·블록 타입 혼재(auto/blockless) 구조적 제거. 설계: docs/literate-config-migration.md
     block_entry = _extract_config_block(md_content, form_id)
-    cur_prose_sha = _prose_sha(md_content)
-    if block_entry is not None:
-        new_entry = block_entry
-        generated_block = False
-        log.info("[sync] %s [config] 블록 정본 사용 (block-first)", form_id)
-    else:
-        new_entry = await _claude_parse_md_to_entry(form_id, md_content, current_entry, settings)
-        generated_block = True
-        log.info("[sync] %s 블록 없음 → 산문 1회 파싱으로 블록 생성", form_id)
+    if block_entry is None:
+        raise ValueError(
+            f"{form_id}: [config] 정본 블록이 없습니다 — 동기화는 블록을 빌드만 합니다. "
+            f"cold-start 또는 채팅 '규칙 반영'으로 블록을 먼저 만드세요."
+        )
+    new_entry = block_entry
+    log.info("[sync] %s [config] 블록 정본 빌드 (block-first only)", form_id)
 
     # 병합·검증·쓰기만 직렬화 (Claude 폴백 시 호출은 위에서 이미 락 밖에서 끝남)
     async with _form_types_lock:
@@ -678,14 +610,7 @@ async def _run_form_sync_inner(form_id: str) -> dict:
         text = _json.dumps(dict(sorted(form_types.items())), ensure_ascii=False, indent=2)
         form_types_path.write_text(text, encoding="utf-8")
         await asyncio.to_thread(_mirror_to_s3, "config/form_types.json", text)
-
-        # 산문에서 (재)생성한 경우: 파싱·보존이 끝난 최종 구조를 [config] 자동 블록으로
-        # MD에 기록(정본화) — 다음 동기화부터는 결정적 경로. 개발자가 파일을 손대지 않는다.
-        if generated_block:
-            new_md = _write_auto_block(md_content, new_entry, cur_prose_sha)
-            md_path.write_text(new_md, encoding="utf-8")
-            await asyncio.to_thread(mirror_form_md, form_id, new_md)
-            log.info("[sync] %s [config] 자동 블록 기록 (prose-sha=%s)", form_id, cur_prose_sha)
+        # 산문→블록 자동기록 경로 제거(정본-only). 블록은 항상 이미 존재하므로 MD를 다시 쓰지 않는다.
 
     formula_changed = any(k in changes for k in _FORMULA_KEYS)
 
@@ -747,16 +672,14 @@ async def _md_to_config(form_id: str) -> tuple[dict, str]:
     if not md_path.exists():
         raise FileNotFoundError(f"양식 없음: {form_id}")
     md_content = md_path.read_text(encoding="utf-8")
-    ft_path = settings.workspace_root / "config" / "form_types.json"
-    form_types = _json.loads(ft_path.read_text(encoding="utf-8")) if ft_path.exists() else {}
-    current_entry = form_types.get(form_id, {})
 
-    # 정본 통일: 블록이 있으면 항상 그것이 정본(block-first). 없을 때만 산문 1회 파싱.
+    # 정본-only: 블록이 유일한 정본. 없으면 시끄럽게 실패(산문 파싱 fallback 없음).
     block_entry = _extract_config_block(md_content, form_id)
-    if block_entry is not None:
-        return block_entry, md_content
-    new_entry = await _claude_parse_md_to_entry(form_id, md_content, current_entry, settings)
-    return new_entry, md_content
+    if block_entry is None:
+        raise ValueError(
+            f"{form_id}: [config] 정본 블록 없음 — cold-start/채팅 '규칙 반영'으로 블록을 먼저 만드세요."
+        )
+    return block_entry, md_content
 
 
 def _recompute_sample(form_id: str, entry: dict, doc_id: str) -> dict:
