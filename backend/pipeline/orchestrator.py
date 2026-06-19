@@ -100,7 +100,19 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
             # ── OCR ──────────────────────────────────────────────
             await update_document_status(doc_id, "ocr")
             _t0 = time.monotonic()
-            await run_ocr(pdf_path, pages_dir)
+            try:
+                await run_ocr(pdf_path, pages_dir)
+            except Exception as exc:
+                # Azure OCR은 가장 흔한 외부 의존성 장애 지점이다.
+                # generic 'technical'로 뭉개지 않고 전용 error_type으로 운영자에게 식별 가능하게 보고.
+                log.exception("[%s] OCR 실패", doc_id)
+                await update_document_error(
+                    doc_id,
+                    error_type="ocr_failed",
+                    error_phase="OCR",
+                    message=f"OCR 처리에 실패했습니다 (Azure Document Intelligence): {exc}",
+                )
+                return
             await record_phase_timing(doc_id, "ocr", time.monotonic() - _t0)
             log.info("[%s] OCR 완료", doc_id)
 
@@ -121,7 +133,7 @@ async def run_pipeline(doc_id: str, pdf_path: Path, hatsu_month: str = "") -> No
                 await update_document_error(
                     doc_id,
                     error_type="unknown_form",
-                    error_phase="Phase 2",
+                    error_phase="양식 식별",
                     message="양식을 인식할 수 없습니다. form_definitions에 일치하는 양식이 없습니다.",
                 )
                 return
