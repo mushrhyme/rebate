@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 from ..core.config import get_settings
 from ..db.queries import accumulate_token_usage
+from ..tools.claude_retry import async_call_with_retry
 
 _SYSTEM_PROMPT_CACHE: tuple[float, str] | None = None  # (mtime, prompt)
 _MODEL = "claude-sonnet-4-6"
@@ -133,8 +134,14 @@ async def run_phase2(
                     logger.info("[%s] Phase 2 스트리밍 중 (%s, ~%d자 수신)", doc_id, page_desc, token_count)
             return await stream.get_final_message()
 
+    async def _consume_with_timeout():
+        # per-attempt 타임아웃 — 재시도 시 매 시도가 _PHASE2_TIMEOUT 안에 끝나야 한다.
+        # 재시도(429/5xx/connection)는 스트림을 처음부터 새로 연다.
+        return await asyncio.wait_for(_consume_stream(), timeout=_PHASE2_TIMEOUT)
+
     try:
-        message = await asyncio.wait_for(_consume_stream(), timeout=_PHASE2_TIMEOUT)
+        # asyncio.TimeoutError는 비재시도 대상 → 기존 '타임아웃=실패' 동작 보존
+        message = await async_call_with_retry(_consume_with_timeout)
     except asyncio.TimeoutError as exc:
         raise RuntimeError(
             f"[{doc_id}] Phase 2 스트리밍이 {_PHASE2_TIMEOUT}s 내 완료되지 않았습니다. "

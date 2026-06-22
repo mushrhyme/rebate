@@ -32,8 +32,8 @@ class _FailingFetchStore(SheetsStore):
         self._cache = {}
         self._fetch_errors = {}
 
-    def _fetch(self, tab: str) -> list[dict]:
-        # 실제 _fetch와 동일하게 에러를 기록하고 빈 결과 반환
+    def _fetch_raw(self, tab: str) -> list[list]:
+        # 실제 _fetch_raw와 동일하게 에러를 기록하고 빈 결과 반환
         self._fetch_errors[tab] = (time.monotonic(), "ConnectionError: boom")
         return []
 
@@ -47,7 +47,7 @@ class _EmptyTabStore(SheetsStore):
         self._cache = {}
         self._fetch_errors = {}
 
-    def _fetch(self, tab: str) -> list[dict]:
+    def _fetch_raw(self, tab: str) -> list[list]:
         return []  # 성공, 빈 탭 — 에러 기록 없음
 
 

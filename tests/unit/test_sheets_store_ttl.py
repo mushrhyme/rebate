@@ -29,11 +29,13 @@ class _FakeSheetsStore(SheetsStore):
         self._id = "test-spreadsheet"
         self._ttl = ttl_seconds
         self._cache = {}
+        self._fetch_errors = {}
         self.fetch_calls = 0
 
-    def _fetch(self, tab: str) -> list[dict]:
+    def _fetch_raw(self, tab: str) -> list[list]:
+        # 원본 행(헤더 + 데이터) 반환 — read_csv가 list[dict]로 변환
         self.fetch_calls += 1
-        return [{"call": str(self.fetch_calls)}]
+        return [["call"], [str(self.fetch_calls)]]
 
 
 def test_read_csv_uses_cache_within_ttl():

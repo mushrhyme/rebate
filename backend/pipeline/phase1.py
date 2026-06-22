@@ -12,6 +12,7 @@ import anthropic
 
 from ..core.config import get_settings
 from ..db.queries import accumulate_token_usage
+from ..tools.claude_retry import async_call_with_retry
 
 _SYSTEM_PROMPT_CACHE: tuple[float, str] | None = None  # (mtime, prompt)
 _MODEL = "claude-haiku-4-5-20251001"
@@ -192,8 +193,10 @@ async def run_phase1(doc_id: str, pages_dir: Path, output_dir: Path, run_id: str
     async def _convert(ocr_file: Path) -> tuple[Path, int, int, int, int, list[dict]]:
         page_num = int(ocr_file.name.split("_")[1].split(".")[0])
         ocr_text = await asyncio.to_thread(ocr_file.read_text, "utf-8")
-        async with _get_page_semaphore():
-            message = await asyncio.wait_for(
+        async def _do_create():
+            # per-attempt 타임아웃 — 재시도(429/5xx/connection) 시 매 시도에 _PAGE_TIMEOUT 적용.
+            # asyncio.TimeoutError는 비재시도 대상이라 기존 '타임아웃=실패' 의미를 보존한다.
+            return await asyncio.wait_for(
                 client.messages.create(
                     model=_MODEL,
                     max_tokens=16384,
@@ -202,6 +205,10 @@ async def run_phase1(doc_id: str, pages_dir: Path, output_dir: Path, run_id: str
                 ),
                 timeout=_PAGE_TIMEOUT,
             )
+
+        async with _get_page_semaphore():
+            # 슬롯을 쥔 채로 backoff — rate limit 중엔 동시 in-flight 요청이 자연히 줄어든다
+            message = await async_call_with_retry(_do_create)
         if message.stop_reason == "max_tokens":
             import logging
             logging.getLogger(__name__).warning(

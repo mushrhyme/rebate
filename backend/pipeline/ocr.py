@@ -1,16 +1,62 @@
 """Azure Document Intelligence (prebuilt-layout) — async Python implementation."""
 import asyncio
 import json
+import logging
+import os
+import random
 from pathlib import Path
 
 import httpx
 
 from ..core.config import get_settings
 
+log = logging.getLogger(__name__)
+
 MODEL = "prebuilt-layout"
 API_VER = "2024-11-30"
 POLL_INTERVAL = 3
 MAX_POLLS = 60
+
+# Azure 429/5xx/네트워크 일시 장애 backoff (동시 분석 시 throttle 대비)
+_OCR_MAX_RETRIES = int(os.getenv("OCR_MAX_RETRIES", "4"))
+_OCR_RETRY_BASE_DELAY = float(os.getenv("OCR_RETRY_BASE_DELAY", "2.0"))
+_OCR_RETRY_MAX_DELAY = float(os.getenv("OCR_RETRY_MAX_DELAY", "30.0"))
+_OCR_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+
+async def _send_with_retry(send, *, what: str) -> httpx.Response:
+    """send() → httpx.Response 호출 + raise_for_status.
+
+    429/5xx 응답과 일시적 네트워크 오류(timeout·connection)는 Retry-After 우선
+    exponential backoff로 재시도한다. 그 외 4xx 등은 즉시 raise.
+    send는 매 시도마다 요청을 새로 보내는 팩토리여야 한다 (httpx Response는 1회용).
+    """
+    delay = _OCR_RETRY_BASE_DELAY
+    for attempt in range(_OCR_MAX_RETRIES + 1):
+        try:
+            resp = await send()
+            resp.raise_for_status()
+            return resp
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status not in _OCR_RETRYABLE_STATUS or attempt == _OCR_MAX_RETRIES:
+                raise
+            ra = e.response.headers.get("Retry-After")
+            try:
+                wait = float(ra) if ra else delay
+            except (TypeError, ValueError):
+                wait = delay
+        except httpx.TransportError as e:
+            # timeout·connection·protocol 등 일시 네트워크 오류
+            if attempt == _OCR_MAX_RETRIES:
+                raise
+            wait = delay
+            log.warning("OCR %s 네트워크 오류 — 재시도: %s", what, e)
+        wait = min(wait, _OCR_RETRY_MAX_DELAY) + random.uniform(0, 0.5)
+        log.warning("OCR %s 일시 실패 → %.1fs 후 재시도 (%d/%d)",
+                    what, wait, attempt + 1, _OCR_MAX_RETRIES)
+        await asyncio.sleep(wait)
+        delay = min(delay * 2, _OCR_RETRY_MAX_DELAY)
 
 
 async def run_ocr(pdf_path: Path, pages_dir: Path) -> None:
@@ -41,16 +87,18 @@ async def run_ocr(pdf_path: Path, pages_dir: Path) -> None:
     pdf_bytes = await asyncio.to_thread(pdf_path.read_bytes)
 
     async with httpx.AsyncClient(timeout=60) as client:
-        # Step 1 — submit
-        resp = await client.post(
-            analyze_url,
-            content=pdf_bytes,
-            headers={
-                "Ocp-Apim-Subscription-Key": key,
-                "Content-Type": "application/pdf",
-            },
+        # Step 1 — submit (429/5xx/네트워크 일시 장애 backoff)
+        resp = await _send_with_retry(
+            lambda: client.post(
+                analyze_url,
+                content=pdf_bytes,
+                headers={
+                    "Ocp-Apim-Subscription-Key": key,
+                    "Content-Type": "application/pdf",
+                },
+            ),
+            what="submit",
         )
-        resp.raise_for_status()
         operation_url = resp.headers.get("operation-location")
         if not operation_url:
             raise RuntimeError("operation-location 헤더 없음 — Azure 응답 확인 필요")
@@ -59,10 +107,12 @@ async def run_ocr(pdf_path: Path, pages_dir: Path) -> None:
         result_json: dict = {}
         for _ in range(MAX_POLLS):
             await asyncio.sleep(POLL_INTERVAL)
-            poll = await client.get(
-                operation_url, headers={"Ocp-Apim-Subscription-Key": key}
+            poll = await _send_with_retry(
+                lambda: client.get(
+                    operation_url, headers={"Ocp-Apim-Subscription-Key": key}
+                ),
+                what="poll",
             )
-            poll.raise_for_status()
             result_json = poll.json()
             status = result_json.get("status", "")
             if status == "succeeded":
