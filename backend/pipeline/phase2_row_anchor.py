@@ -82,6 +82,10 @@ def build_row_anchors(row_anchor_config: dict, output_dir: Path) -> list[dict]:
     block_includes_product = row_anchor_config.get("block_includes_product", False)
     product_cell           = row_anchor_config.get("product_cell", 1)
     row_id_cell            = row_anchor_config.get("row_id_cell")
+    # 페이지마다 표 헤더의 선행 컬럼 수가 다를 수 있어(새 支店 시작 페이지는
+    # 計上場所·入出荷支店·入出荷センター가 추가됨) 상품/지점 컬럼을 헤더에서 동적 탐지한다.
+    product_header         = row_anchor_config.get("product_header", "得意先又は商品")
+    subgroup_header        = row_anchor_config.get("subgroup_header", "入出荷支店")
 
     anchors: list[dict] = []
     current_subgroup:  str        = ""
@@ -112,11 +116,26 @@ def build_row_anchors(row_anchor_config: dict, output_dir: Path) -> list[dict]:
         # 페이지 경계에서 블록 리셋 — 이전 페이지 상태가 다음 페이지 헤더 행을 오염하는 것 방지
         current_block = None
         row_idx = 0
+        # 페이지별 컬럼 위치 — 표 헤더에서 동적 탐지 (없으면 설정 기본값)
+        page_product_cell  = product_cell
+        page_subgroup_cell = None
 
         for line in content.splitlines():
             if '|' not in line:
                 continue
             cells = [c.strip() for c in line.split('|')]
+
+            # 표 헤더 행: 상품·입출하지점 컬럼 위치를 동적 매핑
+            if product_header in cells:
+                page_product_cell  = cells.index(product_header)
+                page_subgroup_cell = cells.index(subgroup_header) if subgroup_header in cells else None
+                continue
+
+            # 컬럼형 입출하지점(넓은 헤더 페이지): 셀 값으로 서브그룹 갱신 (빈칸이면 직전 값 유지)
+            if page_subgroup_cell is not None and len(cells) > page_subgroup_cell:
+                sg = cells[page_subgroup_cell]
+                if sg and sg != subgroup_header and not re_total.search(line):
+                    current_subgroup = sg
 
             # 서브그룹 헤더 감지 (예: 入出荷支店)
             if re_subgroup:
@@ -141,7 +160,7 @@ def build_row_anchors(row_anchor_config: dict, output_dir: Path) -> list[dict]:
             if current_block is None:
                 continue
 
-            if not _is_product_row(line, cells, header_kws, re_total, product_cell):
+            if not _is_product_row(line, cells, header_kws, re_total, page_product_cell):
                 continue
 
             if row_id_cell is not None and len(cells) > row_id_cell and cells[row_id_cell]:
@@ -158,6 +177,7 @@ def build_row_anchors(row_anchor_config: dict, output_dir: Path) -> list[dict]:
                 'raw_row':             line.strip(),
                 'amount_hint':         _extract_amount_hint(cells),
                 'row_index_in_kanri':  row_idx,
+                'product_cell':        page_product_cell,
             })
             row_idx += 1
 

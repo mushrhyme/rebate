@@ -89,6 +89,20 @@ async def validate_session(user: dict = Depends(get_current_user)):
     return {"valid": True, "user": user}
 
 
+@router.post("/refresh")
+async def refresh(user: dict = Depends(get_current_user)):
+    """슬라이딩 갱신 — 아직 유효한 토큰으로 만료시각이 새로워진 토큰을 재발급한다.
+
+    활동 중인 사용자가 고정 만료(jwt_expire_hours)로 작업 도중 끊기지 않게 한다.
+    프론트가 주기적으로(그리고 탭 포커스 시) 호출 → 앱을 열고 쓰는 동안 세션이 유지된다.
+    그 사이 비활성화·삭제된 사용자는 갱신을 거부(즉시 세션 만료 처리)."""
+    users = _read_users()
+    target = _find_user(users, user_id=user["user_id"])
+    if not target or not target.get("is_active", True):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="세션 만료")
+    return {"session_id": _issue_token(target)}
+
+
 @router.post("/change-password")
 async def change_password(body: ChangePasswordRequest, user: dict = Depends(get_current_user)):
     users = _read_users()

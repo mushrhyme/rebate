@@ -17,6 +17,7 @@
       ]
     },
     "bara_source": "by_unit",
+    "case_unit": "CS",
     "qty_field": [
       "数量",
       "請求計上数量"
@@ -92,6 +93,53 @@
       "taxex_10": "販促金請求 10%対象 税抜"
     }
   },
+  "form_03": {
+    "form_id": "form_03",
+    "label": "旭食品/ヤマキ",
+    "net": {
+      "formula_type": "expr",
+      "expr": "shikiri - c1",
+      "vars": {
+        "c1": "条件"
+      }
+    },
+    "preprocess": [],
+    "condition_display": {
+      "mode": "keesu",
+      "c1": "条件",
+      "c2": null
+    },
+    "bara_source": "column:数量_バラ",
+    "cover_totals": {},
+    "summary": "standard",
+    "cross_validation": [
+      {
+        "type": "cover_honbai_vs_detail",
+        "cover_key": "今回請求額税抜",
+        "label": "Cover(今回請求額税抜) vs Detail"
+      },
+      {
+        "type": "cover_honbai_vs_detail",
+        "cover_key": "今回請求額消費税等",
+        "label": "Cover(今回請求額消費税等) vs Detail"
+      }
+    ],
+    "bundle_detection": {
+      "cover_required": [
+        "請求書"
+      ],
+      "cover_required_any": [
+        "前回ご請求額",
+        "ご入金額",
+        "当月ご請求額"
+      ],
+      "skip_markers": [
+        "条件請求明細書",
+        "請求確認書",
+        "条件・経費 請求NO一覧表"
+      ]
+    }
+  },
   "form_04": {
     "label": "日本アクセス 販売促進金請求書 (CVS)",
     "bara_source": "column:数量",
@@ -114,11 +162,20 @@
       "breakdown_key": "入出荷支店別"
     },
     "product_aggregate": {
+      "strategy": "subset_subtract",
       "base_condition": "定番条件",
       "qty_field": "数量",
       "unit_field": "未収条件",
       "amount_field": "金額"
     },
+    "dist_overrides": [
+      {
+        "when": {
+          "jisho": "CVS営業部"
+        },
+        "pick_candidate_name_contains": "広域リテール"
+      }
+    ],
     "cross_validation": [
       {
         "type": "cover_honbai_vs_detail",

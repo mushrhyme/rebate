@@ -9,5 +9,7 @@
   "bracket_rates": {
     "8": 0.08,
     "10": 0.10
-  }
+  },
+  "bracket_threshold": 10,
+  "consumption_tax_rounding": "floor"
 }

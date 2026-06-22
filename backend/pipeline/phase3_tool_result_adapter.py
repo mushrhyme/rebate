@@ -251,8 +251,14 @@ def convert_tool_use_result_to_phase3_output(
     phase2_result: dict,
     retailer_decisions: list[RetailerMappingDecision],
     product_decisions: list[ProductMappingDecision],
+    confirmed_dist: dict[tuple[str, str], dict] | None = None,
+    dist_group_field: str | None = None,
 ) -> tuple[dict, list[dict]]:
     """Tool Use 매핑 결정 목록을 phase3 result / pending 구조로 변환한다.
+
+    판매처(dist): confirmed_dist({(소매처, jisho): {dist_code, dist_name}})가 제공되면
+    item별 jisho 값으로 dist를 적용한다(같은 소매처라도 jisho별로 다른 판매처).
+    미제공 시 RetailerMappingDecision.dist_code(소매처 단위)로 폴백.
 
     Side-effect 금지:
       - confirm_mapping() 호출 없음
@@ -322,7 +328,10 @@ def convert_tool_use_result_to_phase3_output(
 
     # ── 4. 아이템에 코드 적용 (legacy와 동일 로직) ────────────────────────────
     items = phase2_result.get("items", [])
-    items_out = _apply_mappings(items, confirmed_retailers, confirmed_products)
+    items_out = _apply_mappings(
+        items, confirmed_retailers, confirmed_products,
+        confirmed_dist, dist_group_field,
+    )
 
     # ── 5. result dict 조립 (legacy run_phase3()와 동일한 key 구조) ───────────
     result: dict[str, Any] = {
@@ -335,5 +344,10 @@ def convert_tool_use_result_to_phase3_output(
         "items":               items_out,
         "cover_totals":        _extract_cover_totals(phase2_result),
     }
+    if confirmed_dist is not None:
+        result["confirmed_dist"] = [
+            {"customer": _c, "jisho": _j, **_v}
+            for (_c, _j), _v in confirmed_dist.items()
+        ]
 
     return result, pending

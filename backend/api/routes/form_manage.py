@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 
 import anthropic
@@ -17,6 +18,8 @@ from datetime import datetime, timezone
 from ...core.auth import get_current_user
 from ...core.config import get_settings
 from ...core.s3_store import read_json, write_json
+
+_log = logging.getLogger(__name__)
 
 
 def _get_form_edit_log(form_id: str) -> list[dict]:
@@ -135,6 +138,173 @@ def _to_claude_messages(messages: list[ChatMessage]) -> list[dict]:
     return result
 
 
+# 단일 호출(방법 C·1-call): Claude가 route_and_build 도구로 (1) 블록 변경 필요 여부를 판단하고
+# (2) 필요하면 전체 블록 JSON을 함께 낸다. 결정적 코드는 boolean으로 라우팅하고, block은 구조가
+# 보장되므로 자유텍스트 정규식 추출이 필요 없다. 편향: 애매하면 true(회계 — 누락 < 과잉검토).
+_APPLY_RULES_SYSTEM_TMPL = """\
+당신은 form_XX.md의 [config] 실행 블록(JSON)을 관리하는 전문가입니다.
+실행 규칙(NET 수식·교차검증·집계·전처리)의 **정본은 이 블록**이며, 사람이 읽는 문장은 블록에서 자동 생성됩니다.
+
+현재 {form_id} 블록:
+<block>
+{block_json}
+</block>
+
+## 할 일 — 반드시 route_and_build 도구를 호출해 결과를 내세요.
+대화에서 **사용자가 합의한 변경**을 보고:
+
+1. `requires_block_change` 판단:
+   - 아래 [블록이 다루는 것]을 바꾸는 합의 → `true`
+   - [블록 밖]이거나 설명·산문·추출 규칙 변경뿐 → `false`
+   - **애매하면 `true`** (회계 시스템 — 진짜 규칙 변경을 놓치는 것보다 한 번 더 검토가 안전).
+
+2. `requires_block_change=true` 이면 `block`에 **변경을 반영한 전체 블록 JSON**을 넣으세요:
+   - 합의된 변경만 반영. 회계 규칙을 임의로 추측하지 않습니다.
+   - **허용 어휘 밖**(새 교차검증 종류·연산·집계 전략·전처리 op)이 필요하면 그 부분은 **기존 값을 유지**하고
+     만들지 마세요. 그런 변경은 개발(T3)이 필요하다고 `reason`에 적습니다.
+   - `false`이면 `block`은 생략합니다.
+
+## [블록이 다루는 것]
+- NET 계산 수식·변수 (formula/expr/vars/computed_vars)
+- 교차검증 종류·비교 대상 (cross_validation)
+- 집계 전략·묶음 기준 (product_aggregate, group_by)
+- 전처리 연산 (preprocess, 예: divide_by_100)
+- 판매처 override 등 블록에 표현되는 실행 설정
+
+## [블록 밖 — 산문으로 충분, requires_block_change=false]
+- 추출 컬럼 설명·추가, OCR 정규화(÷100·자릿수 분리 등 **추출 단계** 규칙)
+- Phase 2 타입 분류 설명, 함정 케이스, 식별 패턴, 문서 구조 등 서술
+- 단순 설명·주석·근거·메모 추가
+
+## 허용 어휘 (block 작성 시)
+- NET 수식 연산: 산술 `+` `-` `*` `/` 괄호, 비교 `<` `<=` `>` `>=` `==` `!=`, 논리 `and` `or` `not`,
+  조건식 `A if 조건 else B`. 변수는 `shikiri`(仕切)·`teiban`(定番)·블록의 vars/computed_vars만.
+  (함수 호출·외부 참조는 금지 — 결정적 수식만.) 예: `(c1 + c2) if c1 + c2 > 0 else fallback`
+- 교차검증 type: {cv_types}
+- 집계 전략: {strategies}
+- 집계 방식(product_aggregate): `relationship`=`subset`(추가조건이 기준조건의 부분집합·차감 분해) 또는
+  `independent`(조건들이 독립·차감 없이 나열). `group_by`로 묶음 기준 변경 가능(예: `["jisho","customer","product"]`).
+  완전히 새로운 분해 알고리즘은 어휘 밖(개발 T3).
+- 전처리(preprocess): 각 항목은 반드시 `{{"field": "컬럼명", "op": "divide_by_100"}}` 형태.
+  `op`는 `divide_by_100`만 허용. 선택적으로 `"guard_fields": ["컬럼명", ...]`. 그 외 연산은 어휘 밖(개발 T3).\
+"""
+
+_APPLY_TOOL = {
+    "name": "route_and_build",
+    "description": "이 대화가 [config] 실행 블록을 바꿔야 하는지 판단하고, 바꿔야 하면 변경을 반영한 전체 블록 JSON을 함께 낸다.",
+    "input_schema": {
+        "type": "object",
+        "required": ["requires_block_change", "reason"],
+        "properties": {
+            "requires_block_change": {
+                "type": "boolean",
+                "description": "블록(NET 수식·교차검증·집계·전처리 등)을 실제로 바꿔야 하면 true. 산문·추출 규칙·설명뿐이면 false. 애매하면 true.",
+            },
+            "reason": {"type": "string", "description": "판단 근거 한 줄(한국어). 어휘 밖이라 일부 유지한 경우 그 사실도 적는다."},
+            "block": {
+                "type": "object",
+                "description": "requires_block_change=true일 때만: 변경을 반영한 전체 [config] 블록 JSON 객체. false면 생략.",
+            },
+        },
+    },
+}
+
+
+@router.post("/apply-rules")
+async def apply_rules(body: ChatRequest, user: dict = Depends(get_current_user)):
+    """채팅 자연어 → [config] 블록을 **직접** 갱신 (step 3, 산문→구조 재파싱 제거).
+
+    Claude가 (현재 블록 + 허용 어휘 + 대화)로 새 블록 JSON을 만들고,
+    forms.apply_block_update가 스키마 검증 후 블록 교체 + build로 json·문장 재생성한다.
+    """
+    settings = get_settings()
+    form_path = settings.form_definitions_dir / f"{body.form_id}.md"
+    if not form_path.exists():
+        raise HTTPException(status_code=404, detail="양식 없음")
+
+    # 현재 블록 + 엔진 허용 어휘 로드 (verify_form_wiring 단일 출처)
+    import sys
+    root = str(settings.workspace_root)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from scripts.build_form_types import extract_config_block
+    from scripts.verify_form_wiring import engine_cross_validation_types, AGGREGATE_STRATEGIES
+
+    md_content = form_path.read_text(encoding="utf-8")
+    cur_block = extract_config_block(md_content, f"{body.form_id}.md") or {}
+    system = _APPLY_RULES_SYSTEM_TMPL.format(
+        form_id=body.form_id,
+        block_json=json.dumps(cur_block, ensure_ascii=False, indent=2),
+        cv_types=", ".join(sorted(engine_cross_validation_types())),
+        strategies=", ".join(sorted(AGGREGATE_STRATEGIES)),
+    )
+
+    # Claude는 대화가 user 메시지로 끝나야 한다(prefill 미지원 모델). "규칙 반영" 버튼은
+    # 보통 Claude 제안(assistant)으로 끝난 대화에서 눌리므로, **중립** user 턴을 덧붙인다.
+    claude_messages = _to_claude_messages(body.messages)
+    if not claude_messages or claude_messages[-1]["role"] != "user":
+        claude_messages.append({
+            "role": "user",
+            "content": "위 대화에서 사용자가 합의한 내용을 확인해 주세요.",
+        })
+
+    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+
+    # ── 단일 호출(방법 C·1-call): route_and_build 도구가 라우팅 판단 + (필요 시) 전체 블록을 한 번에 낸다.
+    #    boolean으로만 라우팅하고, block은 tool이 구조를 보장하므로 정규식 추출이 필요 없다.
+    try:
+        resp = await client.messages.create(
+            model=_MODEL, max_tokens=4096, system=system,
+            messages=claude_messages,
+            tools=[_APPLY_TOOL],
+            tool_choice={"type": "tool", "name": "route_and_build"},
+        )
+        decision = next(
+            (b.input for b in resp.content if getattr(b, "type", "") == "tool_use"),
+            None,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Claude 호출 실패 — HTML 500으로 새지 않게 의미 있는 JSON으로 surface. 산문 저장은 이미 끝났다.
+        _log.exception("[apply-rules] Claude 호출 실패 (%s)", body.form_id)
+        raise HTTPException(status_code=502, detail=f"Claude 호출 실패: {type(e).__name__}: {e}")
+
+    if not decision:
+        raise HTTPException(status_code=502, detail="규칙 판단 응답이 비어 있습니다.")
+    reason = (decision.get("reason") or "").strip()
+
+    # ── 라우팅: false → 블록을 아예 건드리지 않음 ("규칙 변경 없음"). 스키마 위반 가능성 0.
+    if not decision.get("requires_block_change"):
+        return {"ok": True, "form_id": body.form_id, "unchanged": True,
+                "note": reason or "산문/추출 규칙 변경으로 판단되어 블록을 변경하지 않았습니다.", "wiring": None}
+
+    # ── true: 블록을 내야 한다(true 편향). 못 냈으면 무음 누락 대신 시끄럽게 실패.
+    new_block = decision.get("block")
+    if not isinstance(new_block, dict) or not new_block:
+        raise HTTPException(
+            status_code=422,
+            detail=f"블록 변경이 필요하다고 판단했으나 블록을 생성하지 못했습니다. (사유: {reason or '미상'})",
+        )
+
+    # 내용이 동일 → 파일 쓰지 않고 안내만 (어휘 밖 거부 등으로 기존 값 유지된 경우)
+    if new_block == cur_block:
+        return {"ok": True, "form_id": body.form_id, "unchanged": True, "note": reason, "wiring": None}
+
+    from .forms import apply_block_update
+    try:
+        result = await asyncio.to_thread(apply_block_update, body.form_id, new_block)
+    except ValueError as e:        # 스키마 위반
+        raise HTTPException(status_code=400, detail=f"스키마 검증 실패(반영 안 함): {e}")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="양식 없음")
+    except Exception as e:
+        # BuildError·RuntimeError 등 — 무음 500(HTML) 대신 의미 있는 JSON으로 surface.
+        _log.exception("[apply-rules] 블록 반영 실패 (%s)", body.form_id)
+        raise HTTPException(status_code=500, detail=f"규칙 반영 중 오류: {type(e).__name__}: {e}")
+    return {**result, "note": reason}
+
+
 @router.post("/chat")
 async def chat(body: ChatRequest, user: dict = Depends(get_current_user)):
     """변경 제안을 스트리밍으로 반환합니다."""
@@ -220,6 +390,27 @@ async def apply(body: ChatRequest, user: dict = Depends(get_current_user)):
                 end = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
                 updated = "\n".join(lines[1:end])
 
+            # 정본 보호(step 3): 산문 편집은 [config] 블록을 절대 바꾸지 않는다.
+            # Claude의 전체 재생성이 블록을 변형·누락했어도 원본 블록을 강제 복원한다.
+            # 실행 규칙 변경은 /apply-rules(채팅→블록) 경로로만.
+            try:
+                import sys as _sys
+                _root = str(settings.workspace_root)
+                if _root not in _sys.path:
+                    _sys.path.insert(0, _root)
+                from scripts.build_form_types import (
+                    extract_config_block as _xb, replace_config_block as _rb,
+                )
+                _old = _xb(current_content, f"{body.form_id}.md")
+                if _old is not None:
+                    if _xb(updated, f"{body.form_id}.md") is not None:
+                        updated = _rb(updated, _old, f"{body.form_id}.md")
+                    else:
+                        updated = (updated.rstrip() + "\n\n---\n\n## [config] 실행 설정\n\n```json\n"
+                                   + json.dumps(_old, ensure_ascii=False, indent=2) + "\n```\n")
+            except Exception:
+                pass
+
             form_path.with_suffix(".md.bak").write_text(current_content, encoding="utf-8")
             form_path.write_text(updated, encoding="utf-8")
 
@@ -236,13 +427,14 @@ async def apply(body: ChatRequest, user: dict = Depends(get_current_user)):
                 "saved_at": datetime.now(timezone.utc).isoformat(),
             })
 
-            # MD 저장 → S3 미러 (배포 가드 기준점) + form_types.json 자동 동기화
-            from .forms import mirror_form_md, schedule_auto_sync
+            # MD 저장 → S3 미러 (배포 가드 기준점).
+            # config(form_types.json) 반영은 자동이 아니라 '미리보기 확인 후'로 게이트한다
+            # (POST /forms/{id}/preview → /commit). 현업이 결과를 보고 승인해야 반영됨.
+            from .forms import mirror_form_md
             await asyncio.to_thread(mirror_form_md, body.form_id, updated)
-            schedule_auto_sync(body.form_id)
 
             tbd_count = len(re.findall(r"\bTBD\b", updated))
-            yield f"data: {json.dumps({'type': 'done', 'tbd_count': tbd_count, 'content_hash': new_hash, 'auto_sync': 'started'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'tbd_count': tbd_count, 'content_hash': new_hash, 'auto_sync': 'gated'})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 

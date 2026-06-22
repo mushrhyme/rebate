@@ -778,18 +778,20 @@ class TestRealClaudeRetailerProductionPath:
         def _resp(stop, *blocks):
             r = MagicMock(); r.stop_reason = stop; r.content = list(blocks); return r
 
-        # Claude: lookup → confirm(R001) → end_turn
+        # Claude: lookup(スターバックス) → confirm(RET001) → end_turn
+        # RET001은 lookup_retailer가 スターバックス 캐시 히트로 반환하는 코드이므로,
+        # '후보 외 코드 거부' 가드(lookup이 반환한 코드만 확정 허용)를 통과한다.
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(side_effect=[
-            _resp("tool_use", _tb("t1", "lookup_retailer", {"ocr_name": "テスト店"})),
+            _resp("tool_use", _tb("t1", "lookup_retailer", {"ocr_name": "スターバックス"})),
             _resp("tool_use", _tb("t2", "confirm_mapping", {
-                "mapping_type": "retailer", "ocr_name": "テスト店", "confirmed_code": "R001",
+                "mapping_type": "retailer", "ocr_name": "スターバックス", "confirmed_code": "RET001",
             })),
             _resp("end_turn", MagicMock(type="text", text="完了")),
         ])
 
         result = await run_retailer_mapping_experiment(
-            ocr_name="テスト店",
+            ocr_name="スターバックス",
             form_id="form_01",
             mappings_dir=mappings,
             form_definitions_dir=form_defs,
@@ -799,15 +801,17 @@ class TestRealClaudeRetailerProductionPath:
         )
 
         # decided_code 캡처 확인
-        assert result.decided_code == "R001", \
+        assert result.decided_code == "RET001", \
             f"decided_code가 캡처되지 않음: {result.decided_code!r}"
-        assert result.confirmed_code == "R001", \
+        assert result.confirmed_code == "RET001", \
             f"confirmed_code가 None임: {result.confirmed_code!r}"
 
-        # CSV에 새 행이 추가되지 않아야 함 (allow_side_effects=False → confirm_mapping 실행 안 됨)
+        # allow_side_effects=False → confirm_mapping이 CSV에 쓰지 않음.
+        # スターバックス는 픽스처에 이미 1행 존재 → 중복 추가되지 않아야 한다 (여전히 1행).
         rows_after = _read_csv_simple(mappings / "ocr_retailer.csv") if (mappings / "ocr_retailer.csv").exists() else []
-        assert not any(r.get("ocr_name") == "テスト店" for r in rows_after), \
-               "allow_side_effects=False인데 테スト店이 ocr_retailer.csv에 기록됨"
+        sb_rows = [r for r in rows_after if r.get("ocr_name") == "スターバックス"]
+        assert len(sb_rows) == 1, \
+               f"allow_side_effects=False인데 スターバックス 행이 중복 추가됨: {len(sb_rows)}행"
 
 
 def _read_csv_simple(path) -> list:

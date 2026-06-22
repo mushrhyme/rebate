@@ -65,6 +65,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('storage', onStorage)
   }, [])
 
+  // 슬라이딩 세션 갱신 — 로그인 상태에서 주기적으로(+탭 포커스/진입 시) 토큰을 재발급받아
+  // 작업 도중 고정 만료로 세션이 끊기는 것을 막는다. 앱을 열고 활동하는 한 세션이 유지된다.
+  useEffect(() => {
+    if (!user) return
+    const REFRESH_MS = 15 * 60 * 1000  // 15분 — 만료(jwt_expire_hours, 기본 24h)보다 충분히 짧게
+    const doRefresh = async () => {
+      if (!localStorage.getItem('session_id')) return
+      try {
+        const res = await api.refresh()
+        if (res?.session_id) localStorage.setItem('session_id', res.session_id)
+      } catch {
+        // 401이면 client.ts가 세션 제거·로그인 이동을 처리한다. 일시 오류는 다음 주기에 재시도.
+      }
+    }
+    doRefresh()  // 진입 즉시 한 번 — 만료가 임박한 토큰도 바로 연장
+    const id = window.setInterval(doRefresh, REFRESH_MS)
+    const onFocus = () => doRefresh()
+    window.addEventListener('focus', onFocus)
+    return () => { window.clearInterval(id); window.removeEventListener('focus', onFocus) }
+  }, [user])
+
   async function login(username: string, password: string) {
     const res = await api.login(username, password)
     if (!res.user) {

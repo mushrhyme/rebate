@@ -1,0 +1,18 @@
+{
+  "_comment": "제품·소매처 이름 매칭 튜닝 파라미터. backend/tools/mapping.py가 읽음. 현업이 조정 가능한 매핑 영역(역할분리). 파일/키 누락 시 코드 기본값으로 폴백.",
+  "legal_markers": [
+    "株式会社", "有限会社", "合同会社",
+    "(株)", "(有)", "(合)"
+  ],
+  "manufacturer_prefixes": ["農心ジャパン", "農心", "Nongshim", "NONGSHIM"],
+  "volume": {
+    "boost": 0.15,
+    "penalty": 0.20,
+    "match_tolerance": 0.5
+  },
+  "score": {
+    "seq_weight": 0.6,
+    "jaccard_weight": 0.4,
+    "cutoff": 0.3
+  }
+}

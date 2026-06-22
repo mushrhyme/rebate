@@ -68,7 +68,14 @@ export function ColdStart() {
       const pdfjsLib = await import('pdfjs-dist')
       pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl
       const arrayBuffer = await file.arrayBuffer()
-      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
+      // cMap·standard_fonts 경로를 넘겨야 일본어(CID 키) 폰트 글자가 렌더링된다.
+      // 미지정 시 표 테두리만 그려지고 본문 글자가 누락됨 (vite.config pdfjsAssets가 /pdfjs/ 서빙)
+      const pdf = await pdfjsLib.getDocument({
+        data: arrayBuffer,
+        cMapUrl: '/pdfjs/cmaps/',
+        cMapPacked: true,
+        standardFontDataUrl: '/pdfjs/standard_fonts/',
+      }).promise
       pdfDocRef.current = pdf
 
       for (let i = 1; i <= pdf.numPages; i++) {

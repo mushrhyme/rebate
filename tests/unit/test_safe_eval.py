@@ -64,10 +64,55 @@ class TestSafeEval:
         with pytest.raises(Exception):
             _safe_eval("__import__('os').system('ls')", {})
 
-    def test_comparison_blocked(self):
+    def test_attribute_access_blocked(self):
         _safe_eval = _import_safe_eval()
         with pytest.raises(Exception):
-            _safe_eval("c1 > 0", {"c1": 10.0})
+            _safe_eval("c1.__class__", {"c1": 10.0})
+
+
+# ── 조건 분기 DSL: 비교·논리·조건식 ───────────────────────────────────────────
+class TestConditionalDSL:
+    def test_comparison_returns_bool_as_float(self):
+        _safe_eval = _import_safe_eval()
+        assert _safe_eval("c1 > 0", {"c1": 10.0}) == 1.0
+        assert _safe_eval("c1 > 0", {"c1": -3.0}) == 0.0
+
+    def test_ternary_true_branch(self):
+        _safe_eval = _import_safe_eval()
+        # joken > 0 → shikiri - joken
+        assert _safe_eval("(shikiri - joken) if joken > 0 else shikiri",
+                          {"shikiri": 200.0, "joken": 30.0}) == 170.0
+
+    def test_ternary_false_branch(self):
+        _safe_eval = _import_safe_eval()
+        assert _safe_eval("(shikiri - joken) if joken > 0 else shikiri",
+                          {"shikiri": 200.0, "joken": 0.0}) == 200.0
+
+    def test_ternary_guards_division_by_zero(self):
+        """미택 가지는 평가되지 않으므로 분모 0이어도 0나누기가 발생하지 않는다."""
+        _safe_eval = _import_safe_eval()
+        assert _safe_eval("(a / b) if b != 0 else 0",
+                          {"a": 100.0, "b": 0.0}) == 0.0
+
+    def test_boolean_and_or(self):
+        _safe_eval = _import_safe_eval()
+        assert _safe_eval("1 if (a > 0 and b > 0) else 0", {"a": 5.0, "b": 5.0}) == 1.0
+        assert _safe_eval("1 if (a > 0 and b > 0) else 0", {"a": 5.0, "b": -1.0}) == 0.0
+        assert _safe_eval("1 if (a > 0 or b > 0) else 0", {"a": -1.0, "b": 5.0}) == 1.0
+
+    def test_not_operator(self):
+        _safe_eval = _import_safe_eval()
+        assert _safe_eval("1 if not (a > 0) else 0", {"a": -1.0}) == 1.0
+
+    def test_chained_comparison(self):
+        _safe_eval = _import_safe_eval()
+        assert _safe_eval("1 if 0 < a < 10 else 0", {"a": 5.0}) == 1.0
+        assert _safe_eval("1 if 0 < a < 10 else 0", {"a": 50.0}) == 0.0
+
+    def test_function_call_still_blocked_in_conditional(self):
+        _safe_eval = _import_safe_eval()
+        with pytest.raises(Exception):
+            _safe_eval("abs(a) if a < 0 else a", {"a": -3.0})
 
 
 # ── _eval_expr: computed_vars (CS divide) ────────────────────────────────────

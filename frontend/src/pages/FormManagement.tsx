@@ -1,15 +1,38 @@
 import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, Send, ChevronRight, AlertCircle, Paperclip, X, Image, Save, CheckCircle, MessageSquare, Loader, RefreshCw, Trash2 } from 'lucide-react'
+import { Plus, Send, ChevronRight, AlertCircle, Paperclip, X, Image, Save, CheckCircle, MessageSquare, Loader, RefreshCw, Trash2, Zap } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useForms } from '../context/FormsContext'
+import { FormChangePreview } from '../components/FormChangePreview'
 
 const BASE = (import.meta as any).env?.VITE_API_URL ?? ''
 
 function sessionHeaders(): Record<string, string> {
   const sid = localStorage.getItem('session_id')
   return sid ? { 'X-Session-ID': sid } : {}
+}
+
+// 대화 보관 — 양식별로 비스트리밍 메시지(역할·텍스트)를 localStorage에 저장한다.
+// 세션 만료·새로고침으로 화면이 날아가도 같은 양식으로 돌아오면 대화가 복원된다.
+const chatKey = (formId: string) => `form_chat_${formId}`
+
+function loadChat(formId: string): ChatMsg[] {
+  try {
+    const raw = localStorage.getItem(chatKey(formId))
+    if (!raw) return []
+    const arr = JSON.parse(raw)
+    return Array.isArray(arr)
+      ? arr.filter((m: any) => m && typeof m.text === 'string').map((m: any) => ({ role: m.role, text: m.text }))
+      : []
+  } catch { return [] }
+}
+
+// 세션 만료(401) 처리 — 대화는 이미 localStorage에 보관되므로, 토큰만 비우고 로그인으로 보낸다.
+// 재로그인 후 같은 양식으로 돌아오면 loadChat이 그대로 복원한다.
+function handleAuthExpiry() {
+  localStorage.removeItem('session_id')
+  if (window.location.pathname !== '/login') window.location.href = '/login'
 }
 
 function countTbd(md: string) {
@@ -53,10 +76,13 @@ export function FormManagement() {
   const [attachedImages, setAttachedImages] = useState<{ file: File; previewUrl: string }[]>([])
   const [isSending, setIsSending] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
+  const [isApplyingRules, setIsApplyingRules] = useState(false)
   const [isSaved, setIsSaved] = useState(false)
   const [savedAt, setSavedAt] = useState<Date | null>(null)
   const [isChatOpen, setIsChatOpen] = useState(false)
-  const [saveToast, setSaveToast] = useState<{ msg: string; ok: boolean } | null>(null)
+  const [saveToast, setSaveToast] = useState<{ msg: string; ok: boolean; warn?: boolean } | null>(null)
+  // 반영 점검 배너 — 동기화/규칙반영 후 엔진에 안 붙은(dev) · 현업 확인(owner) gap을 끝까지 노출 (무음 성공 방지)
+  const [wiringNotice, setWiringNotice] = useState<{ dev: string[]; owner: string[] } | null>(null)
   const [contentByForm, setContentByForm] = useState<Record<string, string>>({})
   const [hashByForm, setHashByForm] = useState<Record<string, string>>({})
   const [isLoadingContent, setIsLoadingContent] = useState(false)
@@ -98,10 +124,24 @@ export function FormManagement() {
   const displayMd = contentByForm[selectedId] ?? ''
   const tbdCount = countTbd(displayMd)
 
+  const persistedFormRef = useRef(selectedId)
+
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [chatHistory])
 
+  // 대화 보관 — chatHistory가 바뀔 때마다 localStorage에 저장. 양식이 막 바뀐 직후(아직
+  // chatHistory가 이전 양식 것)에는 건너뛴다. 양식 전환 effect가 새 대화로 교체하면 그때 저장된다.
   useEffect(() => {
-    setChatHistory([])
+    if (persistedFormRef.current !== selectedId) {
+      persistedFormRef.current = selectedId
+      return
+    }
+    const persistable = chatHistory.filter(m => !m.streaming).map(m => ({ role: m.role, text: m.text }))
+    if (persistable.length) localStorage.setItem(chatKey(selectedId), JSON.stringify(persistable))
+    else localStorage.removeItem(chatKey(selectedId))
+  }, [chatHistory, selectedId])
+
+  useEffect(() => {
+    setChatHistory(loadChat(selectedId))  // 보관된 대화 복원 (만료·새로고침에도 보존)
     setIsSaved(false)
     setSavedAt(null)
     if (contentByForm[selectedId]) return  // 이미 로드된 경우 재사용
@@ -166,6 +206,15 @@ export function FormManagement() {
         headers: { 'Content-Type': 'application/json', ...sessionHeaders() },
         body: JSON.stringify({ form_id: selectedId, messages: apiMessages }),
       })
+      if (res.status === 401) {
+        // 세션 만료 — 대화는 이미 보관됨. 안내만 남기고 잠시 후 로그인으로 (재로그인 후 복원)
+        setChatHistory(h => [
+          ...h.slice(0, -1),
+          { ...h[h.length - 1], text: '세션이 만료되어 다시 로그인이 필요합니다.\n작성하신 대화는 보관되며, 다시 로그인하면 이어서 사용할 수 있습니다.', streaming: false },
+        ])
+        setTimeout(handleAuthExpiry, 1800)
+        return
+      }
       if (!res.ok) throw new Error(`서버 오류 ${res.status}`)
 
       const reader = res.body!.getReader()
@@ -214,81 +263,195 @@ export function FormManagement() {
     }
   }
 
+  // 통합 저장: 1) 산문(문서) 저장 → 2) 실행 규칙(블록) 자동 반영.
+  // 사용자가 "설명 변경인지 계산 규칙 변경인지" 판단할 필요 없음 — 백엔드가 자동 분기한다.
+  // 산문을 먼저 저장(expected_hash 충돌 검증)하고, 그 다음 규칙을 반영해 hash 충돌을 피한다.
+  // 규칙 반영은 /apply-rules가 스스로 변경 여부를 판단(unchanged) → 실제 분기는 백엔드가 결정.
   async function handleSave() {
-    if (isSaving || isSending) return
+    if (isSaving || isApplyingRules || isSending) return
     setIsSaving(true)
     setIsSaved(false)
+
+    // 진행 상황을 보여줄 스트리밍 메시지(placeholder) — 단계가 바뀔 때마다 텍스트를 갱신하고,
+    // 마지막에 최종 요약으로 확정(streaming:false)한다. 항상 마지막 메시지를 갱신한다.
+    setChatHistory(h => [...h, { role: 'assistant', text: '📄 문서 저장 준비 중…', streaming: true }])
+    const setProgress = (text: string) =>
+      setChatHistory(h => h.map((m, i) =>
+        i === h.length - 1 && m.streaming ? { ...m, text } : m))
+    const finishProgress = (text: string) =>
+      setChatHistory(h => h.map((m, i) =>
+        i === h.length - 1 && m.streaming ? { ...m, text, streaming: false } : m))
+
+    // 경과 시간 타이머 — Claude 응답이 막판에 한꺼번에 와도(스트림 버퍼링) "멈춘 듯" 보이지 않게
+    // 매초 "··· N초"를 갱신한다. 단계 라벨(phaseText)은 onProgress로 바뀌고, 거기에 경과초를 덧붙인다.
+    const startedAt = Date.now()
+    let phaseText = '📄 문서 저장 준비 중…'
+    const render = () => setProgress(`${phaseText}  ·  ${Math.round((Date.now() - startedAt) / 1000)}초`)
+    const onProgress = (text: string) => { phaseText = text; render() }
+    const timer = window.setInterval(render, 1000)
+
     try {
-      const apiMessages = chatHistory
-        .filter(m => !m.streaming)
-        .map(m => ({ role: m.role, content: m.text }))
+      // ── 1단계: 산문(문서) 저장 ───────────────────────────────
+      const prose = await runProseSave(onProgress)
+      if (prose.conflict) { finishProgress(`⚠️ 저장 충돌: ${prose.detail ?? ''}`); return }
+      if (prose.error) { finishProgress('⚠️ 문서 저장 실패'); showToast('저장 실패', false); return }
 
-      const res = await fetch(`${BASE}/api/v3/form-manage/apply`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...sessionHeaders() },
-        body: JSON.stringify({
-          form_id: selectedId,
-          messages: apiMessages,
-          expected_hash: hashByForm[selectedId] ?? null,
-        }),
-      })
-      if (res.status === 409) {
-        const err = await res.json()
-        setChatHistory(h => [...h, { role: 'assistant', text: `⚠️ 저장 충돌: ${err.detail}` }])
-        // 최신 내용 다시 fetch해서 hash 갱신
-        const fresh = await fetch(`${BASE}/api/v3/forms/${selectedId}`, { headers: sessionHeaders() })
-        if (fresh.ok) {
-          const data = await fresh.json()
-          setContentByForm(prev => ({ ...prev, [selectedId]: data.content }))
-          setHashByForm(prev => ({ ...prev, [selectedId]: data.content_hash }))
-        }
-        return
-      }
-      if (!res.ok) throw new Error(`서버 오류 ${res.status}`)
+      // ── 2단계: 실행 규칙(블록) 자동 반영 ─────────────────────
+      setIsApplyingRules(true)
+      const rule = await runRuleApply(onProgress)
+      setIsApplyingRules(false)
 
-      const reader = res.body!.getReader()
-      const decoder = new TextDecoder()
-      let buf = ''
-      let accText = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += decoder.decode(value, { stream: true })
-        const lines = buf.split('\n')
-        buf = lines.pop() ?? ''
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          try {
-            const data = JSON.parse(line.slice(6))
-            if (data.type === 'text') {
-              accText += data.text
-              const snapshot = accText
-              setContentByForm(prev => ({ ...prev, [selectedId]: snapshot }))
-            } else if (data.type === 'done') {
-              const now = new Date()
-              setIsSaved(true)
-              setSavedAt(now)
-              if (data.content_hash) setHashByForm(prev => ({ ...prev, [selectedId]: data.content_hash }))
-              setHistoryByForm(prev => { const n = { ...prev }; delete n[selectedId]; return n })  // 히스토리 캐시 무효화
-              const timeStr = now.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
-              const autoSyncMsg = data.auto_sync ? ' 양식 규칙 자동 동기화가 백그라운드에서 진행됩니다.' : ''
-              const summaryMsg = (data.tbd_count > 0
-                ? `✅ ${timeStr} 저장 완료. TBD ${data.tbd_count}개가 아직 남아 있습니다.`
-                : `✅ ${timeStr} 저장 완료. TBD 항목 없이 모두 확정되었습니다.`) + autoSyncMsg
-              setChatHistory(h => [...h, { role: 'assistant', text: summaryMsg }])
-              showToast('저장 완료', true)
-            } else if (data.type === 'error') {
-              throw new Error(data.message)
-            }
-          } catch { /* ignore parse errors */ }
-        }
-      }
+      // ── 결과 합산: placeholder를 최종 요약으로 확정 + 토스트 1개 ──
+      const now = new Date()
+      const timeStr = now.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
+      setIsSaved(true)
+      setSavedAt(now)
+      const combined = [`✅ ${timeStr} 저장 완료`, prose.summary, rule.summary]
+        .filter(Boolean).join('\n\n')
+      finishProgress(combined)
+      if (rule.error) showToast('문서 저장됨 · 규칙 반영 실패', false)
+      else if (rule.gap) showToast('저장됨 · ⚠ 일부 미반영', false, true)
+      else showToast('저장 완료', true)
     } catch {
+      finishProgress('⚠️ 저장 중 오류가 발생했습니다.')
       showToast('저장 실패', false)
     } finally {
+      window.clearInterval(timer)
       setIsSaving(false)
+      setIsApplyingRules(false)
     }
+  }
+
+  // 산문(문서) 저장 — 스트리밍. 충돌/실패는 플래그로, 성공은 요약 문자열로 반환(채팅 메시지는 push하지 않음).
+  // onProgress로 진행 상황(작성 중인 글자 수)을 호출부의 placeholder에 흘려보낸다.
+  async function runProseSave(
+    onProgress: (text: string) => void,
+  ): Promise<{ conflict?: boolean; error?: boolean; summary?: string; detail?: string }> {
+    const apiMessages = chatHistory
+      .filter(m => !m.streaming)
+      .map(m => ({ role: m.role, content: m.text }))
+
+    onProgress('📄 1/2단계 · 문서 저장 중… (Claude가 양식 문서를 다시 작성합니다)')
+    const res = await fetch(`${BASE}/api/v3/form-manage/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...sessionHeaders() },
+      body: JSON.stringify({
+        form_id: selectedId,
+        messages: apiMessages,
+        expected_hash: hashByForm[selectedId] ?? null,
+      }),
+    })
+    if (res.status === 401) { handleAuthExpiry(); return { error: true } }  // 대화 보관됨 → 재로그인 후 복원
+    if (res.status === 409) {
+      const err = await res.json()
+      // 최신 내용 다시 fetch해서 hash 갱신
+      const fresh = await fetch(`${BASE}/api/v3/forms/${selectedId}`, { headers: sessionHeaders() })
+      if (fresh.ok) {
+        const data = await fresh.json()
+        setContentByForm(prev => ({ ...prev, [selectedId]: data.content }))
+        setHashByForm(prev => ({ ...prev, [selectedId]: data.content_hash }))
+      }
+      return { conflict: true, detail: err.detail }
+    }
+    if (!res.ok) return { error: true }
+
+    const reader = res.body!.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    let accText = ''
+    let lastShown = 0
+    let summary = '📄 문서 저장됨'
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const data = JSON.parse(line.slice(6))
+          if (data.type === 'text') {
+            accText += data.text
+            const snapshot = accText
+            setContentByForm(prev => ({ ...prev, [selectedId]: snapshot }))
+            // 진행 표시는 ~200자마다만 갱신(렌더 과다 방지)
+            if (accText.length - lastShown >= 200) {
+              lastShown = accText.length
+              onProgress(`📄 1/2단계 · 문서 작성 중… (${accText.length.toLocaleString()}자)`)
+            }
+          } else if (data.type === 'done') {
+            if (data.content_hash) setHashByForm(prev => ({ ...prev, [selectedId]: data.content_hash }))
+            setHistoryByForm(prev => { const n = { ...prev }; delete n[selectedId]; return n })  // 히스토리 캐시 무효화
+            summary = '📄 문서 저장됨'
+              + (data.tbd_count > 0 ? ` — TBD ${data.tbd_count}개 남음` : ' — TBD 없이 모두 확정')
+              + (data.auto_sync ? ' · 양식 규칙 자동 동기화 진행' : '')
+          } else if (data.type === 'error') {
+            return { error: true }
+          }
+        } catch { /* ignore parse errors */ }
+      }
+    }
+    return { summary }
+  }
+
+  // 실행 규칙(NET·교차검증·출력)을 [config] 블록에 직접 반영 (산문이 아니라 구조).
+  // 채팅 대화 → /apply-rules → Claude가 블록 갱신 → 스키마검증·build·와이어링.
+  // 변경 여부는 백엔드(Claude)가 판단(unchanged) — 규칙 변경이 없으면 조용히 넘어간다.
+  // 요약 문자열·gap 플래그를 반환하고, 채팅 메시지 push는 호출부(handleSave)가 합산해서 한다.
+  async function runRuleApply(
+    onProgress: (text: string) => void,
+  ): Promise<{ error?: boolean; summary?: string; gap?: boolean }> {
+    const apiMessages = chatHistory
+      .filter(m => !m.streaming)
+      .map(m => ({ role: m.role, content: m.text }))
+    onProgress('⚙️ 2/2단계 · 실행 규칙 분석 중… (계산 규칙 변경 여부 확인 + 엔진 연결 점검)')
+    const res = await fetch(`${BASE}/api/v3/form-manage/apply-rules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...sessionHeaders() },
+      body: JSON.stringify({ form_id: selectedId, messages: apiMessages }),
+    })
+    if (res.status === 401) { handleAuthExpiry(); return { error: true } }  // 대화 보관됨 → 재로그인 후 복원
+    if (!res.ok) {
+      // 에러 본문이 JSON이 아니면(HTML 500·프록시 502 등) 상태코드라도 보여준다
+      const err = await res.json().catch(() => ({ detail: `서버 오류 (HTTP ${res.status}) — 백엔드 로그 확인 필요` }))
+      return { error: true, summary: `⚠️ 규칙 반영 실패: ${err.detail}` }
+    }
+    const data = await res.json()           // { ok, form_id, wiring, note?, unchanged? }
+    const w = data.wiring ?? {}
+    const dev: string[] = w.dev ?? []        // 엔진 미반영 — 계산에 적용 안 됨(관리자/개발 필요)
+    const owner: string[] = w.owner ?? []    // 현업이 더 채워야 반영됨
+    let summary: string
+    if (data.unchanged) {
+      // 어휘 밖 요청 등으로 Claude가 블록을 바꾸지 않음 (규칙 변경 없음 → 산문만 저장된 경우)
+      summary = `⚙️ 실행 규칙 변경 없음${data.note ? `\n${data.note}` : ''}`
+    } else {
+      const parts: string[] = ['⚙️ 실행 규칙(블록) 저장됨.']
+      if (w.safe_fixed?.length) parts.push(`자동수정 ${w.safe_fixed.length}건`)
+      if (owner.length) parts.push(`현업 확인 ${owner.length}건`)
+      if (dev.length) parts.push(`개발 필요(T3) ${dev.length}건`)
+      summary = parts.join(' · ')
+      if (dev.length) {
+        // 블록은 저장됐지만 엔진이 이 어휘를 모름 → 실제 계산엔 반영 안 됨. 무음 성공으로 끝내지 않는다.
+        summary += `\n\n⛔ 단, 아래는 엔진에 반영되지 않았습니다(계산에 적용되지 않음) — 관리자(개발)에게 연락하세요:\n`
+          + dev.map((d: string) => `  • ${d}`).join('\n')
+      }
+      if (owner.length) {
+        summary += `\n\n👤 현업이 확인/보완해야 반영됩니다:\n` + owner.map((o: string) => `  • ${o}`).join('\n')
+      }
+      if (data.note) summary += `\n${data.note}`
+    }
+    // 동기화 경로와 공유하는 점검 배너 — gap이 있으면 토스트가 사라져도 끝까지 남긴다
+    setWiringNotice(!data.unchanged && (dev.length || owner.length) ? { dev, owner } : null)
+    // 블록·자동 섹션이 바뀌었으니 MD 새로고침
+    const fresh = await fetch(`${BASE}/api/v3/forms/${selectedId}`, { headers: sessionHeaders() })
+    if (fresh.ok) {
+      const fd = await fresh.json()
+      setContentByForm(prev => ({ ...prev, [selectedId]: fd.content }))
+      setHashByForm(prev => ({ ...prev, [selectedId]: fd.content_hash }))
+    }
+    return { summary, gap: !data.unchanged && dev.length > 0 }
   }
 
   async function handleSync() {
@@ -308,10 +471,20 @@ export function FormManagement() {
       const data = await res.json()
       setLastSyncedAt(new Date())
       setSyncChanges(data.changes ?? [])
-      showToast(
-        data.changes?.length > 0 ? `동기화 완료 (${data.changes.length}개 변경)` : '동기화 완료 (변경 없음)',
-        true,
-      )
+      // 동기화 후 와이어링 점검 결과를 끝까지 노출 — "동기화 완료"만 뜨고 실제론 엔진에 안 붙은 무음 갭 방지
+      const w = data.wiring ?? {}
+      const dev: string[] = w.dev ?? []
+      const owner: string[] = w.owner ?? []
+      const attention = dev.length > 0 || owner.length > 0
+      setWiringNotice(attention ? { dev, owner } : null)
+      if (attention) {
+        showToast('⚠ 동기화됨 — 일부 미반영(확인 필요)', false, true)
+      } else {
+        showToast(
+          data.changes?.length > 0 ? `동기화 완료 (${data.changes.length}개 변경)` : '동기화 완료 (변경 없음)',
+          true,
+        )
+      }
     } catch {
       showToast('동기화 실패', false)
     } finally {
@@ -348,8 +521,8 @@ export function FormManagement() {
     }
   }
 
-  function showToast(msg: string, ok: boolean) {
-    setSaveToast({ msg, ok })
+  function showToast(msg: string, ok: boolean, warn = false) {
+    setSaveToast({ msg, ok, warn })
     setTimeout(() => setSaveToast(null), 3000)
   }
 
@@ -527,7 +700,7 @@ export function FormManagement() {
                   <button
                     onClick={handleSync}
                     disabled={isSyncing}
-                    title="form_XX.md → form_types.json 동기화"
+                    title="[config] 정본 블록 → form_types.json 빌드. 실행 규칙 변경은 '규칙 반영'으로 (동기화는 빌드만)"
                     style={{
                       display: 'flex', alignItems: 'center', gap: 5,
                       padding: '7px 13px', borderRadius: 8,
@@ -581,8 +754,45 @@ export function FormManagement() {
                 </button>
               </div>
 
+              {/* 반영 점검 배너 — dev(엔진 미반영) · owner(현업 확인) gap을 닫기 전까지 노출 */}
+              {wiringNotice && (wiringNotice.dev.length > 0 || wiringNotice.owner.length > 0) && (
+                <div style={{
+                  margin: '12px 32px 0', padding: '12px 16px', borderRadius: 8,
+                  border: '1px solid #f5c97a', background: '#fff8ec',
+                  display: 'flex', flexDirection: 'column', gap: 8,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: '#b45309' }}>⚠️ 반영 점검</span>
+                    <button
+                      onClick={() => setWiringNotice(null)}
+                      style={{
+                        marginLeft: 'auto', border: 'none', background: 'transparent',
+                        color: 'var(--text-3)', fontSize: 12, cursor: 'pointer',
+                      }}
+                    >닫기</button>
+                  </div>
+                  {wiringNotice.dev.length > 0 && (
+                    <div style={{ fontSize: 12, color: '#7c2d12' }}>
+                      <div style={{ fontWeight: 600 }}>⛔ 엔진에 반영되지 않음 — 계산에 적용되지 않습니다. 관리자(개발)에게 연락하세요:</div>
+                      <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+                        {wiringNotice.dev.map((d, i) => <li key={i}>{d}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                  {wiringNotice.owner.length > 0 && (
+                    <div style={{ fontSize: 12, color: '#92400e' }}>
+                      <div style={{ fontWeight: 600 }}>👤 현업이 확인/보완해야 반영됩니다:</div>
+                      <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+                        {wiringNotice.owner.map((o, i) => <li key={i}>{o}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* MD 렌더링 */}
               <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px', background: 'var(--bg)' }}>
+                <FormChangePreview formId={selectedId} />
                 {isLoadingContent ? (
                   <div style={{
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -794,20 +1004,21 @@ export function FormManagement() {
               }}>
                 <button
                   onClick={handleSave}
-                  disabled={isSaving || isSending || isSaved}
+                  disabled={isSaving || isApplyingRules || isSending || isSaved}
+                  title="문서(산문) 저장 + 실행 규칙(NET 수식·교차검증·출력) 반영을 한 번에. 설명 변경인지 계산 규칙 변경인지 판단할 필요 없이, 백엔드가 알아서 분기합니다."
                   style={{
                     display: 'flex', alignItems: 'center', gap: 5,
                     padding: '6px 14px', borderRadius: 7, border: 'none',
-                    background: isSaving ? '#ede9e1' : isSaved ? '#d1fae5' : 'var(--primary)',
-                    color: isSaving ? 'var(--text-3)' : isSaved ? '#065f46' : '#fff',
+                    background: isSaving || isApplyingRules ? '#ede9e1' : isSaved ? '#d1fae5' : 'var(--primary)',
+                    color: isSaving || isApplyingRules ? 'var(--text-3)' : isSaved ? '#065f46' : '#fff',
                     fontSize: 12, fontWeight: 600,
-                    cursor: isSaving || isSending || isSaved ? 'default' : 'pointer',
-                    boxShadow: isSaving || isSaved ? 'none' : '0 2px 8px rgba(10,110,110,0.25)',
+                    cursor: isSaving || isApplyingRules || isSending || isSaved ? 'default' : 'pointer',
+                    boxShadow: isSaving || isApplyingRules || isSaved ? 'none' : '0 2px 8px rgba(10,110,110,0.25)',
                     transition: 'background 0.2s, color 0.2s',
                   }}
                 >
-                  {isSaved ? <CheckCircle size={12} /> : <Save size={12} />}
-                  {isSaving ? '저장 중...' : isSaved ? '저장 완료' : '저장'}
+                  {isSaved ? <CheckCircle size={12} /> : isApplyingRules ? <Zap size={12} /> : <Save size={12} />}
+                  {isApplyingRules ? '규칙 반영 중...' : isSaving ? '저장 중...' : isSaved ? '저장 완료' : '저장'}
                 </button>
                 {isSaved && savedAt && (
                   <span style={{ fontSize: 11, color: 'var(--text-3)' }}>
@@ -830,7 +1041,7 @@ export function FormManagement() {
                   초기화
                 </button>
                 {saveToast && (
-                  <span style={{ fontSize: 11, fontWeight: 600, color: saveToast.ok ? 'var(--primary)' : '#dc2626' }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: saveToast.warn ? '#b45309' : saveToast.ok ? 'var(--primary)' : '#dc2626' }}>
                     {saveToast.msg}
                   </span>
                 )}

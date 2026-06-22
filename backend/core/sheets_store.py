@@ -1,13 +1,18 @@
 """Google Sheets 기반 매핑 CSV 저장소."""
 import io
 import csv as _csv
+import logging
 import os
 import pickle
+import random
+import threading
 import time
 from pathlib import Path
 from typing import Optional
 
 from google.auth.transport.requests import AuthorizedSession, Request
+
+_log = logging.getLogger(__name__)
 
 _TOKEN_PATH = Path.home() / ".google-cli" / "token.pickle"
 _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -25,8 +30,26 @@ TAB_MAP: dict[str, str] = {
 
 _SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets"
 
+# 429/503 재시도 설정 — Sheets 분당 쿼터 초과 시 backoff (Retry-After 우선)
+_MAX_RETRIES = int(os.getenv("SHEETS_MAX_RETRIES", "4"))
+_RETRY_BASE_DELAY = float(os.getenv("SHEETS_RETRY_BASE_DELAY", "1.0"))
+_RETRY_MAX_DELAY = float(os.getenv("SHEETS_RETRY_MAX_DELAY", "30.0"))
+_RETRYABLE_STATUS = {429, 503}
+
 # 운영상 절대 비어 있으면 안 되는 마스터 탭 — 빈 결과 = 토큰/네트워크 장애로 간주
 MASTER_CSV_FILES = ("unit_price.csv", "retail_user.csv", "domae_retail_1.csv")
+
+
+def _rows_to_dicts(raw: list[list]) -> list[dict]:
+    """시트 원본 행(헤더 포함)을 list[dict]로 변환. 짧은 행은 빈 문자열로 패딩."""
+    if not raw:
+        return []
+    headers = raw[0]
+    out = []
+    for row in raw[1:]:
+        padded = list(row) + [""] * (len(headers) - len(row))
+        out.append(dict(zip(headers, padded)))
+    return out
 
 
 class SheetsUnavailableError(RuntimeError):
@@ -49,10 +72,12 @@ class SheetsStore:
         if ttl_seconds is None:
             ttl_seconds = float(os.getenv("SHEETS_CACHE_TTL", "300"))
         self._ttl = ttl_seconds
-        # tab → (cached_at_monotonic, rows)
-        self._cache: dict[str, tuple[float, list[dict]]] = {}
+        # tab → (cached_at_monotonic, raw_values)  raw_values: 시트 원본 행(헤더 포함) list[list[str]]
+        self._cache: dict[str, tuple[float, list[list]]] = {}
         # tab → (실패 시각(monotonic), 메시지) — fetch 실패를 조용히 삼키지 않고 노출
         self._fetch_errors: dict[str, tuple[float, str]] = {}
+        # upsert/append 직렬화 + 캐시 mutation 보호 (asyncio.to_thread로 병렬 진입 가능)
+        self._write_lock = threading.Lock()
         self._session = self._build_session()
 
     def _build_session(self) -> AuthorizedSession:
@@ -62,23 +87,47 @@ class SheetsStore:
             creds.refresh(Request())
         return AuthorizedSession(creds)
 
-    def _get(self, path: str, **params) -> dict:
+    def _request(self, method: str, path: str, *, params: dict | None = None,
+                 body: dict | None = None) -> dict:
+        """Sheets API 호출 + 429/503 backoff 재시도 (Retry-After 우선).
+
+        쿼터 초과(429)·일시 장애(503)는 exponential backoff로 재시도한다.
+        그 외 4xx/5xx는 즉시 raise_for_status로 던진다."""
         url = f"{_SHEETS_BASE}/{self._id}/{path}"
-        resp = self._session.get(url, params=params)
+        delay = _RETRY_BASE_DELAY
+        for attempt in range(_MAX_RETRIES + 1):
+            resp = self._session.request(method, url, params=params, json=body)
+            if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_RETRIES:
+                retry_after = resp.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        wait = float(retry_after)
+                    except ValueError:
+                        wait = delay
+                else:
+                    wait = delay
+                wait = min(wait, _RETRY_MAX_DELAY) + random.uniform(0, 0.5)
+                _log.warning(
+                    "Sheets %s %s → %d, %.1fs 후 재시도 (%d/%d)",
+                    method, path, resp.status_code, wait, attempt + 1, _MAX_RETRIES,
+                )
+                time.sleep(wait)
+                delay = min(delay * 2, _RETRY_MAX_DELAY)
+                continue
+            resp.raise_for_status()
+            return resp.json() if resp.content else {}
+        # 도달 불가 (루프 마지막에서 항상 raise/return) — 방어적
         resp.raise_for_status()
-        return resp.json()
+        return {}
+
+    def _get(self, path: str, **params) -> dict:
+        return self._request("GET", path, params=params)
 
     def _put(self, path: str, body: dict, **params) -> dict:
-        url = f"{_SHEETS_BASE}/{self._id}/{path}"
-        resp = self._session.put(url, json=body, params=params)
-        resp.raise_for_status()
-        return resp.json()
+        return self._request("PUT", path, params=params, body=body)
 
     def _post(self, path: str, body: dict, **params) -> dict:
-        url = f"{_SHEETS_BASE}/{self._id}/{path}"
-        resp = self._session.post(url, json=body, params=params)
-        resp.raise_for_status()
-        return resp.json()
+        return self._request("POST", path, params=params, body=body)
 
     def tab_for(self, csv_filename: str) -> Optional[str]:
         return TAB_MAP.get(csv_filename)
@@ -92,11 +141,8 @@ class SheetsStore:
         tab = self.tab_for(csv_filename)
         if tab is None:
             return []
-        entry = self._cache.get(tab)
-        now = time.monotonic()
-        if entry is None or (now - entry[0]) >= self._ttl:
-            self._cache[tab] = (now, self._fetch(tab))
-        rows = self._cache[tab][1]
+        raw = self._cached_raw(tab)
+        rows = _rows_to_dicts(raw)
         if required and not rows and tab in self._fetch_errors:
             _, msg = self._fetch_errors[tab]
             raise SheetsUnavailableError(f"Sheets 탭 '{tab}' 읽기 실패: {msg}")
@@ -121,24 +167,24 @@ class SheetsStore:
             return None
         return max(self._fetch_errors.values(), key=lambda v: v[0])
 
-    def _fetch(self, tab: str) -> list[dict]:
+    def _cached_raw(self, tab: str) -> list[list]:
+        """탭의 원본 행(헤더 포함)을 TTL 메모리 캐시로 반환. 만료 시에만 재조회."""
+        entry = self._cache.get(tab)
+        now = time.monotonic()
+        if entry is None or (now - entry[0]) >= self._ttl:
+            self._cache[tab] = (now, self._fetch_raw(tab))
+        return self._cache[tab][1]
+
+    def _fetch_raw(self, tab: str) -> list[list]:
+        """탭 원본 값(values) GET. 실패 시 _fetch_errors에 기록하고 빈 리스트 반환."""
         try:
             result = self._get("values/" + tab + "!A1:ZZ")
             self._fetch_errors.pop(tab, None)
         except Exception as e:
-            import logging
             self._fetch_errors[tab] = (time.monotonic(), f"{type(e).__name__}: {e}")
-            logging.getLogger(__name__).warning("Sheets 탭 '%s' 읽기 실패 — 빈 결과 반환: %s", tab, e)
+            _log.warning("Sheets 탭 '%s' 읽기 실패 — 빈 결과 반환: %s", tab, e)
             return []
-        raw = result.get("values", [])
-        if not raw:
-            return []
-        headers = raw[0]
-        rows = []
-        for row in raw[1:]:
-            padded = row + [""] * (len(headers) - len(row))
-            rows.append(dict(zip(headers, padded)))
-        return rows
+        return result.get("values", [])
 
     def to_csv_text(self, csv_filename: str) -> str:
         """Sheets 탭 데이터를 CSV 텍스트로 변환 (Claude 프롬프트 삽입용)."""
@@ -152,48 +198,76 @@ class SheetsStore:
         return buf.getvalue()
 
     def upsert_row(self, csv_filename: str, key_cols: list[int], values: list[str]) -> None:
-        """키 컬럼 기준 upsert: 존재하면 해당 행 업데이트, 없으면 추가."""
+        """키 컬럼 기준 upsert: 존재하면 해당 행 업데이트, 없으면 추가.
+
+        행 위치 탐색은 항목마다 시트를 다시 읽지 않고 TTL 메모리 캐시(`_cached_raw`)에서
+        수행한다 — 문서당 N개 매핑 확정 시 발생하던 'N회 전체-read'를 제거해
+        Sheets 분당 쿼터 초과(429)를 막는다. 쓰기 1회 후 캐시를 in-memory로 갱신해
+        같은 배치 내 후속 upsert가 재조회 없이 방금 쓴 행을 본다.
+        """
         tab = self.tab_for(csv_filename)
         if tab is None:
             return
-        result = self._get(f"values/{tab}!A1:ZZ")
-        raw = result.get("values", [])
+        values = list(values)
         key_values = [values[i] for i in key_cols]
-        found_sheet_row: int | None = None
-        if len(raw) > 1:
-            headers = raw[0]
-            for i, row in enumerate(raw[1:]):
-                padded = row + [""] * (len(headers) - len(row))
-                if [padded[k] for k in key_cols] == key_values:
-                    found_sheet_row = i + 2
-                    break
-        if found_sheet_row is not None:
-            self._put(
-                f"values/{tab}!A{found_sheet_row}",
-                body={"values": [values]},
-                valueInputOption="RAW",
-            )
-        else:
+        with self._write_lock:
+            raw = self._cached_raw(tab)
+            if not raw and tab in self._fetch_errors:
+                # 빈 캐시가 'fetch 실패' 때문이면 맹목 추가(중복 양산) 금지 — 명시적 실패
+                _, msg = self._fetch_errors[tab]
+                raise SheetsUnavailableError(
+                    f"Sheets 탭 '{tab}' 읽기 실패로 upsert 중단: {msg}"
+                )
+            found_sheet_row: int | None = None
+            existing_row: list | None = None
+            if len(raw) > 1:
+                headers = raw[0]
+                for i, row in enumerate(raw[1:]):
+                    padded = row + [""] * (len(headers) - len(row))
+                    if [padded[k] for k in key_cols] == key_values:
+                        found_sheet_row = i + 2
+                        existing_row = padded[: len(values)]
+                        break
+            new_raw = [list(r) for r in raw]
+            if found_sheet_row is not None:
+                # 값이 이미 동일하면 write 생략 — 동시 문서가 같은 신규 키를
+                # 각자 확정할 때 발생하는 중복 PUT을 제거(쓰기 쿼터 절약)
+                if existing_row == list(values):
+                    return
+                self._put(
+                    f"values/{tab}!A{found_sheet_row}",
+                    body={"values": [values]},
+                    valueInputOption="RAW",
+                )
+                new_raw[found_sheet_row - 1] = values
+            else:
+                self._post(
+                    f"values/{tab}!A1:append",
+                    body={"values": [values]},
+                    valueInputOption="RAW",
+                    insertDataOption="INSERT_ROWS",
+                )
+                new_raw.append(values)
+            # TTL 시각은 유지 — 외부(현업 직접 편집)는 만료 후 재조회로 반영
+            ts = self._cache[tab][0]
+            self._cache[tab] = (ts, new_raw)
+
+    def append_row(self, csv_filename: str, values: list[str]) -> None:
+        """캐시 탭에 행 1개 추가 후 메모리 캐시도 동일하게 갱신."""
+        tab = self.tab_for(csv_filename)
+        if tab is None:
+            return
+        values = list(values)
+        with self._write_lock:
             self._post(
                 f"values/{tab}!A1:append",
                 body={"values": [values]},
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
             )
-        self._cache.pop(tab, None)
-
-    def append_row(self, csv_filename: str, values: list[str]) -> None:
-        """캐시 탭에 행 1개 추가 후 메모리 캐시 무효화."""
-        tab = self.tab_for(csv_filename)
-        if tab is None:
-            return
-        self._post(
-            f"values/{tab}!A1:append",
-            body={"values": [values]},
-            valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
-        )
-        self._cache.pop(tab, None)
+            entry = self._cache.get(tab)
+            if entry is not None:
+                self._cache[tab] = (entry[0], [list(r) for r in entry[1]] + [values])
 
     def append_to_tab(self, tab_name: str, values: list[str]) -> None:
         """TAB_MAP 등록 없이 임의 탭에 행 추가 (results 탭 등 전용)."""
@@ -210,13 +284,15 @@ class SheetsStore:
         if tab is None:
             return
         values = [fieldnames] + [[row.get(f, "") for f in fieldnames] for row in rows]
-        self._post(f"values/{tab}!A1:ZZ:clear", body={})
-        self._put(
-            f"values/{tab}!A1",
-            body={"values": values},
-            valueInputOption="RAW",
-        )
-        self._cache.pop(tab, None)
+        with self._write_lock:
+            self._post(f"values/{tab}!A1:ZZ:clear", body={})
+            self._put(
+                f"values/{tab}!A1",
+                body={"values": values},
+                valueInputOption="RAW",
+            )
+            # 방금 쓴 내용을 캐시에 반영 (불필요한 즉시 재조회 방지)
+            self._cache[tab] = (time.monotonic(), [list(r) for r in values])
 
     def invalidate(self, csv_filename: str) -> None:
         tab = self.tab_for(csv_filename)

@@ -102,3 +102,60 @@ def test_overflow_warning():
     # 음수 定番만 그룹은 생성되지 않음
     base_only = [r for r in agg["groups"][0]["rows"] if list(r["units"].keys()) == ["定番条件"]]
     assert not base_only
+
+
+# ── 파라미터화: relationship(독립) · group_by ────────────────────────────────
+_CFG_INDEP = {"product_aggregate": {"relationship": "independent", "base_condition": "定番条件",
+                                    "qty_field": "数量", "amount_field": "金額"}}
+
+
+def test_relationship_independent_no_subtraction():
+    """independent — 차감 없이 각 조건이 제 수량·금액 그대로 한 행씩."""
+    agg = build_product_aggregate(_capture_items(), _CFG_INDEP)
+    g = agg["groups"][0]
+    qtys = sorted(r["qty"] for r in g["rows"])
+    # 定番 264+2352=2616 합쳐짐, 原価引き 204, 導入 2352 — 차감 없음
+    assert qtys == [204, 2352, 2616]
+    assert g["total_qty"] == 2616 + 204 + 2352  # 독립이므로 전부 합산
+
+
+def test_relationship_independent_preserves_amount():
+    """independent도 금액 보존(공통 불변식)."""
+    items = _capture_items()
+    orig = sum(i["columns"]["金額"] for i in items)
+    agg = build_product_aggregate(items, _CFG_INDEP)
+    assert abs(agg["groups"][0]["total_amount"] - orig) < 0.05
+
+
+def test_relationship_subset_is_default():
+    """relationship 미지정 = subset (기존 동작과 동일)."""
+    a = build_product_aggregate(_capture_items(), _CFG)
+    b = build_product_aggregate(_capture_items(), {"product_aggregate": {
+        "relationship": "subset", "base_condition": "定番条件",
+        "qty_field": "数量", "unit_field": "未収条件", "amount_field": "金額"}})
+    assert a["groups"][0]["total_qty"] == b["groups"][0]["total_qty"] == 2616
+
+
+def test_unknown_relationship_raises():
+    import pytest
+    with pytest.raises(ValueError, match="relationship"):
+        build_product_aggregate(_capture_items(), {"product_aggregate": {
+            "relationship": "made_up", "base_condition": "定番条件"}})
+
+
+def test_group_by_splits_groups():
+    """group_by에 jisho 빼면 다른 지점이 같은 그룹으로 안 묶이는지 — customer/product만으로 묶기."""
+    items = [
+        _item("定番条件", 100, 12.5, 1250),
+        {**_item("定番条件", 50, 12.5, 625), "jisho": "R営業西"},  # 다른 지점, 같은 제품/거래처
+    ]
+    # 기본(jisho 포함) → 2그룹
+    a = build_product_aggregate(items, _CFG)
+    assert len(a["groups"]) == 2
+    # group_by에서 jisho 제외 → 1그룹으로 병합
+    cfg = {"product_aggregate": {"group_by": ["customer", "product"],
+                                 "base_condition": "定番条件", "qty_field": "数量",
+                                 "unit_field": "未収条件", "amount_field": "金額"}}
+    b = build_product_aggregate(items, cfg)
+    assert len(b["groups"]) == 1
+    assert b["groups"][0]["total_qty"] == 150

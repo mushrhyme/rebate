@@ -14,10 +14,13 @@ import anthropic
 
 from ..core.config import get_settings
 from ..db.queries import accumulate_token_usage
+from ..tools.claude_retry import async_call_with_retry
 
 log = logging.getLogger(__name__)
 
 _XV_MODEL = "claude-haiku-4-5-20251001"
+# 교차검증 Claude 호출 per-attempt 타임아웃 (env override 가능)
+_XV_TIMEOUT = float(os.getenv("PHASE4_XV_TIMEOUT", "120"))
 
 _TAX_RULES_CACHE: tuple[float, dict] | None = None  # (mtime, rules)
 
@@ -281,13 +284,22 @@ async def _run_cross_validation(doc_id: str, phase4_data: dict, settings, run_id
     )
 
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-    message = await client.messages.create(
-        model=_XV_MODEL,
-        max_tokens=4096,
-        system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-        messages=[{"role": "user", "content": user_content}],
-        temperature=0,
-    )
+
+    async def _do_xv():
+        # per-attempt 타임아웃 — 재시도(429/5xx/connection) 시 매 시도에 _XV_TIMEOUT 적용.
+        # asyncio.TimeoutError는 비재시도 대상이라 '타임아웃=실패' 의미를 보존한다.
+        return await asyncio.wait_for(
+            client.messages.create(
+                model=_XV_MODEL,
+                max_tokens=4096,
+                system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": user_content}],
+                temperature=0,
+            ),
+            timeout=_XV_TIMEOUT,
+        )
+
+    message = await async_call_with_retry(_do_xv)
 
     # 토큰 사용량 기록
     usage = message.usage

@@ -35,16 +35,46 @@ from .metrics import (
 
 # ── 내부 유틸리티 ─────────────────────────────────────────────────────────────
 
+# 매칭 튜닝 파라미터는 config/matching_config.json 단일 출처에서 읽는다(현업 조정 영역).
+# 파일·키 누락 시 아래 코드 기본값으로 폴백 → 설정 없어도 동작 보존(무손실).
+_MATCHING_DEFAULTS = {
+    "legal_markers": ["株式会社", "有限会社", "合同会社", "(株)", "(有)", "(合)"],
+    "manufacturer_prefixes": ["農心ジャパン", "農心", "Nongshim", "NONGSHIM"],
+    "volume": {"boost": 0.15, "penalty": 0.20, "match_tolerance": 0.5},
+    "score": {"seq_weight": 0.6, "jaccard_weight": 0.4, "cutoff": 0.3},
+}
+
+
+def _load_matching_config() -> dict:
+    """config/matching_config.json을 읽어 기본값 위에 덮어쓴다(얕은 병합)."""
+    import json
+    cfg = {k: (dict(v) if isinstance(v, dict) else list(v))
+           for k, v in _MATCHING_DEFAULTS.items()}
+    try:
+        path = Path(__file__).resolve().parents[2] / "config" / "matching_config.json"
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            for k, dft in _MATCHING_DEFAULTS.items():
+                if k not in data:
+                    continue
+                if isinstance(dft, dict):
+                    cfg[k] = {**dft, **(data[k] or {})}
+                else:
+                    cfg[k] = data[k]
+    except Exception:
+        pass  # 손상·부재 시 기본값 유지(무손실)
+    return cfg
+
+
+_MATCHING_CFG = _load_matching_config()
+
 # NFKC 정규화 후의 법인격 표기 목록
 # （株）→(株)、㈱→(株) 등은 NFKC로 먼저 변환되므로 반각 형태만 열거
-_LEGAL_MARKERS = [
-    "株式会社", "有限会社", "合同会社",
-    "(株)", "(有)", "(合)",
-]
+_LEGAL_MARKERS = _MATCHING_CFG["legal_markers"]
 
 # 제품 OCR명에 붙는 제조사 prefix — 유사도 계산 전 쿼리 측에서만 제거
 # "農心ジャパン"을 "農心"보다 먼저 시도해야 "農心"만 제거하고 "ジャパン"이 남는 오류를 방지한다
-_MANUFACTURER_PREFIXES = ["農心ジャパン", "農心", "Nongshim", "NONGSHIM"]
+_MANUFACTURER_PREFIXES = _MATCHING_CFG["manufacturer_prefixes"]
 
 
 def _strip_manufacturer_prefix(name: str) -> str:
@@ -219,11 +249,18 @@ def _upsert_cache_row(
 
 def _upsert_dist_cache_row(
     path: Path, form_id: str, issuer_fingerprint: str,
-    retailer_code: str, dist_code: str, dist_name: str = "",
+    retailer_code: str, dist_code: str, dist_name: str = "", jisho: str = "",
 ) -> None:
-    """ocr_dist.csv 복합키(form_id, issuer_fingerprint, retailer_code) upsert."""
-    headers = ["form_id", "issuer_fingerprint", "retailer_code", "dist_code", "dist_name"]
-    new_row = [form_id, issuer_fingerprint, retailer_code, dist_code, dist_name]
+    """ocr_dist.csv 복합키(form_id, issuer_fingerprint, retailer_code, jisho) upsert.
+
+    jisho는 入出荷支店 등 그룹 식별 필드 값이다. 같은 소매처라도 jisho가 다르면
+    판매처가 갈리므로 캐시 키에 포함한다. jisho 미사용 양식은 ""로 동작(기존과 동일).
+
+    헤더·복합키 스키마는 dist_cache_key 단일 출처에서 가져온다(빌드·조회 경로와 동일)."""
+    from ..core.dist_cache_key import CACHE_HEADERS as headers, KEY_INDICES, row_from_mapping
+    keymap = {"form_id": form_id, "issuer_fingerprint": issuer_fingerprint,
+              "retailer_code": retailer_code, "jisho": jisho}
+    new_row = row_from_mapping(keymap, dist_code, dist_name)
     rows: list[list[str]] = []
     if path.exists() and path.stat().st_size > 0:
         try:
@@ -233,7 +270,7 @@ def _upsert_dist_cache_row(
             pass
     updated = False
     for i, row in enumerate(rows):
-        if len(row) >= 3 and row[0] == form_id and row[1] == issuer_fingerprint and row[2] == retailer_code:
+        if len(row) >= len(KEY_INDICES) and all(row[k] == new_row[k] for k in KEY_INDICES):
             rows[i] = new_row
             updated = True
             break
@@ -283,7 +320,7 @@ async def confirm_mapping(
     mapping_type별 저장 대상:
       "retailer" → mappings/ocr_retailer.csv  (키: ocr_name)
       "product"  → mappings/ocr_product.csv   (키: ocr_name)
-      "dist"     → mappings/ocr_dist.csv      (키: form_id + issuer_fingerprint + retailer_code)
+      "dist"     → mappings/ocr_dist.csv      (키: form_id + issuer_fingerprint + retailer_code + jisho)
 
     Args:
         mapping_type:   저장 대상 종류
@@ -293,7 +330,7 @@ async def confirm_mapping(
             retailer → {"retailer_name": str}  (선택)
             product  → {"product_name": str}   (선택)
             dist     → 필수: "form_id", "issuer_fingerprint", "retailer_code"
-                       선택: "dist_name"
+                       선택: "dist_name", "jisho" (그룹 식별 필드 값, 미지정 시 "")
         mappings_dir:   mappings/ 디렉토리 경로
 
     Returns:
@@ -342,19 +379,18 @@ async def confirm_mapping(
                 raise ValueError(
                     f"confirm_mapping(dist)에 필요한 context 키가 없음: {sorted(_missing)}"
                 )
-            row = [
-                context["form_id"], context["issuer_fingerprint"],
-                context["retailer_code"], confirmed_code, context.get("dist_name", ""),
-            ]
+            from ..core.dist_cache_key import KEY_INDICES, row_from_mapping
+            row = row_from_mapping(context, confirmed_code, context.get("dist_name", ""))
             if store:
-                await asyncio.to_thread(store.upsert_row, "ocr_dist.csv", [0, 1, 2], row)
+                await asyncio.to_thread(store.upsert_row, "ocr_dist.csv", KEY_INDICES, row)
             else:
                 cache_path = mappings_dir / "ocr_dist.csv"
                 async with _get_csv_lock(cache_path):
                     await asyncio.to_thread(
                         _upsert_dist_cache_row, cache_path,
                         context["form_id"], context["issuer_fingerprint"],
-                        context["retailer_code"], confirmed_code, context.get("dist_name", ""),
+                        context["retailer_code"], confirmed_code,
+                        context.get("dist_name", ""), context.get("jisho", ""),
                     )
         else:
             raise ValueError(f"알 수 없는 mapping_type: {mapping_type!r}")
@@ -555,17 +591,18 @@ def _tokenize(text: str) -> set[str]:
     return set(re.findall(r'[ぁ-ん]+|[ァ-ヶー]+|[一-龯々]+|[a-zA-Z]+|\d+', text))
 
 
-# 용량 보정 파라미터
-_VOL_BOOST = 0.15       # OCR 용량과 DB 용량이 일치할 때 가산
-_VOL_PENALTY = 0.20     # OCR 용량이 있는데 DB 용량이 다를 때 감산
+# 용량 보정 파라미터 (config/matching_config.json volume)
+_VOL_BOOST = _MATCHING_CFG["volume"]["boost"]       # OCR 용량과 DB 용량이 일치할 때 가산
+_VOL_PENALTY = _MATCHING_CFG["volume"]["penalty"]   # OCR 용량이 있는데 DB 용량이 다를 때 감산
 # 용량 일치 허용 오차(g). 제품용량은 정수라 사실상 정확 일치를 요구한다.
 # 과거 ±5% 비율 톨러런스(0.95)는 103↔105·113↔114처럼 인접하지만 다른 제품을
 # "같은 용량"으로 오판해 틀린 후보에 가산까지 줬다. 0.5g 미만 = 같은 정수로 좁힌다.
-_VOL_MATCH_TOLERANCE = 0.5
+_VOL_MATCH_TOLERANCE = _MATCHING_CFG["volume"]["match_tolerance"]
 
-# 점수 혼합 비율
-_SEQ_WEIGHT = 0.6   # SequenceMatcher 비중 (문자열 연속 일치)
-_JAC_WEIGHT = 0.4   # Jaccard 비중 (단어 집합 일치, 순서 무관)
+# 점수 혼합 비율 (config/matching_config.json score)
+_SEQ_WEIGHT = _MATCHING_CFG["score"]["seq_weight"]   # SequenceMatcher 비중 (문자열 연속 일치)
+_JAC_WEIGHT = _MATCHING_CFG["score"]["jaccard_weight"]   # Jaccard 비중 (단어 집합 일치, 순서 무관)
+_SCORE_CUTOFF = _MATCHING_CFG["score"]["cutoff"]   # 후보 채택 최소 점수
 
 
 def _search_product_candidates(
@@ -634,7 +671,7 @@ def _search_product_candidates(
                 score += _VOL_BOOST if vol_match else -_VOL_PENALTY
 
         # 용량 일치 후보는 컷오프 면제 — 이름이 달라도 Claude가 보게 한다
-        if score > 0.3 or vol_match is True:
+        if score > _SCORE_CUTOFF or vol_match is True:
             scored.append((vol_match, ProductCandidate(
                 code=code_val,
                 name=name_val.strip(),
@@ -720,7 +757,7 @@ def _search_retailer_candidates(
             if not norm_name:
                 continue
             score = difflib.SequenceMatcher(None, norm_query, norm_name).ratio()
-            if score > 0.3:
+            if score > _SCORE_CUTOFF:
                 scored.append(RetailerCandidate(
                     retailer_code=code_val,
                     retailer_name=name_val,

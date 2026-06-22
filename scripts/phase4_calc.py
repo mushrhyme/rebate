@@ -21,6 +21,8 @@ from typing import Optional
 BASE = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE))
 
+from scripts.aggregate_strategies import get_strategy  # noqa: E402  (BASE 경로 설정 후 import)
+
 
 def _get_sheets_store():
     """GOOGLE_SHEETS_MAPPINGS_ID 환경변수가 설정된 경우 SheetsStore 반환."""
@@ -50,6 +52,14 @@ with open(BASE / "config" / "tax_rules.json", encoding="utf-8") as _f:
     TAX_RULES: dict = json.load(_f)
 _RATE_8:  float = TAX_RULES["bracket_rates"]["8"]
 _RATE_10: float = TAX_RULES["bracket_rates"]["10"]
+# 세율 구간 임계값·반올림 정책도 tax_rules.json 단일 출처에서 (코드 매직 리터럴 제거)
+_BRACKET_THRESHOLD: int = TAX_RULES.get("bracket_threshold", 10)
+_TAX_ROUNDING: str = TAX_RULES.get("consumption_tax_rounding", "floor")
+_TAX_ROUND_FN = {
+    "floor": math.floor,
+    "ceil":  math.ceil,
+    "round": lambda x: int(round(x)),
+}.get(_TAX_ROUNDING, math.floor)
 
 # ── 헬퍼 ─────────────────────────────────────────────────────────────────────
 def to_f(v, default=None):
@@ -72,6 +82,9 @@ def _clean_cell(val) -> str:
     return re.sub(r'\s*(?:\|\s*)+$', '', str(val)).strip()
 
 # ── DSL 수식 평가기 ───────────────────────────────────────────────────────────
+# 결정적 인터프리터. eval() 미사용. 함수 호출·속성 접근은 영구 금지(임의 코드 실행 차단).
+# 산술에 더해 비교·논리·조건식(삼항)을 화이트리스트로 지원한다 → 결정적 "조건 분기" DSL.
+# 세 dict/set은 게이트(verify_form_wiring)가 "엔진 지원 연산"을 판정하는 단일 출처이기도 하다.
 _SAFE_OPS = {
     ast.Add:  operator.add,
     ast.Sub:  operator.sub,
@@ -79,11 +92,26 @@ _SAFE_OPS = {
     ast.Div:  operator.truediv,
     ast.USub: operator.neg,
 }
+_SAFE_CMP = {
+    ast.Lt:    operator.lt,
+    ast.LtE:   operator.le,
+    ast.Gt:    operator.gt,
+    ast.GtE:   operator.ge,
+    ast.Eq:    operator.eq,
+    ast.NotEq: operator.ne,
+}
+_SAFE_BOOLOPS = {ast.And, ast.Or}   # node.op 타입 (UnaryOp Not는 별도 처리)
 
 def _safe_eval(expr: str, ctx: dict, *, _form_id: str = "", _label: str = "") -> float:
-    """산술 표현식만 허용하는 안전한 평가기. eval() 미사용.
-    허용: 숫자 리터럴, ctx 변수명, +  -  *  /  ()
-    금지: 함수 호출, 속성 접근, 비교 연산, 그 외 모든 것.
+    """결정적 표현식 평가기. eval() 미사용.
+    허용: 숫자 리터럴, ctx 변수명, +  -  *  /  (),
+          비교(<  <=  >  >=  ==  !=), 논리(and  or  not),
+          조건식(A if 조건 else B).
+    금지: 함수 호출, 속성 접근, 그 외 모든 노드 — 임의 코드 실행 영구 차단.
+
+    조건식은 '택한 가지만' 평가한다 → 미택 가지의 0나누기 등은 일어나지 않으므로
+    `(a / b) if b != 0 else 0` 같은 가드를 안전하게 쓸 수 있다.
+    반환은 항상 float (비교/논리 결과 True/False는 1.0/0.0으로 코어션).
 
     _form_id, _label: 오류 메시지에 포함할 컨텍스트 정보.
     """
@@ -96,9 +124,42 @@ def _safe_eval(expr: str, ctx: dict, *, _form_id: str = "", _label: str = "") ->
             f"DSL 수식 구문 오류 [{_ctx_str}]: expr={expr!r} → {e}"
         ) from e
 
+    def _truth(node) -> bool:
+        return bool(_eval(node))
+
     def _eval(node):
         if isinstance(node, ast.Expression):
             return _eval(node.body)
+        # 조건식 A if 조건 else B — 택한 가지만 평가(지연)
+        if isinstance(node, ast.IfExp):
+            return _eval(node.body) if _truth(node.test) else _eval(node.orelse)
+        # 논리 and / or — 단축평가(미평가 가지의 0나누기 회피)
+        if isinstance(node, ast.BoolOp):
+            if isinstance(node.op, ast.And):
+                return all(_truth(v) for v in node.values)
+            if isinstance(node.op, ast.Or):
+                return any(_truth(v) for v in node.values)
+            raise ValueError(
+                f"허용되지 않은 논리 연산자 [{_ctx_str}]: "
+                f"expr={expr!r}, 연산자={type(node.op).__name__}"
+            )
+        # 비교 (체이닝 a < b <= c 지원)
+        if isinstance(node, ast.Compare):
+            left = _eval(node.left)
+            ok = True
+            for op_node, comparator in zip(node.ops, node.comparators):
+                fn = _SAFE_CMP.get(type(op_node))
+                if fn is None:
+                    raise ValueError(
+                        f"허용되지 않은 비교 연산자 [{_ctx_str}]: "
+                        f"expr={expr!r}, 연산자={type(op_node).__name__}"
+                    )
+                right = _eval(comparator)
+                if not fn(left, right):
+                    ok = False
+                    break
+                left = right
+            return ok
         if isinstance(node, ast.Constant):
             if not isinstance(node.value, (int, float)):
                 raise ValueError(
@@ -131,6 +192,8 @@ def _safe_eval(expr: str, ctx: dict, *, _form_id: str = "", _label: str = "") ->
                 )
             return op(left, right)
         if isinstance(node, ast.UnaryOp):
+            if isinstance(node.op, ast.Not):
+                return not _truth(node.operand)
             op = _SAFE_OPS.get(type(node.op))
             if op is None:
                 raise ValueError(
@@ -141,10 +204,10 @@ def _safe_eval(expr: str, ctx: dict, *, _form_id: str = "", _label: str = "") ->
         raise ValueError(
             f"허용되지 않은 AST 노드 [{_ctx_str}]: "
             f"expr={expr!r}, 노드={type(node).__name__} "
-            f"(함수 호출·속성 접근·비교 연산 등은 DSL에서 지원하지 않음)"
+            f"(함수 호출·속성 접근 등은 DSL에서 지원하지 않음)"
         )
 
-    return _eval(tree)
+    return float(_eval(tree))
 
 
 def _eval_expr(
@@ -252,7 +315,7 @@ def calc_net(form_id, cols, shikiri, teiban_joken=0.0):
     if formula == "subtract_conditions":
         c1 = to_f(cols.get(net_cfg["c1"],  0), 0)
         c2 = to_f(cols.get(net_cfg.get("c2") or "", 0), 0)
-        if net_cfg.get("cs_divide_by_case_qty") and cols.get("数量単位") == "CS":
+        if net_cfg.get("cs_divide_by_case_qty") and cols.get("数量単位") == cfg.get("case_unit", "CS"):
             case_qty = to_f(cols.get("ケース入数", 0), 0)
             if case_qty > 0:
                 return shikiri - (c1 + c2) / case_qty
@@ -380,7 +443,7 @@ def print_summary_rate_then_customer(rows_out, summary_totals, cover_totals, cov
             merged_svkey[norm] = _find_summary_val(ckey, summary_totals)
         merged_sums[norm]  += r["_kin_gaku"]
         _rm = re.search(r"(\d+)", r.get("_zei_rate") or "")
-        if _rm and int(_rm.group(1)) >= 10:
+        if _rm and int(_rm.group(1)) >= _BRACKET_THRESHOLD:
             merged_tax10[norm] += r["_kin_gaku"]
         else:
             merged_tax8[norm]  += r["_kin_gaku"]
@@ -389,8 +452,8 @@ def print_summary_rate_then_customer(rows_out, summary_totals, cover_totals, cov
     print(f"  {'得意先名':<44} {'Detail+税(税込)':>16} {'Summary(税込)':>14} 일치")
     print(f"  {'─'*86}")
     for norm in merged_order:
-        t8  = math.floor(merged_tax8[norm]  * _RATE_8)
-        t10 = math.floor(merged_tax10[norm] * _RATE_10)
+        t8  = _TAX_ROUND_FN(merged_tax8[norm]  * _RATE_8)
+        t10 = _TAX_ROUND_FN(merged_tax10[norm] * _RATE_10)
         ck_incl = merged_sums[norm] + t8 + t10
         sv = merged_svkey[norm]
         if sv is not None:
@@ -516,7 +579,7 @@ def calc_cross_validation(
                     merged_svkey[norm] = _find_summary_val(ckey, summary_totals)
                 merged_sums[norm] += r["_kin_gaku"]
                 _rm = re.search(r"(\d+)", r.get("_zei_rate") or "")
-                if _rm and int(_rm.group(1)) >= 10:
+                if _rm and int(_rm.group(1)) >= _BRACKET_THRESHOLD:
                     merged_tax10[norm] += r["_kin_gaku"]
                 else:
                     merged_tax8[norm]  += r["_kin_gaku"]
@@ -528,10 +591,41 @@ def calc_cross_validation(
                 label = rule["label"].replace("{key}", norm[:20])
                 xv.append((label, sv, total_ex_cust, abs(total_ex_cust - sv) < 2))
 
+        else:
+            # 어휘 밖 type은 조용히 건너뛰지 않는다 — 현업이 교차검증을 넣었는데
+            # 미구현 type이라 아무 일도 안 일어나는 무음 실패를 막는다. (스키마 enum이
+            # sync에서 1차 차단하지만, json 손편집·구버전 우회 시의 런타임 방어선.)
+            raise ValueError(
+                f"알 수 없는 cross_validation type: {rtype!r}. "
+                f"구현된 종류: cover_honbai_vs_detail, cover_breakdown_vs_detail, "
+                f"cover_taxex_vs_detail, cover_total_vs_summary, summary_vs_detail, "
+                f"per_customer_vs_summary. "
+                f"새 종류는 phase4_calc.calc_cross_validation에 분기 추가 + "
+                f"form_types.schema.json CrossValidationRule.enum 확장이 필요합니다(개발자 작업)."
+            )
+
     return xv
 
 
 # ── 제품별 집계: 이중조건 수량 분해 (form_types.json product_aggregate) ──────────
+# relationship(선언적 키) → 등록된 분해 전략. 새 relationship은 여기 + 전략 1회 등록으로 확장.
+_RELATIONSHIP_STRATEGY = {
+    "subset":      "subset_subtract",
+    "independent": "independent_list",
+}
+
+
+def _resolve_group_field(it: dict, field: str):
+    """group_by의 논리 필드명을 item 값으로 해석. 기존 폴백(OCR명·코드)을 보존한다."""
+    if field in ("product", "product_code"):
+        return it.get("product_code") or it.get("product_ocr") or ""
+    if field in ("customer", "customer_ocr"):
+        return it.get("customer_ocr") or it.get("customer", "")
+    if field == "jisho":
+        return it.get("jisho", "")
+    return it.get(field, "")
+
+
 def build_product_aggregate(items_in: list, form_cfg: dict) -> Optional[dict]:
     """이중·삼중조건을 제품 단위로 집계해 '실제 물량 그룹'으로 분해한다.
 
@@ -555,8 +649,18 @@ def build_product_aggregate(items_in: list, form_cfg: dict) -> Optional[dict]:
     qty_field = cfg.get("qty_field", "数量")
     unit_field = cfg.get("unit_field", "未収条件")
     amount_field = cfg.get("amount_field", "金額")
+    # 분해 전략 선택: 명시적 strategy가 1순위(개발자 escape hatch), 없으면 relationship로 결정.
+    #   relationship: subset(부분집합·차감, 기본) | independent(독립·나열). 둘 다 등록된 전략에 매핑.
+    strategy_name = cfg.get("strategy") or _RELATIONSHIP_STRATEGY.get(cfg.get("relationship", "subset"))
+    if strategy_name is None:
+        raise ValueError(
+            f"product_aggregate.relationship={cfg.get('relationship')!r} 미지원 — "
+            f"{sorted(_RELATIONSHIP_STRATEGY)} 중 하나여야 합니다."
+        )
+    # 그룹핑 키 차원 — group_by로 선언. 미지정이면 기존 (jisho, customer, product)와 동일.
+    group_by = cfg.get("group_by") or ["jisho", "customer", "product"]
 
-    # (jisho, customer_ocr, product_code) → condition_type → 누적
+    # 논리 필드명 → condition_type 누적 그룹
     groups: dict[tuple, dict] = {}
     order: list[tuple] = []
     for it in items_in:
@@ -565,7 +669,7 @@ def build_product_aggregate(items_in: list, form_cfg: dict) -> Optional[dict]:
         if not ctype:
             continue
         pcode = it.get("product_code") or it.get("product_ocr") or ""
-        key = (it.get("jisho", ""), it.get("customer_ocr") or it.get("customer", ""), pcode)
+        key = tuple(_resolve_group_field(it, f) for f in group_by)
         if key not in groups:
             groups[key] = {
                 "_meta": {
@@ -590,61 +694,41 @@ def build_product_aggregate(items_in: list, form_cfg: dict) -> Optional[dict]:
     condition_columns = ([base_type] if base_type in seen_cols else []) + \
                         [c for c in seen_cols if c != base_type]
 
+    # 그룹별 행 분해는 전략 함수에 위임 (레지스트리). 그룹핑·표시 스펙은 여기(공통)서.
+    strategy = get_strategy(strategy_name)
     out_groups = []
     warnings: list[str] = []
     for key in order:
         g = groups[key]
-        conds = g["conds"]
-        base = conds.get(base_type)
-        if not base or base["qty"] <= 0:
-            continue  # 定番 없는 그룹은 분해 대상 아님
-        base_qty = base["qty"]
-        base_amount = base["amount"]            # 定番 원본 총금액 (정확)
-        base_unit_disp = round(base_amount / base_qty, 2) if base_qty else 0.0
-        extras = [(ct, v) for ct, v in conds.items() if ct != base_type]
-        extra_qty_sum = sum(v["qty"] for _, v in extras)
-        base_only_qty = base_qty - extra_qty_sum
-
-        rows = []
-        for ct, v in extras:
-            q = v["qty"]
-            # 금액 = 그 물량의 定番분(定番 총금액을 수량 비율로 배분) + 추가조건 원본 금액
-            base_share = base_amount * (q / base_qty) if base_qty else 0.0
-            rows.append({
-                "qty": _num_out(q),
-                "units": {base_type: base_unit_disp, ct: round((v["amount"] / q) if q else 0.0, 2)},
-                "amount": round(base_share + v["amount"], 2),
-            })
-        if base_only_qty > 0.0001:
-            rows.append({
-                "qty": _num_out(base_only_qty),
-                "units": {base_type: base_unit_disp},
-                "amount": round(base_amount * (base_only_qty / base_qty), 2),
-            })
-        elif base_only_qty < -0.0001:
-            warnings.append(
-                f"{g['_meta']['product_name']}: 추가조건 합({extra_qty_sum})이 定番({base['qty']}) 초과 — 분해 음수"
-            )
-
+        rows, warning = strategy(g["conds"], base_type)
+        if warning:
+            warnings.append(f"{g['_meta']['product_name']}: {warning}")
+        if rows is None:
+            continue  # 기준조건 없는 그룹은 분해 대상 아님
         total_qty = sum(r["qty"] for r in rows)
         total_amount = round(sum(r["amount"] for r in rows), 2)
         out_groups.append({**g["_meta"], "rows": rows, "total_qty": total_qty, "total_amount": total_amount})
 
+    # 표시 컬럼 스펙(kind 기반) — 프론트가 순수 해석만 하도록 백엔드가 emit (P4 완전판).
+    # 새 표 형태는 프론트 코드가 아니라 이 스펙으로 제어된다.
+    display_columns = (
+        [{"key": "_mark", "label": "", "kind": "mark"},
+         {"key": "_qty", "label": "수량", "kind": "qty"}]
+        + [{"key": c, "label": c, "kind": "unit"} for c in condition_columns]
+        + [{"key": "_amount", "label": "금액", "kind": "amount"}]
+    )
+
     return {
         "base_condition": base_type,
         "condition_columns": condition_columns,
+        "display_columns": display_columns,
         "groups": out_groups,
         "warnings": warnings,
     }
 
 
-def _num_out(v: float):
-    """정수면 int, 아니면 소수 2자리."""
-    return int(v) if abs(v - round(v)) < 1e-9 else round(v, 2)
-
-
 # ── 메인 처리 로직 ────────────────────────────────────────────────────────────
-def run(doc_id, save=False, summary_only=False, base_dir=None):
+def run(doc_id, save=False, summary_only=False, base_dir=None, return_payload=False):
     """
     phase3_output.json을 읽어 NET 계산·교차검증·출력을 수행한다.
     base_dir: 테스트 시 임시 디렉토리 경로를 주입할 수 있음 (기본값: BASE)
@@ -766,8 +850,13 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
 
         sr            = retail_master.get(retailer_code, {})
         retailer_name = sr.get("소매처명", "").lstrip("■").strip()
-        # 1차: 소매처코드 → 판매처명, 2차: 판매처코드 → 판매처명, fallback: dist_code
-        dist_name = sr.get("판매처명", "").strip() or dist_name_by_code.get(dist_code, dist_code)
+        # 1차: 실제 dist_code → 판매처명 (remap·1:N로 소매처 기본값과 달라질 수 있으므로
+        # item의 확정 dist_code가 우선), 2차: 소매처 기본 판매처명, fallback: dist_code
+        dist_name = (
+            (dist_name_by_code.get(dist_code, "").strip() if dist_code else "")
+            or sr.get("판매처명", "").strip()
+            or dist_code
+        )
 
         tantousha_list = retail_tantou.get(retailer_code, [])
         tantousha = (tantousha_list[0] if len(tantousha_list) == 1
@@ -796,6 +885,7 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
         zei_rate = cols.get("消費税率", "")
 
         bara_source = form_cfg.get("bara_source", "by_unit")
+        case_unit = form_cfg.get("case_unit", "CS")   # ケース 단위 표기 — config 정본(기본 "CS")
         if bara_source == "null":
             keesu = booru = 0
             bara = None
@@ -805,8 +895,8 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
             keesu = booru = 0
             bara = int(to_f(cols.get(col_name, 0), 0))
             kosuu_kei = bara
-        else:  # "by_unit" — 数量単位=CS/個 분기 (form_01)
-            if unit_val == "CS":
+        else:  # "by_unit" — 数量単位=ケース단위/그외 분기 (form_01)
+            if unit_val == case_unit:
                 keesu, booru = int(qty), 0
                 bara = 0
                 _iru = keesu_iru or case_qty
@@ -1012,39 +1102,40 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
         "total_ex": int(detail_ex),
     }
 
+    # payload는 항상 조립한다(save=False여도 return_payload로 미리보기에 쓰임). 쓰기만 save로 가른다.
+    out_path = doc_dir / "phase4_output.json"
+    _internal = {"_kin_gaku", "_zei_rate", "_flag"}
+    def _export(r):
+        out = {}
+        for k, v in r.items():
+            if k in _internal:
+                continue
+            out[k[1:] if k.startswith("_") else k] = v
+        return out
+    payload = {
+        "doc_id":  doc_id,
+        "form_id": form_id,
+        "xv":      [{"label": l, "expected": e, "actual": a, "ok": ok, "xv_type": "simple"}
+                    for l, e, a, ok in xv],
+        "rows":    [_export(r) for r in rows_out],
+        "summary": summary,
+    }
+    if form_cfg.get("show_sections"):
+        payload["show_sections"] = form_cfg["show_sections"]
+    if form_cfg.get("aggregate_label"):
+        payload["aggregate_label"] = form_cfg["aggregate_label"]
+    # 제품별 집계 이중조건 분해 (form_types.json product_aggregate 있을 때만)
+    _prod_agg = build_product_aggregate(items_in, form_cfg)
+    if _prod_agg:
+        payload["product_aggregate"] = _prod_agg
+    if bundles_info:
+        payload["bundles"] = [
+            {"bundle_idx": b["bundle_idx"], "page_range": b["page_range"], "cover_page": b["cover_page"]}
+            for b in bundles_info
+        ]
+    if bundle_xv_list:
+        payload["bundle_xv"] = bundle_xv_list
     if save:
-        out_path = doc_dir / "phase4_output.json"
-        _internal = {"_kin_gaku", "_zei_rate", "_flag"}
-        def _export(r):
-            out = {}
-            for k, v in r.items():
-                if k in _internal:
-                    continue
-                out[k[1:] if k.startswith("_") else k] = v
-            return out
-        payload = {
-            "doc_id":  doc_id,
-            "form_id": form_id,
-            "xv":      [{"label": l, "expected": e, "actual": a, "ok": ok, "xv_type": "simple"}
-                        for l, e, a, ok in xv],
-            "rows":    [_export(r) for r in rows_out],
-            "summary": summary,
-        }
-        if form_cfg.get("show_sections"):
-            payload["show_sections"] = form_cfg["show_sections"]
-        if form_cfg.get("aggregate_label"):
-            payload["aggregate_label"] = form_cfg["aggregate_label"]
-        # 제품별 집계 이중조건 분해 (form_types.json product_aggregate 있을 때만)
-        _prod_agg = build_product_aggregate(items_in, form_cfg)
-        if _prod_agg:
-            payload["product_aggregate"] = _prod_agg
-        if bundles_info:
-            payload["bundles"] = [
-                {"bundle_idx": b["bundle_idx"], "page_range": b["page_range"], "cover_page": b["cover_page"]}
-                for b in bundles_info
-            ]
-        if bundle_xv_list:
-            payload["bundle_xv"] = bundle_xv_list
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         print(f"\n  → {out_path} 저장 완료")
@@ -1062,6 +1153,9 @@ def run(doc_id, save=False, summary_only=False, base_dir=None):
     _ph["duration_sec"] = _duration
     _timing_path.write_text(json.dumps(_td, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n  [Phase 4 실행 시간: {_duration}초]")
+
+    if return_payload:
+        return payload
 
     return rows_out, xv
 

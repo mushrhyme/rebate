@@ -19,11 +19,19 @@
         "row_anchor": { "type": "object" },
         "condition_display": { "type": "object" },
         "cover_totals": { "type": "object" },
-        "cross_validation": { "type": "array" },
+        "cross_validation": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/CrossValidationRule" }
+        },
         "show_sections": { "type": "array", "items": { "type": "string" } },
         "aggregate_label": { "type": "string" },
         "summary": { "type": "string" },
         "summary_cover_keys": { "type": "object" },
+        "product_aggregate": { "$ref": "#/definitions/ProductAggregate" },
+        "dist_overrides": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/DistOverride" }
+        },
         "qty_field": {
           "oneOf": [
             { "type": "string" },
@@ -49,7 +57,7 @@
         "expr": {
           "type": "string",
           "minLength": 1,
-          "description": "산술 표현식. 허용 변수: shikiri, teiban, vars/computed_vars에 정의된 alias"
+          "description": "결정적 표현식. 산술(+ - * / 괄호)에 더해 비교(< <= > >= == !=)·논리(and or not)·조건식(A if 조건 else B) 허용. 함수 호출·속성 접근은 금지. 허용 변수: shikiri, teiban, vars/computed_vars에 정의된 alias. 예: '(c1 + c2) if c1 + c2 > 0 else fallback'"
         },
         "vars": {
           "type": "object",
@@ -131,6 +139,78 @@
           "type": "array",
           "items": { "type": "string" }
         }
+      },
+      "additionalProperties": true
+    },
+    "ProductAggregate": {
+      "type": "object",
+      "description": "제품별 집계 분해 설정. relationship(선언적 키)로 분해 방식을 고르거나, strategy로 등록된 전략을 직접 지정한다(scripts/aggregate_strategies.py 레지스트리). 둘 다 미지정 시 subset.",
+      "properties": {
+        "relationship": {
+          "type": "string",
+          "enum": ["subset", "independent"],
+          "description": "조건 간 관계. subset=추가조건이 기준조건의 부분집합(차감 분해, 기본). independent=조건들이 독립(차감 없이 각 조건 나열). strategy가 명시되면 그쪽이 우선."
+        },
+        "group_by": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "description": "집계 묶음 기준 필드. 미지정 시 [\"jisho\",\"customer\",\"product\"]. 논리명(jisho·customer·product)은 OCR명·코드 폴백을 보존."
+        },
+        "strategy": {
+          "type": "string",
+          "minLength": 1,
+          "description": "분해 전략 이름(escape hatch). 등록된 전략만 허용(런타임 get_strategy가 검증). 현재: subset_subtract, independent_list. 새 전략은 aggregate_strategies.py에 @register로 추가."
+        },
+        "base_condition": { "type": "string", "minLength": 1 },
+        "qty_field": { "type": "string", "minLength": 1 },
+        "unit_field": { "type": "string" },
+        "amount_field": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "DistOverride": {
+      "type": "object",
+      "description": "판매처 1:N 모호 케이스를 결정적으로 고르는 조건부 규칙(S6). dist_overrides.py가 적용. when 술어 일치 시 액션으로 후보 선택. 모호하면 폴백(LLM).",
+      "required": ["when"],
+      "properties": {
+        "when": {
+          "type": "object",
+          "description": "item 필드 → 값의 정확 일치(AND). 예: {\"jisho\": \"CVS営業部\"}",
+          "minProperties": 1,
+          "additionalProperties": { "type": "string" }
+        },
+        "pick_candidate_name_contains": {
+          "type": "string",
+          "minLength": 1,
+          "description": "후보 dist_name에 이 문자열을 포함하는 유일 후보 선택"
+        },
+        "dist_code": {
+          "type": "string",
+          "minLength": 1,
+          "description": "후보 중 이 dist_code를 가진 유일 후보 선택"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CrossValidationRule": {
+      "type": "object",
+      "description": "교차검증 규칙. type은 phase4_calc.calc_cross_validation이 실제 구현한 어휘로 제한된다 — 어휘 밖 type을 쓰면 조용히 무시되지 않고 빌드(sync)에서 시끄럽게 막힌다. 새 type은 개발자가 calc_cross_validation에 분기 추가 + 여기 enum 확장(T3).",
+      "required": ["type", "label"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "cover_honbai_vs_detail",
+            "cover_breakdown_vs_detail",
+            "cover_taxex_vs_detail",
+            "cover_total_vs_summary",
+            "summary_vs_detail",
+            "per_customer_vs_summary"
+          ],
+          "description": "검증 종류. 구현된 6종만 허용."
+        },
+        "label": { "type": "string", "description": "결과 표에 표시될 이름. {key}는 그룹명으로 치환됨." }
       },
       "additionalProperties": true
     },

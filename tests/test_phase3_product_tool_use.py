@@ -643,6 +643,7 @@ class TestRetailerRegressionPrevent:
             per_retailer,
             form_id="form_01", issuer_fingerprint="fp1",
             cached_dist={}, retail_user_rows=[],
+            jisho_by_customer={"テスト店": [""]},
         )
         assert decisions[0].retailer_code == "R001"
 

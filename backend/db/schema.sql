@@ -36,8 +36,8 @@ CREATE TABLE IF NOT EXISTS v3_documents (
     form_id         VARCHAR(50),
     status          VARCHAR(50) NOT NULL DEFAULT 'ocr',
     -- status: ocr | analyzing | pending | done | error
-    error_type      VARCHAR(50),   -- unknown_form | technical
-    error_phase     VARCHAR(50),   -- Phase 1 | Phase 2 | Phase 3
+    error_type      VARCHAR(50),   -- unknown_form | ocr_failed | config_drift | sheets_unavailable | technical
+    error_phase     VARCHAR(50),   -- OCR | 양식 식별 | config | phase3 | phase4 | pipeline
     error_message   TEXT,
     -- {"phase1":{"input":N,"output":N,"model":"..."},"phase2":{...},"phase3":{...}}
     token_usage     JSONB NOT NULL DEFAULT '{}',

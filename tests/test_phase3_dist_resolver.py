@@ -228,14 +228,27 @@ class TestNoFileWriting:
 
 class TestBuildFromCache:
     def test_cache_hit(self):
-        """pre-loaded 캐시 딕셔너리에서 캐시 히트."""
-        cached = {("form_01", "fp1", "R001"): "D999"}
+        """pre-loaded 캐시 딕셔너리에서 캐시 히트. 키는 (form_id, fp, retailer_code, jisho) 4튜플."""
+        cached = {("form_01", "fp1", "R001", ""): "D999"}
         result = build_dist_resolution_from_cache(
             "R001", cached, [],
             form_id="form_01", issuer_fingerprint="fp1"
         )
         assert result.basis     == "cache"
         assert result.dist_code == "D999"
+
+    def test_cache_hit_jisho_specific(self):
+        """같은 소매처라도 jisho가 다르면 다른 판매처를 반환한다."""
+        cached = {
+            ("form_04", "fp1", "R001", "CVS営業部"): "D100",
+            ("form_04", "fp1", "R001", "R営業東北"): "D200",
+        }
+        r1 = build_dist_resolution_from_cache(
+            "R001", cached, [], form_id="form_04", issuer_fingerprint="fp1", jisho="CVS営業部")
+        r2 = build_dist_resolution_from_cache(
+            "R001", cached, [], form_id="form_04", issuer_fingerprint="fp1", jisho="R営業東北")
+        assert r1.dist_code == "D100"
+        assert r2.dist_code == "D200"
 
     def test_1to1_from_rows(self):
         """pre-loaded retail_user rows에서 1:1 자동 확정."""
@@ -262,6 +275,33 @@ class TestBuildFromCache:
         rows = [{"소매처코드": "R999", "소매처명": "別", "판매처코드": "D999", "판매처명": "別"}]
         result = build_dist_resolution_from_cache("R001", {}, rows)
         assert result.basis == "not_found"
+
+    def test_1ton_override_resolves_deterministically(self):
+        """1:N이라도 dist_overrides 규칙이 매칭되면 LLM 없이 결정적 확정 (basis=override)."""
+        rows = [
+            {"소매처코드": "R001", "소매처명": "テスト", "판매처코드": "D100", "판매처명": "広域リテール本部"},
+            {"소매처코드": "R001", "소매처명": "テスト", "판매처코드": "D200", "판매처명": "東北支店"},
+        ]
+        overrides = [{"when": {"jisho": "CVS営業部"}, "pick_candidate_name_contains": "広域リテール"}]
+        result = build_dist_resolution_from_cache(
+            "R001", {}, rows, jisho="CVS営業部", overrides=overrides,
+        )
+        assert result.basis              == "override"
+        assert result.dist_code          == "D100"
+        assert result.needs_confirmation is False
+
+    def test_1ton_override_no_match_falls_back_to_confirmation(self):
+        """override 미매칭(다른 jisho)이면 기존대로 needs_confirmation (안전 폴백)."""
+        rows = [
+            {"소매처코드": "R001", "소매처명": "テスト", "판매처코드": "D100", "판매처명": "広域リテール本部"},
+            {"소매처코드": "R001", "소매처명": "テスト", "판매처코드": "D200", "판매처명": "東北支店"},
+        ]
+        overrides = [{"when": {"jisho": "CVS営業部"}, "pick_candidate_name_contains": "広域リテール"}]
+        result = build_dist_resolution_from_cache(
+            "R001", {}, rows, jisho="R営業東北", overrides=overrides,
+        )
+        assert result.needs_confirmation is True
+        assert result.basis              == "needs_confirmation"
 
     def test_no_file_io(self):
         """build_dist_resolution_from_cache는 파일을 열지 않는다."""

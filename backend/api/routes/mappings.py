@@ -57,8 +57,8 @@ def _dist_context(doc_id: str, settings) -> tuple[str, str, dict[str, str]]:
     return form_id, issuer_fp, rc_map
 
 
-def _upsert_cache(doc_id: str, mapping_type: str, ocr_name: str, confirmed_code: str, confirmed_name: str = "") -> None:
-    """remap 시 캐시에 덮어쓰기 (잘못된 값 교정용)."""
+def _upsert_cache(doc_id: str, mapping_type: str, ocr_name: str, confirmed_code: str, confirmed_name: str = "", jisho: str = "") -> None:
+    """remap 시 캐시에 덮어쓰기 (잘못된 값 교정용). dist는 (소매처 × jisho) 키."""
     settings = get_settings()
     md = settings.mappings_dir
     dist_form_id = dist_issuer_fp = dist_rc = ""
@@ -79,7 +79,7 @@ def _upsert_cache(doc_id: str, mapping_type: str, ocr_name: str, confirmed_code:
         dist_form_id, dist_issuer_fp, rc_map = _dist_context(doc_id, settings)
         dist_rc = rc_map.get(ocr_name, "")
         if dist_rc:
-            _upsert_dist_cache_row(md / "ocr_dist.csv", dist_form_id, dist_issuer_fp, dist_rc, confirmed_code, confirmed_name)
+            _upsert_dist_cache_row(md / "ocr_dist.csv", dist_form_id, dist_issuer_fp, dist_rc, confirmed_code, confirmed_name, jisho)
 
     # Sheets write (primary cache for new documents)
     try:
@@ -93,7 +93,12 @@ def _upsert_cache(doc_id: str, mapping_type: str, ocr_name: str, confirmed_code:
         elif mapping_type == "product":
             store.upsert_row("ocr_product.csv", [0], [ocr_name, confirmed_code, confirmed_name])
         elif mapping_type == "dist" and dist_rc and dist_form_id and dist_issuer_fp:
-            store.upsert_row("ocr_dist.csv", [0, 1, 2], [dist_form_id, dist_issuer_fp, dist_rc, confirmed_code, confirmed_name])
+            # ocr_dist 키 = (form_id, issuer_fp, retailer_code, jisho).
+            # jisho가 지정되면 그 入出荷支店만, 비면 소매처 전체 교정(레거시 granularity).
+            store.upsert_row(
+                "ocr_dist.csv", [0, 1, 2, 3],
+                [dist_form_id, dist_issuer_fp, dist_rc, jisho, confirmed_code, confirmed_name],
+            )
     except Exception:
         # Sheets는 신규 문서의 1차 캐시 — 기록 실패가 묻히면 다음 분석부터 같은
         # 매핑을 다시 묻게 되므로 반드시 로그를 남긴다 (파이프라인은 계속 진행)
@@ -141,18 +146,22 @@ class RemapDistBody(BaseModel):
     ocr_name: str
     dist_code: str
     dist_name: str
+    jisho: str = ""   # 入出荷支店 — 같은 소매처라도 jisho별로 다른 판매처를 교정
 
 
 @router.post("/remap-dist")
 async def remap_dist(doc_id: str, body: RemapDistBody, user: dict = Depends(get_current_user)):
-    """결과 화면에서 판매처 매핑 수정 → 캐시 교정 + Phase 4 재실행."""
+    """결과 화면에서 판매처 매핑 수정 → 캐시 교정 + Phase 4 재실행.
+
+    jisho가 지정되면 해당 (소매처 × jisho) 항목만 교정한다. 비면 소매처 전체."""
     if await get_document_confirmed(doc_id):
         raise HTTPException(status_code=423, detail=_LOCKED_MSG)
     await upsert_remap_mapping(
         doc_id, "dist", body.ocr_name,
         body.dist_code, body.dist_name, user["user_id"],
+        jisho=body.jisho,
     )
-    _upsert_cache(doc_id, "dist", body.ocr_name, body.dist_code, body.dist_name)
+    _upsert_cache(doc_id, "dist", body.ocr_name, body.dist_code, body.dist_name, jisho=body.jisho)
     await resume_phase4_for_remap(doc_id)
     return {"ok": True, "status": "analyzing"}
 

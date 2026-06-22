@@ -123,6 +123,27 @@ class TestRunSingleDistMapping:
         matched = [c for c in _CANDIDATES if c["dist_code"] == res.dist_code]
         assert matched[0]["dist_name"] == "東日本販社"
 
+    async def test_prompt_includes_form_rule_and_jisho(self, tmp_path):
+        """프롬프트가 form_md(판매처 결정 규칙)와 jisho를 포함한다 (md-driven 핵심).
+
+        docs/phase3-dist-mapping-prompt.md 템플릿 로드 + 토큰 치환을 실제로 검증."""
+        client = _mock_client('{"decision": "confirmed", "dist_code": "D001", "reason": "ok"}')
+        form_md = "## 판매처 결정 규칙\njisho=R営業東北 → D001 확정"
+
+        await _run_single_dist_mapping(
+            ocr_name="テスト店", retailer_code="R001",
+            candidates=_CANDIDATES,
+            form_id="form_04", issuer_fingerprint="日本アクセス|03-x",
+            jisho="R営業東北", form_md=form_md,
+            client=client, model="claude-haiku-4-5-20251001",
+        )
+
+        sent = client.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert "판매처 결정 규칙" in sent          # form_md 주입됨
+        assert "R営業東北" in sent                  # jisho 주입됨
+        assert "D001" in sent and "D002" in sent    # 후보 목록 치환됨
+        assert "{{" not in sent                      # 미치환 토큰 없음
+
     def test_dist_name_supplemented_from_candidates(self):
         """dist_name이 없을 때 candidates에서 자동 보완 (동기 확인용)."""
         # _run_single_dist_mapping 내부에서 candidates 루프로 보완됨
@@ -263,7 +284,8 @@ class TestBuildDistDecisions:
             )
 
         assert len(resolved) == 2
-        assert resolved["テスト店A"].basis == "tool_use"
+        # resolved 키는 (ocr_name, jisho) — 이 pending은 jisho 없음 → ""
+        assert resolved[("テスト店A", "")].basis == "tool_use"
         assert len(remaining) == 0
 
     async def test_partial_pending_stays_in_remaining(self, tmp_path):
@@ -284,8 +306,8 @@ class TestBuildDistDecisions:
                 dist_client=MagicMock(), model="m",
             )
 
-        assert resolved["テスト店A"].basis == "tool_use"
-        assert resolved["テスト店B"].needs_confirmation is True
+        assert resolved[("テスト店A", "")].basis == "tool_use"
+        assert resolved[("テスト店B", "")].needs_confirmation is True
         assert len(remaining) == 1
         assert remaining[0]["ocrName"] == "テスト店B"
 
@@ -307,7 +329,7 @@ class TestBuildDistDecisions:
                 dist_client=MagicMock(), model="m",
             )
 
-        assert list(resolved.keys()) == ["テスト店A", "テスト店B"]
+        assert list(resolved.keys()) == [("テスト店A", ""), ("テスト店B", "")]
 
     async def test_token_acc_accumulated_from_all_calls(self, tmp_path):
         """모든 dist 호출 token이 _token_acc에 합산된다."""
@@ -590,6 +612,7 @@ class TestDistPendingRetailerCode:
             per_retailer,
             form_id="form_01", issuer_fingerprint="fp",
             cached_dist={}, retail_user_rows=retail_user_rows,
+            jisho_by_customer={"テスト店": [""]},
         )
 
         assert len(dist_pending) == 1

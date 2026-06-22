@@ -586,7 +586,7 @@ def print_summary(results: list[dict], token_stats: dict | None = None) -> None:
 
     print()
     print("=" * 70)
-    print("  결과 기록 양식: docs/rollout-phase3-tool-use.md 섹션 5 참조")
+    print("  Phase 3 Tool Use 운영 현황: CLAUDE.md 'Phase 3 Tool Use' 섹션 참조")
     print("=" * 70)
     print()
 

@@ -68,6 +68,8 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
   me: () => request<User>('/api/auth/me'),
+  // 슬라이딩 갱신 — 유효한 토큰으로 만료시각이 새로워진 토큰을 받는다 (AuthContext가 주기 호출)
+  refresh: () => request<{ session_id: string }>('/api/auth/refresh', { method: 'POST' }),
   logout: () => request('/api/auth/logout', { method: 'POST' }),
   changePassword: (current_password: string, new_password: string) =>
     request<{ ok: boolean }>('/api/auth/change-password', {
@@ -103,6 +105,11 @@ export const api = {
   listDocuments: () => request<Document[]>('/api/v3/documents'),
   getDocument:   (docId: string) => request<Document>(`/api/v3/documents/${docId}`),
   getResults:    (docId: string) => request<Phase4Result>(`/api/v3/documents/${docId}/results`),
+  previewForm: (formId: string, body: { doc_id: string }) =>
+    request<FormPreview>(`/api/v3/forms/${formId}/preview`, { method: 'POST', body: JSON.stringify(body) }),
+  commitForm: (formId: string, config: Record<string, unknown>) =>
+    request<{ ok: boolean; changes: string[]; message: string }>(
+      `/api/v3/forms/${formId}/commit`, { method: 'POST', body: JSON.stringify({ config }) }),
   retryDocument: (docId: string, force = false) =>
     request<{ doc_id: string; status: string }>(
       `/api/v3/documents/${docId}/retry${force ? '?force=true' : ''}`,
@@ -135,10 +142,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ ocr_name: ocrName, retailer_code: retailerCode, retailer_name: retailerName }),
     }),
-  remapDist: (docId: string, ocrName: string, distCode: string, distName: string) =>
+  remapDist: (docId: string, ocrName: string, distCode: string, distName: string, jisho = '') =>
     request<{ ok: boolean; status: string }>(`/api/v3/documents/${docId}/mappings/remap-dist`, {
       method: 'POST',
-      body: JSON.stringify({ ocr_name: ocrName, dist_code: distCode, dist_name: distName }),
+      body: JSON.stringify({ ocr_name: ocrName, dist_code: distCode, dist_name: distName, jisho }),
     }),
   remapProduct: (docId: string, ocrName: string, productCode: string, productName: string) =>
     request<{ ok: boolean; status: string }>(`/api/v3/documents/${docId}/mappings/remap-product`, {
@@ -446,9 +453,23 @@ export interface ProductAggregateGroup {
   total_amount: number
 }
 
+export interface AggColumn {
+  key: string                      // unit kind면 condition_type, 그 외 합성 키(_mark/_qty/_amount)
+  label: string
+  kind: 'mark' | 'qty' | 'unit' | 'amount'
+}
+
+export interface FormConfigChange { field: string; from: unknown; to: unknown }
+export interface FormPreview {
+  result: Phase4Result
+  config_changes: FormConfigChange[]
+  new_entry: Record<string, unknown>
+}
+
 export interface ProductAggregate {
   base_condition: string
   condition_columns: string[]      // 동적 조건 컬럼 (定番이 맨 앞)
+  display_columns?: AggColumn[]    // 백엔드 emit 표시 스펙 (P4 완전판) — 없으면 프론트가 condition_columns로 생성
   groups: ProductAggregateGroup[]
   warnings: string[]
 }

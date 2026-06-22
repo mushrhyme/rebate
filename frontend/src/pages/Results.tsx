@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 import { CheckCircle2, AlertTriangle, Download, Loader2, ArrowLeft, ArrowRight, Pencil, Search, X, ChevronDown } from 'lucide-react'
 import { PdfViewer } from '../components/PdfViewer'
+import { aggColumns, AggHeadCells, AggDecompCells } from '../components/aggTable'
 import { api, type Phase4Result, type Phase4Row, type RateSummary, type User, type ReviewRecord, type RetailerResult, type DistResult, type ProductResult, type BundleInfo, type BundleXv, type CrossValidation, type XvCustomer, type XvRow, type ProductAggregateGroup } from '../api/client'
 
 function fmt(v: number | null | undefined): string {
@@ -235,10 +236,11 @@ function RetailerSearchModal({
 }
 
 function DistSearchModal({
-  ocrName, retailerCode, onSelect, onClose,
+  ocrName, retailerCode, jisho, onSelect, onClose,
 }: {
   ocrName: string
   retailerCode: string
+  jisho?: string
   onSelect: (code: string, name: string) => void
   onClose: () => void
 }) {
@@ -302,7 +304,9 @@ function DistSearchModal({
         }}>
           <div>
             <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-1)' }}>판매처 매핑 수정</span>
-            <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2, fontFamily: 'var(--mono)' }}>{ocrName}</div>
+            <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2, fontFamily: 'var(--mono)' }}>
+              {ocrName}{jisho ? ` · 入出荷支店: ${jisho}` : ''}
+            </div>
           </div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: 4 }}>
             <X size={15} />
@@ -734,7 +738,7 @@ export function Results() {
   const [filterAssigneeId, setFilterAssigneeId] = useState<string | null>(null)
   const [detailTab, setDetailTab] = useState<'detail' | 'aggregate'>('detail')
   const [remapTarget, setRemapTarget] = useState<{ ocrName: string } | null>(null)
-  const [distRemapTarget, setDistRemapTarget] = useState<{ ocrName: string; retailerCode: string } | null>(null)
+  const [distRemapTarget, setDistRemapTarget] = useState<{ ocrName: string; retailerCode: string; jisho?: string } | null>(null)
   const [productRemapTarget, setProductRemapTarget] = useState<{ productOcr: string } | null>(null)
   const [remapping, setRemapping] = useState(false)
   const [selectedBundle, setSelectedBundle] = useState<number | null>(null)
@@ -826,7 +830,10 @@ export function Results() {
   // (jisho, customer_ocr, product_code) → 분해 그룹. 키맵으로 제품 행에 매칭.
   const prodAgg = result.product_aggregate ?? null
   const aggMap = new Map<string, ProductAggregateGroup>()
-  if (prodAgg) for (const g of prodAgg.groups) aggMap.set(`${g.jisho} ${g.customer} ${g.product_code}`, g)
+  if (prodAgg) for (const g of prodAgg.groups) aggMap.set(`${g.jisho} ${g.customer} ${g.product_code}`, g)
+  // 제품별 집계(분해) 표의 선언적 컬럼 스펙 — 백엔드 emit(display_columns) 우선,
+  // 없으면 condition_columns로 생성(폴백). 헤더·분해행 렌더러가 공유 (P4 완전판)
+  const aggCols = prodAgg ? (prodAgg.display_columns ?? aggColumns(prodAgg.condition_columns)) : []
 
   const activeXv: typeof result.xv =
     selectedBundle != null && result.bundle_xv
@@ -853,11 +860,11 @@ export function Results() {
     }
   }
 
-  const handleRemapDist = async (ocrName: string, distCode: string, distName: string) => {
+  const handleRemapDist = async (ocrName: string, distCode: string, distName: string, jisho = '') => {
     if (!docId) return
     setRemapping(true)
     try {
-      await api.remapDist(docId, ocrName, distCode, distName)
+      await api.remapDist(docId, ocrName, distCode, distName, jisho)
       const [res, revs] = await Promise.all([api.getResults(docId), api.getReviews(docId)])
       setResult(res)
       setReviews(revs)
@@ -1402,19 +1409,18 @@ export function Results() {
                           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
                             <thead>
                               <tr style={{ color: 'var(--text-3)' }}>
-                                {(prodAgg
-                                  ? ['조건/제품', '수량', ...prodAgg.condition_columns, '금액']
-                                  : ['조건', '수량', '금액']
-                                ).map((h, i, arr) => (
-                                  <th key={h} style={{
-                                    padding: i === 0 ? '4px 4px' : '4px 8px',
-                                    fontWeight: 600, fontSize: 10,
-                                    textAlign: i === 0 ? 'left' : 'right',
-                                    letterSpacing: '0.04em',
-                                    borderBottom: '1px solid var(--border)',
-                                    whiteSpace: 'nowrap',
-                                  }}>{i === 0 ? '' : (i === arr.length - 1 ? '금액' : h)}</th>
-                                ))}
+                                {prodAgg
+                                  ? <AggHeadCells columns={aggCols} />
+                                  : (['조건', '수량', '금액'] as const).map((h, i) => (
+                                      <th key={h} style={{
+                                        padding: i === 0 ? '4px 4px' : '4px 8px',
+                                        fontWeight: 600, fontSize: 10,
+                                        textAlign: i === 0 ? 'left' : 'right',
+                                        letterSpacing: '0.04em',
+                                        borderBottom: '1px solid var(--border)',
+                                        whiteSpace: 'nowrap',
+                                      }}>{i === 0 ? '' : h}</th>
+                                    ))}
                               </tr>
                             </thead>
                             <tbody>
@@ -1443,14 +1449,7 @@ export function Results() {
                                   {prodAgg && agg
                                     ? agg.rows.map((r, ri) => (
                                         <tr key={ri}>
-                                          <td style={{ padding: '3px 4px 3px 12px', color: 'var(--text-3)', fontSize: 10 }}>·</td>
-                                          <td style={{ padding: '3px 8px', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text-2)' }}>{r.qty.toLocaleString()}</td>
-                                          {prodAgg.condition_columns.map(c => (
-                                            <td key={c} style={{ padding: '3px 8px', textAlign: 'right', fontFamily: 'var(--mono)', color: r.units[c] != null ? 'var(--text-2)' : 'var(--text-3)' }}>
-                                              {r.units[c] != null ? r.units[c].toLocaleString() : ''}
-                                            </td>
-                                          ))}
-                                          <td style={{ padding: '3px 0', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text-1)' }}>{r.amount.toLocaleString()}</td>
+                                          <AggDecompCells columns={aggCols} row={r} />
                                         </tr>
                                       ))
                                     : conditionGroups.map(({ conditionType, qty, amount, hasWarn: cWarn }) => (
@@ -1540,7 +1539,7 @@ export function Results() {
                               <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#fd7e14', flexShrink: 0 }} />
                               <span style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text-3)' }}>{distCode || '—'}</span>
                               <HoverTooltip text={dist} style={{ fontSize: 10, color: 'var(--text-3)' }} />
-                              <button onClick={e => { e.stopPropagation(); setDistRemapTarget({ ocrName, retailerCode }) }} title="판매처 수정" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0 1px', color: 'var(--text-3)', display: 'inline-flex', alignItems: 'center', flexShrink: 0 }}>
+                              <button onClick={e => { e.stopPropagation(); setDistRemapTarget({ ocrName, retailerCode, jisho: row.jisho || '' }) }} title="판매처 수정" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0 1px', color: 'var(--text-3)', display: 'inline-flex', alignItems: 'center', flexShrink: 0 }}>
                                 <Pencil size={9} />
                               </button>
                             </div>
@@ -1610,7 +1609,8 @@ export function Results() {
         <DistSearchModal
           ocrName={distRemapTarget.ocrName}
           retailerCode={distRemapTarget.retailerCode}
-          onSelect={(code, name) => handleRemapDist(distRemapTarget.ocrName, code, name)}
+          jisho={distRemapTarget.jisho}
+          onSelect={(code, name) => handleRemapDist(distRemapTarget.ocrName, code, name, distRemapTarget.jisho ?? '')}
           onClose={() => setDistRemapTarget(null)}
         />
       )}

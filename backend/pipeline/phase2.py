@@ -1,6 +1,8 @@
 """Phase 2 — page MD → items[] JSON (Claude API, streaming)."""
+import asyncio
 import json
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -10,9 +12,14 @@ logger = logging.getLogger(__name__)
 
 from ..core.config import get_settings
 from ..db.queries import accumulate_token_usage
+from ..tools.claude_retry import async_call_with_retry
 
 _SYSTEM_PROMPT_CACHE: tuple[float, str] | None = None  # (mtime, prompt)
 _MODEL = "claude-sonnet-4-6"
+# 스트리밍 전체 상한(초). 정상 장문서(10분+)는 통과시키되 무한 hang만 차단해
+# 동시처리 슬롯(semaphore)이 영구 점유되는 사고를 막는다.
+# 기본 30분 — 64k 토큰 풀출력 worst-case에도 여유. 운영 튜닝은 PHASE2_STREAM_TIMEOUT env로.
+_PHASE2_TIMEOUT = int(os.getenv("PHASE2_STREAM_TIMEOUT", "1800"))
 
 
 def _get_system_prompt() -> str:
@@ -108,22 +115,38 @@ async def run_phase2(
     if row_anchors:
         logger.info("[%s] Phase 2 row anchor %d개 포함 (%s)", doc_id, len(row_anchors), page_desc)
 
-    # 스트리밍 — 10분 초과 요청도 처리 가능 (Anthropic SDK 요구 사항)
-    token_count = 0
-    async with client.messages.stream(
-        model=_MODEL,
-        max_tokens=64000,
-        system=[
-            {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}},
-            {"type": "text", "text": f"## 양식 정의\n\n{form_md}", "cache_control": {"type": "ephemeral"}},
-        ],
-        messages=[{"role": "user", "content": anchor_section + combined_md + "\n\nJSON만 출력하세요. 설명, 주석, 마크다운 없이 순수 JSON만."}],
-    ) as stream:
-        async for chunk in stream.text_stream:
-            token_count += len(chunk)
-            if token_count % 20000 < len(chunk):
-                logger.info("[%s] Phase 2 스트리밍 중 (%s, ~%d자 수신)", doc_id, page_desc, token_count)
-        message = await stream.get_final_message()
+    # 스트리밍 — 10분 초과 요청도 처리 가능 (Anthropic SDK 요구 사항).
+    # 단, 전체를 _PHASE2_TIMEOUT 상한으로 감싸 무한 hang 시 슬롯 영구 점유를 막는다.
+    async def _consume_stream():
+        token_count = 0
+        async with client.messages.stream(
+            model=_MODEL,
+            max_tokens=64000,
+            system=[
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": f"## 양식 정의\n\n{form_md}", "cache_control": {"type": "ephemeral"}},
+            ],
+            messages=[{"role": "user", "content": anchor_section + combined_md + "\n\nJSON만 출력하세요. 설명, 주석, 마크다운 없이 순수 JSON만."}],
+        ) as stream:
+            async for chunk in stream.text_stream:
+                token_count += len(chunk)
+                if token_count % 20000 < len(chunk):
+                    logger.info("[%s] Phase 2 스트리밍 중 (%s, ~%d자 수신)", doc_id, page_desc, token_count)
+            return await stream.get_final_message()
+
+    async def _consume_with_timeout():
+        # per-attempt 타임아웃 — 재시도 시 매 시도가 _PHASE2_TIMEOUT 안에 끝나야 한다.
+        # 재시도(429/5xx/connection)는 스트림을 처음부터 새로 연다.
+        return await asyncio.wait_for(_consume_stream(), timeout=_PHASE2_TIMEOUT)
+
+    try:
+        # asyncio.TimeoutError는 비재시도 대상 → 기존 '타임아웃=실패' 동작 보존
+        message = await async_call_with_retry(_consume_with_timeout)
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(
+            f"[{doc_id}] Phase 2 스트리밍이 {_PHASE2_TIMEOUT}s 내 완료되지 않았습니다. "
+            "무한 대기 차단 — 문서 분량 또는 네트워크 상태를 확인하세요."
+        ) from exc
 
     logger.info("[%s] Phase 2 완료 (%s, out=%d토큰)", doc_id, page_desc, message.usage.output_tokens)
 

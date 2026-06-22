@@ -82,16 +82,16 @@ docs/의 스펙과 실제 구현을 대조한다.
 - 캐시 누적 로직(ocr_retailer.csv, ocr_product.csv, ocr_dist.csv 자동 업데이트)
 - Phase 4 교차검증 실패 시 처리
 
-#### 축 4: form 정의 동기화 갭
+#### 축 4: form 정의 동기화 갭 (Literate config 기준)
 
-`form_XX.md` 업무규칙과 `config/form_types.json`의 실제 값을 대조한다.
+정본은 `form_XX.md`의 `## [config]` 블록, `config/form_types.json`은 그 빌드 생성물이다([docs/literate-config-migration.md](../../../docs/literate-config-migration.md)). 블록↔json 드리프트는 빌드 가드(`build_form_types.py --check`, `tests/unit/test_literate_config_guard.py`)가 잡으므로, 진단의 초점은 **(a) 가드가 실제로 통과하는지, (b) 산문↔블록 일관성**으로 이동한다.
 
 확인 항목:
-- sync-form-config 스킬이 정의한 변환 규칙(2-A~2-H)대로 form_types.json이 채워져 있는가
-- form_XX.md에 명시된 필드값(cover totals 키명, detail_group_field, bara_source 컬럼명 등)이 form_types.json에 그대로 반영되어 있는가
-- form_XX.md가 수정되었으나 form_types.json에 반영되지 않은 항목이 있는가 (sync 누락)
-- sync-form-config 스킬이 커버하지 못하는 필드가 form_types.json에 수동으로 하드코딩된 채 방치된 항목이 있는가
-- form_XX.md 내 서로 다른 섹션 간 내용 모순 (예: NET 수식 섹션의 컬럼명이 추출 컬럼 섹션과 불일치)
+- `python scripts/build_form_types.py --check` 가 통과하는가 (블록 ↔ form_types.json 동치). 실패면 누군가 json을 손편집했거나 재빌드를 빠뜨림.
+- form_types.json에 등록된 양식이 모두 대응 form_XX.md에 `[config]` 블록을 갖는가 (없으면 빌드 누락 — 배포 유실 신호).
+- **산문 ↔ 블록 일관성**: form_XX.md 산문에 기술된 NET 수식·컬럼명·교차검증 규칙이 같은 파일의 `[config]` 블록 값과 모순되지 않는가 (블록이 정본이므로 모순 시 산문을 고치거나 블록을 갱신).
+- 블록이 없는 (미마이그레이션) 양식이 런타임 Claude 폴백 파싱에 의존하고 있는가 — 블록 작성으로 결정적 경로로 승격 권장.
+- form_XX.md 내 서로 다른 산문 섹션 간 내용 모순 (예: NET 수식 섹션의 컬럼명이 추출 컬럼 섹션과 불일치)
 
 #### 축 5: form 정의 가독성
 
